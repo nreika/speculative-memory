@@ -39,6 +39,7 @@ const prompts = promptConfig as GeminiPromptConfig;
 const MIN_SCENARIO_COUNT = 1;
 const MAX_SCENARIO_COUNT = 10;
 const DEFAULT_SCENARIO_COUNT = 3;
+const IMAGE_DATA_URL_PATTERN = /^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/;
 
 const joinLines = (lines: string[]): string => lines.join("\n").trim();
 const joinPromptSections = (...sections: Array<string | string[]>): string =>
@@ -111,6 +112,16 @@ const buildFutureImagePrompt = (predictionPrompt: string): string =>
     prompts.systemFixed.futureImageGeneration.hardRules
   );
 
+const extractInlineImageData = (imageDataUrl: string) => {
+  const match = imageDataUrl.match(IMAGE_DATA_URL_PATTERN);
+  if (!match) {
+    throw new Error("Unsupported image data URL.");
+  }
+
+  const [, mimeType, data] = match;
+  return { mimeType, data };
+};
+
 export interface ScenarioResult {
   prediction_prompt: string;
   scenario_description: string;
@@ -126,6 +137,7 @@ export const predictFutureScenarios = async (
   requestedScenarioCount = DEFAULT_SCENARIO_COUNT
 ): Promise<ScenarioResult[]> => {
   const ai = getAI();
+  const sourceImage = extractInlineImageData(base64Image);
   const scenarioCount = clampScenarioCount(requestedScenarioCount);
   const prompt = buildScenarioPredictionPrompt(target, scenarioCount);
   let latestScenarioCount = 0;
@@ -135,7 +147,7 @@ export const predictFutureScenarios = async (
       model: 'gemini-3-flash-preview',
       contents: {
         parts: [
-          { inlineData: { data: base64Image.split(',')[1], mimeType: 'image/jpeg' } },
+          { inlineData: sourceImage },
           { text: prompt }
         ]
       },
@@ -187,12 +199,13 @@ export const predictFutureScenarios = async (
  */
 export const generateFutureImage = async (originalBase64: string, predictionPrompt: string): Promise<string> => {
   const ai = getAI();
+  const sourceImage = extractInlineImageData(originalBase64);
   
   const response = await ai.models.generateContent({
     model: 'gemini-2.5-flash-image',
     contents: {
       parts: [
-        { inlineData: { data: originalBase64.split(',')[1], mimeType: 'image/jpeg' } },
+        { inlineData: sourceImage },
         { text: buildFutureImagePrompt(predictionPrompt) }
       ]
     },
@@ -210,3 +223,4 @@ export const generateFutureImage = async (originalBase64: string, predictionProm
   }
   throw new Error("No image generated");
 };
+

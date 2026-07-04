@@ -1,7 +1,7 @@
 
 import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Download } from 'lucide-react';
+import { Download, WandSparkles } from 'lucide-react';
 import CameraPreview from './components/CameraPreview';
 import { AppState, PredictionData, Target, PredictionItem, TouchDesignerBridgeStatus } from './types';
 import { predictFutureScenarios, generateFutureImage } from './services/geminiService';
@@ -260,6 +260,17 @@ const App: React.FC = () => {
     document.body.removeChild(link);
   }, [currentTimeline]);
 
+  const handleRegenerateFromCurrentImage = useCallback(() => {
+    if (!currentTimeline || appState === AppState.ANALYZING || appState === AppState.GENERATING) {
+      return;
+    }
+
+    void handleCapture(
+      currentTimeline.predictedImage,
+      lastPrediction?.requestedImageCount ?? DEFAULT_GENERATION_COUNT
+    );
+  }, [appState, currentTimeline, handleCapture, lastPrediction?.requestedImageCount]);
+
   const handleTouchDesignerBridgeToggle = useCallback(() => {
     if (!cameraStream) {
       setError('ブラウザカメラの準備が完了してから TouchDesigner ストリームを開始してください。');
@@ -339,20 +350,36 @@ const App: React.FC = () => {
               <div className="bg-white/5 border border-white/10 rounded-lg p-4 min-h-[120px] transition-all duration-500 hover:bg-white/[0.07]">
                 {lastPrediction ? (
                   <div className="space-y-3 animate-in fade-in slide-in-from-right-2">
-                    <div className="flex justify-between items-center">
+                    <div className="flex items-start justify-between gap-3">
                       <p className="text-[10px] font-orbitron text-fuchsia-400 tracking-tighter uppercase">Prediction_Data (T+{selectedTimelineIndex + 1})</p>
-                      <motion.button
-                        whileHover={{ scale: 1.1 }}
-                        whileTap={{ scale: 0.9 }}
-                        onClick={handleSaveImage}
-                        className="p-1.5 rounded-full bg-fuchsia-500/10 border border-fuchsia-500/30 text-fuchsia-400 hover:bg-fuchsia-500/20 transition-colors"
-                        title="Save Prediction Image"
-                      >
-                        <Download size={12} />
-                      </motion.button>
+                      <div className="flex items-center gap-2">
+                        <motion.button
+                          whileHover={{ scale: 1.03 }}
+                          whileTap={{ scale: 0.97 }}
+                          onClick={handleRegenerateFromCurrentImage}
+                          disabled={appState === AppState.ANALYZING || appState === AppState.GENERATING}
+                          className="inline-flex items-center gap-1 rounded-full border border-cyan-500/30 bg-cyan-500/10 px-2.5 py-1 text-[9px] font-orbitron tracking-[0.15em] text-cyan-300 transition-colors hover:bg-cyan-500/20 disabled:cursor-not-allowed disabled:opacity-50"
+                          title="Generate again from this image"
+                        >
+                          <WandSparkles size={12} />
+                          <span>FROM_THIS</span>
+                        </motion.button>
+                        <motion.button
+                          whileHover={{ scale: 1.1 }}
+                          whileTap={{ scale: 0.9 }}
+                          onClick={handleSaveImage}
+                          className="p-1.5 rounded-full bg-fuchsia-500/10 border border-fuchsia-500/30 text-fuchsia-400 hover:bg-fuchsia-500/20 transition-colors"
+                          title="Save Prediction Image"
+                        >
+                          <Download size={12} />
+                        </motion.button>
+                      </div>
                     </div>
                     <p className="text-sm text-slate-200 leading-relaxed font-medium">
                       {currentTimeline?.predictionText}
+                    </p>
+                    <p className="text-[10px] leading-relaxed text-slate-500">
+                      FROM_THIS で、選択中の生成画像を次の入力としてそのまま再生成できます。
                     </p>
                   </div>
                 ) : (
@@ -521,3 +548,4 @@ const App: React.FC = () => {
 };
 
 export default App;
+

@@ -16,7 +16,7 @@
   "userEditable": {
     "scenarioPrediction": {
       "sceneAnalysisIntro": "Analyze this camera frame.",
-      "defaultTargetContext": "Predict realistic changes for the most prominent elements in the scene over the next 5 minutes.",
+      "defaultTargetContext": "Predict realistic changes for the most prominent elements in the scene over the next 5 minutes, especially showing visible plant growth or change if plants are present, and natural increase or decrease of food or drink if they are present, to emphasize the passage of time.",
       "targetedTargetContextTemplate": "The user has specifically targeted an object at (x: {{TARGET_X}}, y: {{TARGET_Y}}).",
       "targetedTargetFocus": "Focus on the movement, state change, or likely outcome for this specific object over the next 5 minutes.",
       "predictionRequest": "Predict {{SCENARIO_COUNT}} DISTINCT, realistic, and logically sound outcomes that could occur exactly 5 minutes from now.",
@@ -24,7 +24,7 @@
       "descriptionLanguageRule": "Write scenario_description in Japanese."
     },
     "futureImageGeneration": {
-      "editInstructionTemplate": "Modify this scene realistically for a 5-minute jump: {{PREDICTION_PROMPT}}."
+      "editInstructionTemplate": "Modify this scene realistically for a 5-minute jump: {{PREDICTION_PROMPT}}. If plants are present, make them visibly grow, bloom, or change in a natural way that clearly emphasizes the passage of time. If food or drink is present, show a realistic increase or decrease in quantity or state, such as reverting an unfinished item to an unopened state or consuming it so it is gone."
     }
   },
   "systemFixed": {
