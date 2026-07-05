@@ -3,7 +3,7 @@ import React, { useRef, useEffect, useCallback, useState } from 'react';
 import { Target, PredictionData } from '../types';
 
 interface CameraPreviewProps {
-  onCapture: (base64: string, requestedImageCount?: number) => void;
+  onCapture: (base64: string, requestedImageCount?: number, promptOptions?: { variant?: string | null; params?: Record<string, number | string> }) => void;
   isProcessing: boolean;
   target: Target | null;
   onSetTarget: (target: Target | null) => void;
@@ -13,7 +13,7 @@ interface CameraPreviewProps {
   selectedTimelineIndex: number;
   showFuture: boolean;
   setShowFuture: (show: boolean) => void;
-  captureRequest?: { id: number; imageCount: number } | null;
+  captureRequest?: { id: number; imageCount: number; promptVariant?: string | null; promptParams?: Record<string, number | string> } | null;
   onCaptureRequestHandled?: (requestId: number) => void;
 }
 
@@ -101,7 +101,7 @@ const CameraPreview: React.FC<CameraPreviewProps> = ({
     onSetTarget({ x, y });
   };
 
-  const captureFrame = useCallback((requestedImageCount?: number) => {
+  const captureFrame = useCallback((requestedImageCount?: number, promptOptions?: { variant?: string | null; params?: Record<string, number | string> }) => {
     if (videoRef.current && canvasRef.current) {
       const video = videoRef.current;
       if (video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA || video.videoWidth === 0 || video.videoHeight === 0) {
@@ -114,7 +114,7 @@ const CameraPreview: React.FC<CameraPreviewProps> = ({
       const ctx = canvas.getContext('2d');
       if (ctx) {
         ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-        onCapture(canvas.toDataURL('image/jpeg', 0.8), requestedImageCount);
+        onCapture(canvas.toDataURL('image/jpeg', 0.8), requestedImageCount, promptOptions);
         return true;
       }
     }
@@ -131,7 +131,10 @@ const CameraPreview: React.FC<CameraPreviewProps> = ({
       return;
     }
 
-    if (captureFrame(captureRequest?.imageCount)) {
+    if (captureFrame(captureRequest?.imageCount, {
+      variant: captureRequest?.promptVariant ?? null,
+      params: captureRequest?.promptParams
+    })) {
       lastHandledCaptureRequestIdRef.current = captureRequestId;
       onCaptureRequestHandled?.(captureRequestId);
     }

@@ -1,4 +1,4 @@
-<div align="center">
+﻿<div align="center">
 <img width="1200" height="475" alt="GHBanner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
 </div>
 
@@ -94,23 +94,23 @@ The payload looks like this:
 {
   "type": "capture.saved",
   "captureId": "1776156364832",
-  "sceneKey": "sceneA",
+  "sceneKey": "gen_a",
   "sceneIndex": 0,
   "expectedImageCount": 3,
-  "label": "Timeline_A",
-  "filename": "timewarp_Timeline_A_1776156364832.png",
-  "absolutePath": "C:/.../captures/timewarp_Timeline_A_1776156364832.png",
-  "normalizedPath": "C:/.../captures/timewarp_Timeline_A_1776156364832.png",
-  "relativePath": "captures/timewarp_Timeline_A_1776156364832.png",
-  "url": "/captures/timewarp_Timeline_A_1776156364832.png",
-  "latestImagePath": "C:/.../captures/timewarp_Timeline_A_1776156364832.png",
-  "latestImageNormalizedPath": "C:/.../captures/timewarp_Timeline_A_1776156364832.png",
-  "latestImageUrl": "/captures/timewarp_Timeline_A_1776156364832.png",
-  "sourceImageFilename": "timewarp_original_1776156364832.jpg",
-  "sourceImageAbsolutePath": "C:/.../captures/timewarp_original_1776156364832.jpg",
-  "sourceImageNormalizedPath": "C:/.../captures/timewarp_original_1776156364832.jpg",
-  "sourceImageRelativePath": "captures/timewarp_original_1776156364832.jpg",
-  "sourceImageUrl": "/captures/timewarp_original_1776156364832.jpg",
+  "label": "Gen_a",
+  "filename": "Gen_a_1776156364832.png",
+  "absolutePath": "C:/.../captures/Gen_a_1776156364832.png",
+  "normalizedPath": "C:/.../captures/Gen_a_1776156364832.png",
+  "relativePath": "captures/Gen_a_1776156364832.png",
+  "url": "/captures/Gen_a_1776156364832.png",
+  "latestImagePath": "C:/.../captures/Gen_a_1776156364832.png",
+  "latestImageNormalizedPath": "C:/.../captures/Gen_a_1776156364832.png",
+  "latestImageUrl": "/captures/Gen_a_1776156364832.png",
+  "sourceImageFilename": "record_1776156364832.jpg",
+  "sourceImageAbsolutePath": "C:/.../captures/record_1776156364832.jpg",
+  "sourceImageNormalizedPath": "C:/.../captures/record_1776156364832.jpg",
+  "sourceImageRelativePath": "captures/record_1776156364832.jpg",
+  "sourceImageUrl": "/captures/record_1776156364832.jpg",
   "savedAt": "2026-04-14T08:42:31.000Z",
   "size": 123456
 }
@@ -119,3 +119,4 @@ The payload looks like this:
 TouchDesigner sample files are in [touchdesigner/README.md](./touchdesigner/README.md).
 
 TouchDesigner-triggered captures can now set `imageCount` from `1` to `10`. The browser app uses that value to decide how many future images to generate for the current capture batch.
+

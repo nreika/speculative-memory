@@ -1,4 +1,4 @@
-
+﻿
 import express from 'express';
 import { createServer as createViteServer } from 'vite';
 import path from 'path';
@@ -80,6 +80,8 @@ interface TouchDesignerControlCommand {
   id: number;
   type: TouchDesignerControlCommandType;
   imageCount: number;
+  promptVariant?: string | null;
+  promptParams?: Record<string, number | string>;
   createdAt: string;
 }
 
@@ -87,6 +89,8 @@ interface ParsedTouchDesignerControlMessage {
   sessionId: string;
   type: TouchDesignerControlCommandType;
   imageCount: number;
+  promptVariant?: string | null;
+  promptParams?: Record<string, number | string>;
 }
 
 interface TouchDesignerControlSession {
@@ -130,11 +134,11 @@ async function startServer() {
   const normalizeSceneKey = (value: unknown, fallbackLabel: unknown) => {
     const rawValue = String(value || '').trim();
     if (rawValue) {
-      return rawValue.replace(/[^a-zA-Z0-9_-]/g, '') || 'scene';
+      return rawValue.replace(/[^a-zA-Z0-9_-]/g, '').toLowerCase() || 'gen';
     }
 
-    const rawLabel = String(fallbackLabel || 'scene').replace(/\s+/g, '');
-    return rawLabel.replace(/[^a-zA-Z0-9_-]/g, '') || 'scene';
+    const rawLabel = String(fallbackLabel || 'gen').replace(/\s+/g, '');
+    return rawLabel.replace(/[^a-zA-Z0-9_-]/g, '').toLowerCase() || 'gen';
   };
   const normalizeSessionId = (value: unknown) => {
     const rawValue = String(value || '').trim();
@@ -205,7 +209,7 @@ async function startServer() {
     }
 
     const { buffer, extension } = decodeImageDataUrl(sourceImage);
-    const asset = buildSavedImageAsset(`timewarp_original_${captureId}.${extension}`, buffer);
+    const asset = buildSavedImageAsset(`record_${captureId}.${extension}`, buffer);
 
     if (!fs.existsSync(asset.absolutePath)) {
       fs.writeFileSync(asset.absolutePath, buffer);
@@ -296,13 +300,17 @@ async function startServer() {
   const enqueueTouchDesignerControlCommand = (
     sessionId: string,
     type: TouchDesignerControlCommandType,
-    imageCount: number
+    imageCount: number,
+    promptVariant?: string | null,
+    promptParams?: Record<string, number | string>
   ) => {
     const session = getTouchDesignerControlSession(sessionId) || createTouchDesignerControlSession(sessionId);
     const command: TouchDesignerControlCommand = {
       id: session.nextCommandId++,
       type,
       imageCount: normalizeImageCount(imageCount),
+      promptVariant: typeof promptVariant === 'string' ? promptVariant.trim() || null : null,
+      promptParams: promptParams && typeof promptParams === 'object' ? promptParams : undefined,
       createdAt: new Date().toISOString()
     };
 
@@ -313,12 +321,24 @@ async function startServer() {
     session.updatedAt = command.createdAt;
     return { session, command };
   };
-  const queueTouchDesignerCapture = (sessionId: string, source: string, imageCount = defaultImageCount) => {
+  const queueTouchDesignerCapture = (
+    sessionId: string,
+    source: string,
+    imageCount = defaultImageCount,
+    promptVariant?: string | null,
+    promptParams?: Record<string, number | string>
+  ) => {
     cleanupExpiredTouchDesignerControlSessions();
 
     const normalizedSessionId = normalizeSessionId(sessionId);
     const normalizedImageCount = normalizeImageCount(imageCount);
-    const { session, command } = enqueueTouchDesignerControlCommand(normalizedSessionId, 'capture', normalizedImageCount);
+    const { session, command } = enqueueTouchDesignerControlCommand(
+      normalizedSessionId,
+      'capture',
+      normalizedImageCount,
+      promptVariant,
+      promptParams
+    );
     console.log(
       `TouchDesigner remote capture queued via ${source} for session "${normalizedSessionId}" (#${command.id}, imageCount=${normalizedImageCount}).`
     );
@@ -338,7 +358,9 @@ async function startServer() {
           return {
             type: 'capture',
             sessionId: normalizeSessionId(parsed.sessionId),
-            imageCount: normalizeImageCount(parsed.imageCount ?? parsed.count)
+            imageCount: normalizeImageCount(parsed.imageCount ?? parsed.count),
+            promptVariant: typeof parsed.promptVariant === 'string' ? parsed.promptVariant : null,
+            promptParams: parsed.promptParams && typeof parsed.promptParams === 'object' ? parsed.promptParams : undefined
           };
         }
       }
@@ -525,7 +547,11 @@ async function startServer() {
   app.post('/api/touchdesigner-control/session/:sessionId/capture', (req, res) => {
     const sessionId = normalizeSessionId(req.params.sessionId);
     const imageCount = normalizeImageCount(req.body?.imageCount);
-    const { session, command } = queueTouchDesignerCapture(sessionId, 'http', imageCount);
+    const promptVariant = typeof req.body?.promptVariant === 'string' ? req.body.promptVariant : null;
+    const promptParams = req.body?.promptParams && typeof req.body.promptParams === 'object'
+      ? req.body.promptParams as Record<string, number | string>
+      : undefined;
+    const { session, command } = queueTouchDesignerCapture(sessionId, 'http', imageCount, promptVariant, promptParams);
     res.json({
       success: true,
       command,
@@ -583,9 +609,10 @@ async function startServer() {
       const normalizedCaptureId = normalizeCaptureId(captureId);
       const sourceImageAsset = ensureSourceImageSaved(originalImage, normalizedCaptureId);
       const { buffer, extension } = decodeImageDataUrl(image);
-      const safeLabel = String(label || 'timeline').replace(/\s+/g, '_');
       const safeSceneKey = normalizeSceneKey(sceneKey, label);
-      const savedImageAsset = saveImageAsset(`timewarp_${safeLabel}_${Date.now()}.${extension}`, buffer);
+      const safeLabel = String(label || safeSceneKey).replace(/\s+/g, '_');
+      const filenamePrefix = safeSceneKey.charAt(0).toUpperCase() + safeSceneKey.slice(1);
+      const savedImageAsset = saveImageAsset(`${filenamePrefix}_${Date.now()}.${extension}`, buffer);
       const payload: CaptureEvent = {
         type: 'capture.saved',
         captureId: normalizedCaptureId,
@@ -648,7 +675,13 @@ async function startServer() {
     }
 
     if (parsed.type === 'capture') {
-      queueTouchDesignerCapture(parsed.sessionId, `udp://${peer.address}:${peer.port}`, parsed.imageCount);
+      queueTouchDesignerCapture(
+        parsed.sessionId,
+        `udp://${peer.address}:${peer.port}`,
+        parsed.imageCount,
+        parsed.promptVariant,
+        parsed.promptParams
+      );
     }
   });
 
@@ -675,3 +708,7 @@ async function startServer() {
 }
 
 startServer();
+
+
+
+

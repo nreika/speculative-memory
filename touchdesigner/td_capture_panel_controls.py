@@ -1,4 +1,4 @@
-import json
+﻿import json
 import socket
 
 try:
@@ -7,11 +7,11 @@ except ImportError:
     from urllib2 import Request, urlopen
 
 
-LISTENER_DAT_PATH = '/project1/td_capture_listener1'
+LISTENER_DAT_PATH = '/project1/td_capture_listener'
 SERVER_BASE_URL = 'http://127.0.0.1:3000'
 SESSION_ID = 'timewarp-local'
 REQUEST_TIMEOUT_SECONDS = 2.0
-CONTROL_TRANSPORT = 'udp'
+CONTROL_TRANSPORT = 'http'
 CONTROL_UDP_HOST = '127.0.0.1'
 CONTROL_UDP_PORT = 9990
 
@@ -221,3 +221,5 @@ def whileOff(*args):
 
 def onValueChange(*args):
     return
+
+

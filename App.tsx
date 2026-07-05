@@ -1,4 +1,4 @@
-
+﻿
 import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { Download, WandSparkles } from 'lucide-react';
@@ -7,7 +7,8 @@ import { AppState, PredictionData, Target, PredictionItem, TouchDesignerBridgeSt
 import { predictFutureScenarios, generateFutureImage } from './services/geminiService';
 import { normalizeTouchDesignerSessionId, useTouchDesignerBridge } from './hooks/useTouchDesignerBridge';
 
-const getSceneKey = (index: number) => `scene${String.fromCharCode(65 + index)}`;
+const getSceneKey = (index: number) => `gen_${String.fromCharCode(97 + index)}`;
+const getGenerationLabel = (index: number) => `Gen_${String.fromCharCode(97 + index)}`;
 const TOUCHDESIGNER_SESSION_STORAGE_KEY = 'timewarp.touchdesigner.sessionId';
 const DEFAULT_GENERATION_COUNT = 3;
 const MIN_GENERATION_COUNT = 1;
@@ -16,6 +17,8 @@ const MAX_GENERATION_COUNT = 10;
 interface RemoteCaptureCommand {
   id: number;
   imageCount: number;
+  promptVariant?: string | null;
+  promptParams?: Record<string, number | string>;
 }
 
 const clampGenerationCount = (value: number) => {
@@ -141,13 +144,15 @@ const App: React.FC = () => {
 
         const items = Array.isArray(data.items) ? data.items : [];
         const captureCommands = items
-          .filter((item): item is { id: number; type: string; imageCount?: number } => typeof item?.id === 'number' && typeof item?.type === 'string')
+          .filter((item): item is { id: number; type: string; imageCount?: number; promptVariant?: unknown; promptParams?: Record<string, number | string> } => typeof item?.id === 'number' && typeof item?.type === 'string')
           .filter((item) => item.type === 'capture')
           .map((item) => ({
             id: item.id,
             imageCount: clampGenerationCount(
               typeof item.imageCount === 'number' ? item.imageCount : DEFAULT_GENERATION_COUNT
-            )
+            ),
+            promptVariant: typeof item.promptVariant === 'string' ? item.promptVariant : null,
+            promptParams: item.promptParams && typeof item.promptParams === 'object' ? item.promptParams : undefined
           }));
 
         if (captureCommands.length > 0) {
@@ -187,19 +192,23 @@ const App: React.FC = () => {
     };
   }, [cameraStream, normalizedTouchDesignerSessionId]);
 
-  const handleCapture = useCallback(async (base64: string, requestedImageCount = DEFAULT_GENERATION_COUNT) => {
+  const handleCapture = useCallback(async (
+    base64: string,
+    requestedImageCount = DEFAULT_GENERATION_COUNT,
+    promptOptions?: { variant?: string | null; params?: Record<string, number | string> }
+  ) => {
     setAppState(AppState.ANALYZING);
     setError(null);
     setSelectedTimelineIndex(0);
 
     try {
       const imageCount = clampGenerationCount(requestedImageCount);
-      const scenarios = await predictFutureScenarios(base64, target, imageCount);
+      const scenarios = await predictFutureScenarios(base64, target, imageCount, promptOptions);
       setAppState(AppState.GENERATING);
 
       const items: PredictionItem[] = await Promise.all(
         scenarios.map(async (s) => ({
-          predictedImage: await generateFutureImage(base64, s.prediction_prompt),
+          predictedImage: await generateFutureImage(base64, s.prediction_prompt, promptOptions),
           predictionText: s.scenario_description,
           label: s.label
         }))
@@ -225,7 +234,7 @@ const App: React.FC = () => {
               image: item.predictedImage,
               originalImage: prediction.originalImage,
               captureId: String(prediction.timestamp),
-              label: item.label,
+              label: getGenerationLabel(index),
               sceneKey: getSceneKey(index),
               sceneIndex: index,
               expectedImageCount: prediction.items.length
@@ -243,7 +252,7 @@ const App: React.FC = () => {
       setTimeout(() => setShowFuture(false), 2500);
     } catch (err: any) {
       console.error(err);
-      setError(err.message || "予期せぬエラーが発生しました。");
+      setError(err.message || "An unexpected error occurred.");
       setAppState(AppState.ERROR);
     }
   }, [target]);
@@ -254,11 +263,11 @@ const App: React.FC = () => {
     if (!currentTimeline) return;
     const link = document.createElement('a');
     link.href = currentTimeline.predictedImage;
-    link.download = `timewarp_${currentTimeline.label.replace(/\s+/g, '_')}_${Date.now()}.png`;
+    link.download = `${getGenerationLabel(selectedTimelineIndex)}_${Date.now()}.png`;
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
-  }, [currentTimeline]);
+  }, [currentTimeline, selectedTimelineIndex]);
 
   const handleRegenerateFromCurrentImage = useCallback(() => {
     if (!currentTimeline || appState === AppState.ANALYZING || appState === AppState.GENERATING) {
@@ -273,7 +282,7 @@ const App: React.FC = () => {
 
   const handleTouchDesignerBridgeToggle = useCallback(() => {
     if (!cameraStream) {
-      setError('ブラウザカメラの準備が完了してから TouchDesigner ストリームを開始してください。');
+      setError('カメラ接続後に TouchDesigner ストリームを開始してください。');
       return;
     }
 
@@ -379,8 +388,7 @@ const App: React.FC = () => {
                       {currentTimeline?.predictionText}
                     </p>
                     <p className="text-[10px] leading-relaxed text-slate-500">
-                      FROM_THIS で、選択中の生成画像を次の入力としてそのまま再生成できます。
-                    </p>
+                      FROM_THIS で、現在の生成結果を次の入力として再生成できます。                    </p>
                   </div>
                 ) : (
                   <div className="flex flex-col items-center justify-center h-full opacity-40 text-center py-4">
@@ -448,8 +456,7 @@ const App: React.FC = () => {
                     placeholder="timewarp-local"
                   />
                   <p className="text-[10px] leading-relaxed text-slate-400">
-                    TouchDesigner 側の受信設定でもこの Session ID を使います。
-                  </p>
+                    TouchDesigner 側の設定と合わせる Session ID を指定します。                  </p>
                 </div>
 
                 <div className="grid grid-cols-2 gap-2 text-[10px] font-orbitron tracking-[0.15em] text-slate-500">
@@ -474,9 +481,9 @@ const App: React.FC = () => {
                 </button>
 
                 <div className="rounded border border-white/10 bg-black/20 px-3 py-3 text-[10px] leading-relaxed text-slate-400">
-                  <p>1. ブラウザがカメラを保持したまま映像を送ります。</p>
-                  <p>2. TouchDesigner は `WebRTC DAT` で受信します。</p>
-                  <p>3. シグナリング API は `/api/touchdesigner-stream` です。</p>
+                  <p>1. 先にブラウザでカメラを有効にします。</p>
+                  <p>2. TouchDesigner 側で `WebRTC DAT` を接続します。</p>
+                  <p>3. シグナリング API は `/api/touchdesigner-stream` を使います。</p>
                 </div>
 
                 {(cameraError || bridgeState.error || remoteControlError) && (
@@ -548,4 +555,10 @@ const App: React.FC = () => {
 };
 
 export default App;
+
+
+
+
+
+
 

@@ -1,4 +1,4 @@
-# TouchDesigner Setup
+﻿# TouchDesigner Setup
 
 This project now supports two different TouchDesigner integrations:
 
@@ -34,7 +34,7 @@ If you want to start and stop the receiver without typing into Textport, add a t
    - `Off to On`: `On`
 6. Edit the constants at the top of `td_webrtc_panel_controls.py` if your paths differ
 
-If you prefer to share one callbacks DAT across multiple TouchDesigner operators, `td_capture_listener.py` now also includes compatible `Panel Execute DAT` callbacks for these buttons.
+If you want to reuse one file across multiple manual capture inputs, use `td_capture_panel_controls.py` for both the button and keyboard callbacks.
 
 If your `Panels` field is easier to use with one button at a time, use two `Panel Execute DAT`s instead:
 
@@ -54,7 +54,7 @@ You can also map the same stream controls to `Keyboard In CHOP`:
 
 1. Create a `Keyboard In CHOP` named `keyboardin1`
 2. Create a `CHOP Execute DAT`
-3. Paste in `td_webrtc_panel_controls.py` or `td_capture_listener.py`
+3. Paste in `td_webrtc_panel_controls.py`
 4. In the `CHOP Execute DAT` parameters:
    - `CHOP`: `/project1/keyboardin1`
    - `Off to On`: `On`
@@ -95,7 +95,7 @@ The Node server sends one UDP JSON message per saved image to `127.0.0.1:9989` b
 
 Each message contains:
 
-- The scene key (`sceneA` to `sceneJ`)
+- The scene key (`gen_a` to `gen_j`)
 - The expected image count for the current capture batch
 - The saved image path
 - A normalized forward-slash path for Windows
@@ -110,9 +110,9 @@ Each message contains:
 4. Create a `Text DAT` and paste in `td_capture_listener.py`
 5. Point the `UDP In DAT` `Callbacks DAT` parameter at that script
 6. Create `Movie File In TOP` operators for the scene slots you want to support:
-   `moviefilein_scene_a` to `moviefilein_scene_j`
-   If you only use up to 3 images, `moviefilein_scene_a` to `moviefilein_scene_c` are enough.
-7. Create one more `Movie File In TOP` named `moviefilein_original` if you also want to display the captured source image
+   `Gen_a` to `Gen_j` (or legacy names `moviefilein_scene_a` to `moviefilein_scene_j`)
+   If you only use up to 3 images, `Gen_a` to `Gen_c` are enough.
+7. Create one more `Movie File In TOP` named `record_original` (or legacy name `moviefilein_original`) if you also want to display the captured source image
 8. Optional: keep a fallback single `Movie File In TOP` named `moviefilein1`
 9. Optional: create a `Table DAT` named `capture_info`
 
@@ -131,7 +131,7 @@ By default, once all expected scene images for the same `captureId` arrive, Touc
 
 If `ready_state_all` exists, the callback writes `value0 = 1` only when all requested timeline images for the current capture batch have arrived. This is useful for a single "all assets ready" lamp or for enabling your display buttons.
 
-This is intentionally not tied to a specific scene key. The app saves all requested images in parallel, so there is no guaranteed rule like "when sceneC arrives, the batch is complete". Instead, `td_capture_listener.py` counts the received scene keys for each `captureId` and only flips `ready_state_all` high when all expected scene keys are present.
+This is intentionally not tied to a specific scene key. The app saves all requested images in parallel, so there is no guaranteed rule like "when gen_c arrives, the batch is complete". Instead, `td_capture_listener.py` counts the received scene keys for each `captureId` and only flips `ready_state_all` high when all expected scene keys are present.
 
 ### Manual Display Buttons
 
@@ -142,7 +142,7 @@ To decide the reveal timing in TouchDesigner, add a small control panel:
 3. Create a `Keyboard In CHOP` named `keyboardin1`
 4. Turn on the CHOP so it outputs a `1` channel when you press the `1` key
 5. Create a `CHOP Execute DAT`
-6. Paste in `td_capture_panel_controls.py` or `td_capture_listener.py`
+6. Paste in `td_capture_panel_controls.py`
 7. In the `CHOP Execute DAT` parameters:
    - `CHOP`: `/project1/keyboardin1`
    - `Off to On`: `On`
@@ -154,7 +154,7 @@ To decide the reveal timing in TouchDesigner, add a small control panel:
 
 When you press the button or key, the script reads `/project1/generation_count` `value0`, clamps it to `1` through `10`, and sends that number to the browser app.
 
-With the defaults in this repository, both the button and the `1` key send this UDP JSON packet to the local Node server. The script accepts channel names like `1`, `k1`, `num1`, and `numpad1`.
+When `CONTROL_TRANSPORT` is set to `udp`, both the button and the `1` key send this UDP JSON packet to the local Node server. The script accepts channel names like `1`, `k1`, `num1`, and `numpad1`.
 
 ```json
 {
@@ -171,15 +171,36 @@ Default UDP control destination:
 
 The Node server listens for that packet, pushes the same internal capture command queue used by the HTTP endpoint, and the browser app polls that queue while its camera stream is ready. In other words, the UDP button or the `1` key triggers the same capture flow as the on-screen `Initiate_Scan` button.
 
-If you prefer the previous HTTP method, set `CONTROL_TRANSPORT = 'http'` in `td_capture_panel_controls.py` or `td_capture_listener.py`. In that mode the same button calls:
+If you want manual capture over HTTP, set `CONTROL_TRANSPORT = 'http'` in `td_capture_panel_controls.py`. In that mode the same button calls:
 
 - `POST /api/touchdesigner-control/session/<sessionId>/capture`
+
+### Auto Capture Timer
+
+If you want automatic generation every 30 seconds, keep the responsibilities separate:
+
+- `td_capture_panel_controls.py`: manual button / keyboard capture triggers
+- `td_capture_listener.py`: UDP image receive + capture state updates
+- `td_auto_capture_timer.py`: Timer CHOP callback that calls `request_capture()` on each cycle
+
+Recommended setup:
+
+1. Create a `Timer CHOP` named `timer1`
+2. Set `Length` to `30`
+3. Turn `Cycle` on
+4. Create a `Text DAT` named `timer1_callbacks`
+5. Set its `File` parameter to `td_auto_capture_timer.py`
+6. Turn `Sync to File` on
+7. Point the `Timer CHOP` `Callbacks DAT` parameter to `timer1_callbacks`
+8. Start the timer once so it begins cycling
+
+This keeps the auto-capture logic separate from the manual control callbacks, which makes the network easier to read and maintain.
 
 ## Notes
 
 - The app now supports `1` to `10` timeline images per capture.
 - The same source image is shared by all timeline messages in one capture batch, so `moviefilein_original` will keep showing the single captured frame for that prediction batch.
-- Images are stored with timestamped names such as `timewarp_Timeline_A_1776160553565.png`.
+- Images are stored with timestamped names such as `Gen_a_1776160553565.png`.
 - `captures/latest_scenes.json` keeps track of which timestamped file is currently newest for each scene.
 - If a UDP packet is missed, you can recover the newest state from `captures/latest_scenes.json` or `http://localhost:3000/api/latest-captures`.
 
@@ -192,3 +213,11 @@ For GitHub-backed project management, keep the TouchDesigner-side source files i
 - `.toe` project checkpoints only when you want an intentional binary snapshot
 
 The generated files in `captures/` are ignored by Git, so repository history stays focused on source files rather than prediction output images.
+
+
+
+
+
+
+
+

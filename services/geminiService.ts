@@ -2,6 +2,11 @@ import { GoogleGenAI, Type } from "@google/genai";
 import promptConfig from "../gemini-prompts.json";
 import { Target } from "../types";
 
+export interface PromptVariantOptions {
+  variant?: string;
+  params?: Record<string, number | string>;
+}
+
 interface GeminiPromptConfig {
   editingGuide?: {
     editThisSection?: string;
@@ -61,6 +66,20 @@ const replacePlaceholders = (
 const buildDefaultScenarioContext = (): string =>
   prompts.userEditable.scenarioPrediction.defaultTargetContext.trim();
 
+const buildPromptVariantContext = (options?: PromptVariantOptions): string => {
+  if (!options?.variant) {
+    return '';
+  }
+
+  const variant = String(options.variant).trim();
+  const params = options.params ? Object.entries(options.params) : [];
+  const paramSummary = params.length > 0
+    ? `Additional prompt controls: ${params.map(([key, value]) => `${key}=${value}`).join(', ')}.`
+    : '';
+
+  return [`Prompt variant: ${variant}.`, paramSummary].filter(Boolean).join(' ');
+};
+
 const buildTargetedScenarioContext = (target: Target): string =>
   joinPromptSections(
     replacePlaceholders(
@@ -81,15 +100,21 @@ const clampScenarioCount = (value: number): number => {
   return Math.min(MAX_SCENARIO_COUNT, Math.max(MIN_SCENARIO_COUNT, Math.round(value)));
 };
 
-const buildScenarioPredictionPrompt = (target: Target | null, scenarioCount: number): string => {
+export const buildScenarioPredictionPrompt = (
+  target: Target | null,
+  scenarioCount: number,
+  options?: PromptVariantOptions
+): string => {
   const targetContext = target
     ? buildTargetedScenarioContext(target)
     : buildDefaultScenarioContext();
   const countPlaceholders = { SCENARIO_COUNT: String(scenarioCount) };
+  const variantContext = buildPromptVariantContext(options);
 
   return joinPromptSections(
     prompts.userEditable.scenarioPrediction.sceneAnalysisIntro,
     targetContext,
+    variantContext,
     replacePlaceholders(
       prompts.userEditable.scenarioPrediction.predictionRequest,
       countPlaceholders
@@ -103,14 +128,21 @@ const buildScenarioPredictionPrompt = (target: Target | null, scenarioCount: num
   );
 };
 
-const buildFutureImagePrompt = (predictionPrompt: string): string =>
-  joinPromptSections(
+const buildFutureImagePrompt = (
+  predictionPrompt: string,
+  options?: PromptVariantOptions
+): string => {
+  const variantContext = buildPromptVariantContext(options);
+
+  return joinPromptSections(
     replacePlaceholders(
       prompts.userEditable.futureImageGeneration.editInstructionTemplate,
       { PREDICTION_PROMPT: predictionPrompt }
     ),
+    variantContext,
     prompts.systemFixed.futureImageGeneration.hardRules
   );
+};
 
 const extractInlineImageData = (imageDataUrl: string) => {
   const match = imageDataUrl.match(IMAGE_DATA_URL_PATTERN);
@@ -134,12 +166,13 @@ export interface ScenarioResult {
 export const predictFutureScenarios = async (
   base64Image: string,
   target: Target | null,
-  requestedScenarioCount = DEFAULT_SCENARIO_COUNT
+  requestedScenarioCount = DEFAULT_SCENARIO_COUNT,
+  options?: PromptVariantOptions
 ): Promise<ScenarioResult[]> => {
   const ai = getAI();
   const sourceImage = extractInlineImageData(base64Image);
   const scenarioCount = clampScenarioCount(requestedScenarioCount);
-  const prompt = buildScenarioPredictionPrompt(target, scenarioCount);
+  const prompt = buildScenarioPredictionPrompt(target, scenarioCount, options);
   let latestScenarioCount = 0;
 
   for (let attempt = 0; attempt < 3; attempt += 1) {
@@ -197,7 +230,11 @@ export const predictFutureScenarios = async (
 /**
  * Step 2: Generate a single future image based on a prompt.
  */
-export const generateFutureImage = async (originalBase64: string, predictionPrompt: string): Promise<string> => {
+export const generateFutureImage = async (
+  originalBase64: string,
+  predictionPrompt: string,
+  options?: PromptVariantOptions
+): Promise<string> => {
   const ai = getAI();
   const sourceImage = extractInlineImageData(originalBase64);
   
@@ -206,7 +243,7 @@ export const generateFutureImage = async (originalBase64: string, predictionProm
     contents: {
       parts: [
         { inlineData: sourceImage },
-        { text: buildFutureImagePrompt(predictionPrompt) }
+        { text: buildFutureImagePrompt(predictionPrompt, options) }
       ]
     },
     config: {
