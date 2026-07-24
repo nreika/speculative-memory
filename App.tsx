@@ -223,6 +223,28 @@ const App: React.FC = () => {
       };
 
       setLastPrediction(prediction);
+      try {
+        const response = await fetch('/api/save-prediction-data', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            captureId: String(prediction.timestamp),
+            items: prediction.items.map((item, index) => ({
+              sceneIndex: index,
+              label: item.label,
+              predictionText: item.predictionText
+            }))
+          })
+        });
+
+        if (!response.ok) {
+          throw new Error(`Prediction data save failed (${response.status})`);
+        }
+
+        console.log('Prediction data appended to server document.');
+      } catch (saveTextErr) {
+        console.error('Prediction data save failed:', saveTextErr);
+      }
 
       // Automatically save to local folder via server API
       try {

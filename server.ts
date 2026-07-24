@@ -39,6 +39,12 @@ interface SavedImageAsset {
   size: number;
 }
 
+interface PredictionDataLogItem {
+  sceneIndex?: number | null;
+  label?: string;
+  predictionText: string;
+}
+
 interface LatestScenesManifest {
   updatedAt: string;
   scenes: Record<string, CaptureEvent>;
@@ -117,9 +123,20 @@ async function startServer() {
 
   const latestMetaPath = path.join(capturesDir, 'latest.json');
   const latestScenesMetaPath = path.join(capturesDir, 'latest_scenes.json');
+  const predictionDataLogPath = path.join(capturesDir, 'prediction_data.md');
   const touchDesignerBridgeEnabled = (process.env.TOUCHDESIGNER_BRIDGE_ENABLED ?? 'true').toLowerCase() !== 'false';
   const touchDesignerHost = process.env.TOUCHDESIGNER_UDP_HOST || '127.0.0.1';
   const touchDesignerPort = Number(process.env.TOUCHDESIGNER_UDP_PORT || '9989');
+  const tokyoTimestampFormatter = new Intl.DateTimeFormat('sv-SE', {
+    timeZone: 'Asia/Tokyo',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false
+  });
   const touchDesignerControlUdpEnabled = (process.env.TOUCHDESIGNER_CONTROL_UDP_ENABLED ?? 'true').toLowerCase() !== 'false';
   const touchDesignerControlUdpHost = process.env.TOUCHDESIGNER_CONTROL_UDP_HOST || '127.0.0.1';
   const touchDesignerControlUdpPort = Number(process.env.TOUCHDESIGNER_CONTROL_UDP_PORT || '9990');
@@ -129,6 +146,7 @@ async function startServer() {
   const touchDesignerControlUdpServer = dgram.createSocket('udp4');
   const touchDesignerStreamSessions = new Map<string, TouchDesignerStreamSession>();
   const touchDesignerControlSessions = new Map<string, TouchDesignerControlSession>();
+  const sourceImageAssetsByCaptureId = new Map<string, SavedImageAsset>();
   const imageDataUrlPattern = /^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/;
   const normalizePath = (filePath: string) => filePath.replace(/\\/g, '/');
   const normalizeSceneKey = (value: unknown, fallbackLabel: unknown) => {
@@ -187,6 +205,54 @@ async function startServer() {
       extension: getImageExtension(match[1])
     };
   };
+  const formatTokyoTimestampForFilename = (date = new Date()) => {
+    const parts = tokyoTimestampFormatter.formatToParts(date);
+    const values = Object.fromEntries(
+      parts
+        .filter((part) => part.type !== 'literal')
+        .map((part) => [part.type, part.value])
+    ) as Record<string, string>;
+
+    return `${values.year}-${values.month}-${values.day}_${values.hour}-${values.minute}-${values.second}`;
+  };
+  const formatTokyoTimestampForDocument = (date = new Date()) =>
+    formatTokyoTimestampForFilename(date).replace('_', ' ');
+  const normalizePredictionLogText = (value: unknown) =>
+    String(value || '').replace(/\r\n/g, '\n').trim();
+  const buildPredictionDataLogEntry = (
+    captureId: string,
+    items: PredictionDataLogItem[],
+    date = new Date()
+  ) => {
+    const lines = [
+      '',
+      `## Capture ${formatTokyoTimestampForDocument(date)}`,
+      `- captureId: ${captureId}`,
+      ''
+    ];
+
+    items.forEach((item, fallbackIndex) => {
+      const sceneIndex = Number.isInteger(item.sceneIndex) ? Number(item.sceneIndex) : fallbackIndex;
+      const displayIndex = sceneIndex + 1;
+      const label = String(item.label || '').trim();
+      const labelSuffix = label ? ` - ${label}` : '';
+
+      lines.push(
+        `### Prediction_Data (T+${displayIndex})${labelSuffix}`,
+        normalizePredictionLogText(item.predictionText),
+        ''
+      );
+    });
+
+    return `${lines.join('\n')}\n`;
+  };
+  const buildSavedFilename = (prefix: string, extension: string, date = new Date()) => {
+    const safePrefix = prefix.replace(/[^a-zA-Z0-9_-]/g, '_') || 'capture';
+    const safeExtension = extension.replace(/[^a-zA-Z0-9]/g, '').toLowerCase() || 'png';
+    const timestamp = formatTokyoTimestampForFilename(date);
+
+    return `${safePrefix}_${timestamp}.${safeExtension}`;
+  };
   const buildSavedImageAsset = (filename: string, buffer: Buffer): SavedImageAsset => {
     const absolutePath = path.join(capturesDir, filename);
     return {
@@ -209,12 +275,15 @@ async function startServer() {
     }
 
     const { buffer, extension } = decodeImageDataUrl(sourceImage);
-    const asset = buildSavedImageAsset(`record_${captureId}.${extension}`, buffer);
-
-    if (!fs.existsSync(asset.absolutePath)) {
-      fs.writeFileSync(asset.absolutePath, buffer);
-      console.log(`Saved source image to: ${asset.absolutePath}`);
+    const cachedAsset = sourceImageAssetsByCaptureId.get(captureId);
+    if (cachedAsset && fs.existsSync(cachedAsset.absolutePath)) {
+      return cachedAsset;
     }
+
+    const asset = buildSavedImageAsset(buildSavedFilename('record', extension), buffer);
+    fs.writeFileSync(asset.absolutePath, buffer);
+    console.log(`Saved source image to: ${asset.absolutePath}`);
+    sourceImageAssetsByCaptureId.set(captureId, asset);
 
     return asset;
   };
@@ -598,6 +667,41 @@ async function startServer() {
     }
   });
 
+  app.post('/api/save-prediction-data', (req, res) => {
+    const normalizedCaptureId = normalizeCaptureId(req.body?.captureId);
+    const rawItems = Array.isArray(req.body?.items) ? req.body.items : [];
+    const items: PredictionDataLogItem[] = rawItems
+      .map((item, fallbackIndex) => ({
+        sceneIndex: Number.isInteger(item?.sceneIndex) ? Number(item.sceneIndex) : fallbackIndex,
+        label: typeof item?.label === 'string' ? item.label : '',
+        predictionText: normalizePredictionLogText(item?.predictionText)
+      }))
+      .filter((item) => item.predictionText.length > 0);
+
+    if (items.length === 0) {
+      return res.status(400).json({ error: 'No prediction text provided' });
+    }
+
+    try {
+      fs.appendFileSync(
+        predictionDataLogPath,
+        buildPredictionDataLogEntry(normalizedCaptureId, items),
+        'utf8'
+      );
+
+      res.json({
+        success: true,
+        filename: path.basename(predictionDataLogPath),
+        absolutePath: predictionDataLogPath,
+        normalizedPath: normalizePath(predictionDataLogPath),
+        relativePath: normalizePath(path.relative(process.cwd(), predictionDataLogPath)),
+        url: '/captures/prediction_data.md'
+      });
+    } catch (error) {
+      console.error('Failed to save prediction data:', error);
+      res.status(500).json({ error: 'Failed to save prediction data' });
+    }
+  });
   // API to save images
   app.post('/api/save-image', (req, res) => {
     const { image, originalImage, captureId, label, sceneKey, sceneIndex, expectedImageCount } = req.body;
@@ -612,7 +716,7 @@ async function startServer() {
       const safeSceneKey = normalizeSceneKey(sceneKey, label);
       const safeLabel = String(label || safeSceneKey).replace(/\s+/g, '_');
       const filenamePrefix = safeSceneKey.charAt(0).toUpperCase() + safeSceneKey.slice(1);
-      const savedImageAsset = saveImageAsset(`${filenamePrefix}_${Date.now()}.${extension}`, buffer);
+      const savedImageAsset = saveImageAsset(buildSavedFilename(filenamePrefix, extension), buffer);
       const payload: CaptureEvent = {
         type: 'capture.saved',
         captureId: normalizedCaptureId,
@@ -708,7 +812,3 @@ async function startServer() {
 }
 
 startServer();
-
-
-
-

@@ -16,15 +16,15 @@
   "userEditable": {
     "scenarioPrediction": {
       "sceneAnalysisIntro": "Analyze this camera frame.",
-      "defaultTargetContext": "Predict realistic changes for the most prominent elements in the scene over the next 5 minutes, especially showing visible plant growth or change if plants are present, and natural increase or decrease of food or drink if they are present, to emphasize the passage of time.",
+      "defaultTargetContext": "Create plausible alternate worlds around this exact camera frame. For Scenario 1 and Scenario 2, predict realistic changes for the most prominent elements over the next 30 seconds. For Scenario 3, infer a realistic possible state from exactly 30 seconds before this frame. If food or drink is present, use natural increase, decrease, opening, closing, preparation, consumption, or restoration to emphasize the direction of time.",
       "targetedTargetContextTemplate": "The user has specifically targeted an object at (x: {{TARGET_X}}, y: {{TARGET_Y}}).",
-      "targetedTargetFocus": "Focus on the movement, state change, or likely outcome for this specific object over the next 5 minutes.",
-      "predictionRequest": "Predict {{SCENARIO_COUNT}} DISTINCT, realistic, and logically sound outcomes that could occur exactly 5 minutes from now.",
-      "variationGuidance": "Each outcome should be different",
-      "descriptionLanguageRule": "Write scenario_description in Japanese."
+      "targetedTargetFocus": "Focus on the movement, state change, or likely outcome for this specific object. Scenario 1 and Scenario 2 should show possible states exactly 30 seconds from now; Scenario 3 should show a possible state exactly 30 seconds before now.",
+      "predictionRequest": "Predict {{SCENARIO_COUNT}} DISTINCT, realistic, and logically sound possible worlds: Scenario 1 and Scenario 2 must occur exactly 30 seconds from now, while Scenario 3 must occur exactly 30 seconds before now.",
+      "variationGuidance": "Each outcome should be different. Clearly make Scenario 3 a past or rewind branch, not another future branch.",
+      "descriptionLanguageRule": "Write scenario_description in Japanese and mention whether it is 30 seconds later or 30 seconds earlier."
     },
     "futureImageGeneration": {
-      "editInstructionTemplate": "Modify this scene realistically for a 5-minute jump: {{PREDICTION_PROMPT}}. If plants are present, make them visibly grow, bloom, or change in a natural way that clearly emphasizes the passage of time. If food or drink is present, show a realistic increase or decrease in quantity or state, such as reverting an unfinished item to an unopened state or consuming it so it is gone."
+      "editInstructionTemplate": "Modify this scene realistically according to the time direction in this prompt: {{PREDICTION_PROMPT}}. If the prompt describes 30 seconds later, show a plausible future change. If the prompt describes 30 seconds earlier, reconstruct a plausible past state before the current frame. If food or drink is present, show a realistic increase, decrease, opening, closing, preparation, consumption, or restoration that matches the time direction."
     }
   },
   "systemFixed": {
@@ -34,7 +34,10 @@
         "Please ensure that the camera angle of view is strictly fixed.",
         "Do not change one's outfits and belongings.",
         "DO NOT change the perspective at all.",
-        "Background should be identical."
+        "Background should be identical.",
+        "Change the time on the tablet or phone screen to reflect the time direction.",
+        "Do not change the contents on the display screens.",
+        "change the behavior of people in the scene based on what the people would want to do next."
       ],
       "outputFormatRules": [
         "Return a JSON object with a \"scenarios\" array containing exactly {{SCENARIO_COUNT}} items.",
