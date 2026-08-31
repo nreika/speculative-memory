@@ -1,4 +1,4 @@
-﻿import json
+import json
 import socket
 
 try:
@@ -120,8 +120,21 @@ def display_latest_ready_scene():
     return _listener_module().display_latest_ready_scene()
 
 
+NATIVE_CAPTURE_DAT_PATH = '/project1/td_native_capture'
+
+
 def request_capture():
     image_count = _read_generation_count()
+
+    native = op(NATIVE_CAPTURE_DAT_PATH)
+    if native is not None:
+        try:
+            native.module.capture()
+            _debug('Native capture triggered (imageCount={}).'.format(image_count))
+            return {'native': True, 'imageCount': image_count}
+        except Exception as exc:
+            _debug('Native capture failed, falling back to remote queue: {}'.format(exc))
+
     if CONTROL_TRANSPORT.lower() == 'udp':
         payload = {
             'type': 'capture',

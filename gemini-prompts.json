@@ -16,28 +16,28 @@
   "userEditable": {
     "scenarioPrediction": {
       "sceneAnalysisIntro": "Analyze this camera frame.",
-      "defaultTargetContext": "Create plausible alternate worlds around this exact camera frame. For Scenario 1 and Scenario 2, predict realistic changes for the most prominent elements over the next 30 seconds. For Scenario 3, infer a realistic possible state from exactly 30 seconds before this frame. If food or drink is present, use natural increase, decrease, opening, closing, preparation, consumption, or restoration to emphasize the direction of time.",
+      "defaultTargetContext": "Create plausible alternate worlds around this exact camera frame. For Scenario 1 and Scenario 2, predict realistic changes for the most prominent elements over the next 30 seconds. For Scenario 3, infer a realistic possible state from exactly 30 seconds before this frame.",
       "targetedTargetContextTemplate": "The user has specifically targeted an object at (x: {{TARGET_X}}, y: {{TARGET_Y}}).",
       "targetedTargetFocus": "Focus on the movement, state change, or likely outcome for this specific object. Scenario 1 and Scenario 2 should show possible states exactly 30 seconds from now; Scenario 3 should show a possible state exactly 30 seconds before now.",
-      "predictionRequest": "Predict {{SCENARIO_COUNT}} DISTINCT, realistic, and logically sound possible worlds: Scenario 1 and Scenario 2 must occur exactly 30 seconds from now, while Scenario 3 must occur exactly 30 seconds before now.",
-      "variationGuidance": "Each outcome should be different. Clearly make Scenario 3 a past or rewind branch, not another future branch.",
+      "predictionRequest": "Predict {{SCENARIO_COUNT}} DISTINCT, realistic, logically sound possible worlds. Scenario 1 and Scenario 2 both happen exactly about 30 seconds AFTER this frame. Scenario 3 happens exactly about 30 seconds BEFORE this frame. Every change must involve a person or object that is actually visible in this frame - never invent windows, curtains, blinds, doors, or objects that are not clearly present.",
+      "variationGuidance": "Scenario 2 must be clearly different from Scenario 1: a different person moving, a different direction of motion, or an interaction with a different visible object. Never make Scenario 2 a reworded copy of Scenario 1. Make Scenario 3 an unmistakable rewind (a state that plausibly led into this frame), never another forward branch.",
       "descriptionLanguageRule": "Write scenario_description in Japanese and mention whether it is 30 seconds later or 30 seconds earlier."
     },
     "futureImageGeneration": {
-      "editInstructionTemplate": "Modify this scene realistically according to the time direction in this prompt: {{PREDICTION_PROMPT}}. If the prompt describes 30 seconds later, show a plausible future change. If the prompt describes 30 seconds earlier, reconstruct a plausible past state before the current frame. If food or drink is present, show a realistic increase, decrease, opening, closing, preparation, consumption, or restoration that matches the time direction."
+      "editInstructionTemplate": "Edit this exact photo according to: {{PREDICTION_PROMPT}}. Change only the people's poses, positions, actions and the digits on any visible number sign. Everything else - the room, furniture, camera, lighting, the number of monitors and what each monitor displays - stays pixel-identical to the input."
     }
   },
   "systemFixed": {
     "scenarioPrediction": {
       "hardRules": [
         "Avoid surreal or impossible events.",
-        "Please ensure that the camera angle of view is strictly fixed.",
-        "Do not change one's outfits and belongings.",
-        "DO NOT change the perspective at all.",
-        "Background should be identical.",
-        "Change the time on the tablet or phone screen to reflect the time direction.",
-        "Do not change the contents on the display screens.",
-        "change the behavior of people in the scene based on what the people would want to do next."
+        "The people act more dynamically and naturally, but do not change their outfits, hair, or belongings.",
+        "The camera angle, framing, and perspective are strictly fixed.",
+        "The background, furniture, and room layout are identical.",
+        "Do not add, remove, or duplicate any people, monitors, screens, chairs, tables, or other objects - keep the exact same count of everything.",
+        "Do not change what any wall-mounted monitor or TV is displaying.",
+        "If a clock, digital time readout, or physical number sign is visible, change ONLY its digits to reflect the time direction (about 30 seconds later or earlier), keeping its position and style identical. State the exact new reading inside prediction_prompt.",
+        "Change the behavior of people in the scene based on what they would most plausibly do next (or were doing just before)."
       ],
       "outputFormatRules": [
         "Return a JSON object with a \"scenarios\" array containing exactly {{SCENARIO_COUNT}} items.",
@@ -49,7 +49,9 @@
     },
     "futureImageGeneration": {
       "hardRules": [
-        "Keep composition consistent."
+        "Keep composition, framing and the number of monitors, screens and furniture identical.",
+        "Do not change what any monitor or TV displays.",
+        "Only a visible clock or physical number sign may change its digits, and only if the instruction says so."
       ]
     }
   }

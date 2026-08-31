@@ -33,6 +33,7 @@ LEGACY_SCENE_KEY_MAP = {
 }
 ORIGINAL_MOVIE_FILE_IN_OP = ('Record_t1', 'record_original', 'moviefilein_original')
 INFO_TABLE_OP = 'capture_info'
+READY_FADE_TIMER_OP = '/project1/timer2'
 LATEST_CAPTURES_URL = 'http://127.0.0.1:3000/api/latest-captures'
 AUTO_RECOVER_FROM_MANIFEST = True
 RELOAD_RETRY_FRAMES = (1, 6)
@@ -66,6 +67,7 @@ BATCH_STATE = {
     'expectedImageCount': DEFAULT_IMAGE_COUNT,
     'isReady': False,
     'completedAt': '',
+    'fadeTriggered': False,
 }
 
 
@@ -169,6 +171,7 @@ def _reset_batch(capture_id='', expected_image_count=DEFAULT_IMAGE_COUNT):
         'expectedImageCount': _clamp_image_count(expected_image_count),
         'isReady': False,
         'completedAt': '',
+        'fadeTriggered': False,
     })
 
     for scene_key in KNOWN_SCENE_KEYS:
@@ -270,6 +273,31 @@ def _apply_capture_payload(payload):
     _sync_info_table(payload, target_path or source_path)
     return True
 
+def _start_ready_fade():
+    timer_op = _td_op(READY_FADE_TIMER_OP)
+    if not timer_op:
+        _debug('TimeWarp bridge: missing ready fade timer {}'.format(READY_FADE_TIMER_OP))
+        return False
+
+    initialize_par = getattr(timer_op.par, 'initialize', None)
+    start_par = getattr(timer_op.par, 'start', None)
+    if initialize_par is not None:
+        initialize_par.pulse()
+    if start_par is None:
+        _debug('TimeWarp bridge: timer {} is missing start pulse'.format(READY_FADE_TIMER_OP))
+        return False
+
+    start_par.pulse()
+    return True
+
+
+def _trigger_ready_fade_if_needed():
+    if not BATCH_STATE['isReady'] or BATCH_STATE['fadeTriggered']:
+        return
+
+    if _start_ready_fade():
+        BATCH_STATE['fadeTriggered'] = True
+        _debug('TimeWarp bridge: ready fade started for capture {}'.format(BATCH_STATE['captureId']))
 
 def resync_latest_scenes(expected_capture_id=''):
     manifest = _fetch_latest_manifest()
@@ -308,4 +336,7 @@ def onReceive(dat, rowIndex, message, bytes, peer):
 
     if AUTO_RECOVER_FROM_MANIFEST and not BATCH_STATE['isReady']:
         resync_latest_scenes(payload.get('captureId', ''))
+
+    _trigger_ready_fade_if_needed()
+
 
