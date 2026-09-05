@@ -1,10 +1,18 @@
 ﻿
+import './server/loadEnv';
 import express from 'express';
 import { createServer as createViteServer } from 'vite';
 import path from 'path';
 import fs from 'fs';
 import cors from 'cors';
 import dgram from 'dgram';
+import {
+  BACKEND as GENERATION_BACKEND,
+  backendStatus,
+  generateImage,
+  predictScenarios,
+  scenarioDirection,
+} from './server/generation/orchestrator';
 
 interface CaptureEvent {
   type: 'capture.saved';
@@ -751,6 +759,178 @@ async function startServer() {
     }
   });
 
+  // --- Local generation backend (ComfyUI/Qwen + Ollama VLM) ---
+  const imageDataUrlRe = /^data:image\/[a-zA-Z0-9.+-]+;base64,.+$/;
+
+  app.get('/api/generation-status', async (_req, res) => {
+    try {
+      res.json(await backendStatus());
+    } catch (error: any) {
+      res.status(500).json({ error: error?.message || 'status check failed' });
+    }
+  });
+
+  app.post('/api/predict-scenarios', async (req, res) => {
+    const { image, target, scenarioCount, promptOptions, sceneTime } = req.body || {};
+    if (typeof image !== 'string' || !imageDataUrlRe.test(image)) {
+      return res.status(400).json({ error: 'A base64 image data URL is required' });
+    }
+    const normalizedTarget =
+      target && typeof target.x === 'number' && typeof target.y === 'number'
+        ? { x: target.x, y: target.y }
+        : null;
+    try {
+      const scenarios = await predictScenarios({
+        imageDataUrl: image,
+        target: normalizedTarget,
+        scenarioCount: normalizeImageCount(scenarioCount),
+        options: promptOptions && typeof promptOptions === 'object' ? promptOptions : undefined,
+        sceneTime: typeof sceneTime === 'string' ? sceneTime : undefined,
+      });
+      res.json({ scenarios, backend: GENERATION_BACKEND });
+    } catch (error: any) {
+      console.error('predict-scenarios failed:', error);
+      res.status(502).json({ error: error?.message || 'scenario prediction failed' });
+    }
+  });
+
+  app.post('/api/generate-image', async (req, res) => {
+    const { originalImage, predictionPrompt, promptOptions, faceImage, seed, timeDirection, sceneTime } =
+      req.body || {};
+    if (typeof originalImage !== 'string' || !imageDataUrlRe.test(originalImage)) {
+      return res.status(400).json({ error: 'originalImage (base64 data URL) is required' });
+    }
+    if (typeof predictionPrompt !== 'string' || !predictionPrompt.trim()) {
+      return res.status(400).json({ error: 'predictionPrompt is required' });
+    }
+    try {
+      const image = await generateImage({
+        originalImageDataUrl: originalImage,
+        predictionPrompt,
+        options: promptOptions && typeof promptOptions === 'object' ? promptOptions : undefined,
+        faceImageDataUrl:
+          typeof faceImage === 'string' && imageDataUrlRe.test(faceImage) ? faceImage : undefined,
+        seed: Number.isFinite(seed) ? Number(seed) : undefined,
+        filenamePrefix: 'SpecMem/gen',
+        clock:
+          timeDirection === 'future' || timeDirection === 'past'
+            ? { direction: timeDirection, sceneTime: typeof sceneTime === 'string' ? sceneTime : undefined }
+            : undefined,
+      });
+      res.json({ image, backend: GENERATION_BACKEND });
+    } catch (error: any) {
+      console.error('generate-image failed:', error);
+      res.status(502).json({ error: error?.message || 'image generation failed' });
+    }
+  });
+
+  // Full server-side capture->generate->save pipeline.
+  // Lets TouchDesigner (or anything) hand over one camera frame and get the
+  // whole set of speculative-memory images back, saved + broadcast exactly
+  // like the browser flow. No browser needed.
+  app.post('/api/generate', async (req, res) => {
+    const { image, imageCount, target, sceneTime } = req.body || {};
+    if (typeof image !== 'string' || !imageDataUrlRe.test(image)) {
+      return res.status(400).json({ error: 'A base64 image data URL is required' });
+    }
+
+    const count = normalizeImageCount(imageCount);
+    const captureId = normalizeCaptureId(req.body?.captureId);
+    const normalizedTarget =
+      target && typeof target.x === 'number' && typeof target.y === 'number'
+        ? { x: target.x, y: target.y }
+        : null;
+
+    try {
+      const sourceImageAsset = ensureSourceImageSaved(image, captureId);
+
+      const scenarios = await predictScenarios({
+        imageDataUrl: image,
+        target: normalizedTarget,
+        scenarioCount: count,
+        sceneTime: typeof sceneTime === 'string' ? sceneTime : new Date().toISOString(),
+      });
+
+      try {
+        fs.appendFileSync(
+          predictionDataLogPath,
+          buildPredictionDataLogEntry(
+            captureId,
+            scenarios.map((s, index) => ({
+              sceneIndex: index,
+              label: s.label,
+              predictionText: s.scenario_description,
+            }))
+          ),
+          'utf8'
+        );
+      } catch (logErr) {
+        console.error('generate: prediction log append failed', logErr);
+      }
+
+      const results: Array<{ sceneKey: string; label: string; url: string; predictionText: string }> = [];
+
+      const resolvedSceneTime =
+        typeof sceneTime === 'string' ? sceneTime : new Date().toISOString();
+
+      for (let index = 0; index < scenarios.length; index += 1) {
+        const scenario = scenarios[index];
+        const sceneKey = `gen_${String.fromCharCode(97 + index)}`;
+        const label = `Gen_${String.fromCharCode(97 + index)}`;
+
+        const dataUrl = await generateImage({
+          originalImageDataUrl: image,
+          predictionPrompt: scenario.prediction_prompt,
+          seed: undefined,
+          filenamePrefix: `SpecMem/${sceneKey}`,
+          clock: {
+            direction: scenarioDirection(scenario, index),
+            sceneTime: resolvedSceneTime,
+          },
+        });
+
+        const { buffer, extension } = decodeImageDataUrl(dataUrl);
+        const savedImageAsset = saveImageAsset(
+          buildSavedFilename(sceneKey.charAt(0).toUpperCase() + sceneKey.slice(1), extension),
+          buffer
+        );
+
+        const payload: CaptureEvent = {
+          type: 'capture.saved',
+          captureId,
+          sceneKey,
+          sceneIndex: index,
+          expectedImageCount: count,
+          label,
+          filename: savedImageAsset.filename,
+          absolutePath: savedImageAsset.absolutePath,
+          normalizedPath: savedImageAsset.normalizedPath,
+          relativePath: savedImageAsset.relativePath,
+          url: savedImageAsset.url,
+          latestImagePath: savedImageAsset.absolutePath,
+          latestImageNormalizedPath: savedImageAsset.normalizedPath,
+          latestImageUrl: savedImageAsset.url,
+          sourceImageFilename: sourceImageAsset?.filename || null,
+          sourceImageAbsolutePath: sourceImageAsset?.absolutePath || null,
+          sourceImageNormalizedPath: sourceImageAsset?.normalizedPath || null,
+          sourceImageRelativePath: sourceImageAsset?.relativePath || null,
+          sourceImageUrl: sourceImageAsset?.url || null,
+          savedAt: new Date().toISOString(),
+          size: savedImageAsset.size,
+        };
+
+        publishCapture(payload);
+        console.log(`generate: saved ${sceneKey} -> ${savedImageAsset.absolutePath}`);
+        results.push({ sceneKey, label, url: savedImageAsset.url, predictionText: scenario.scenario_description });
+      }
+
+      res.json({ captureId, backend: GENERATION_BACKEND, count: results.length, scenarios, images: results });
+    } catch (error: any) {
+      console.error('generate pipeline failed:', error);
+      res.status(502).json({ error: error?.message || 'generation pipeline failed' });
+    }
+  });
+
   // Vite middleware for development
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
@@ -808,6 +988,10 @@ async function startServer() {
     console.log(
       `TouchDesigner control listener: ${touchDesignerControlUdpEnabled ? `udp://${touchDesignerControlUdpHost}:${touchDesignerControlUdpPort}` : 'disabled'}`
     );
+    console.log(`Generation backend: ${GENERATION_BACKEND}`);
+    void backendStatus()
+      .then((status) => console.log('Generation status:', JSON.stringify(status)))
+      .catch(() => undefined);
   });
 }
 

@@ -1,11 +1,22 @@
-﻿CONTROL_DAT_PATH = '/project1/td_capture_panel_controls'
+CONTROL_DAT_PATH = '/project1/td_capture_panel_controls'
 
 
 def _debug(message):
     print('[TD Auto Capture Timer] {}'.format(message))
 
 
+NATIVE_CAPTURE_DAT_PATH = '/project1/td_native_capture'
+
+
 def _request_capture():
+    native = op(NATIVE_CAPTURE_DAT_PATH)
+    if native is not None:
+        try:
+            native.module.capture()
+            return
+        except Exception as exc:
+            _debug('native capture failed, falling back: {}'.format(exc))
+
     controls = op(CONTROL_DAT_PATH)
     if controls is None:
         _debug('Control DAT not found: {}'.format(CONTROL_DAT_PATH))

@@ -4,7 +4,7 @@ import { motion, AnimatePresence } from 'motion/react';
 import { Download, WandSparkles } from 'lucide-react';
 import CameraPreview from './components/CameraPreview';
 import { AppState, PredictionData, Target, PredictionItem, TouchDesignerBridgeStatus } from './types';
-import { predictFutureScenarios, generateFutureImage } from './services/geminiService';
+import { predictFutureScenarios, generateFutureImage } from './services/generationService';
 import { normalizeTouchDesignerSessionId, useTouchDesignerBridge } from './hooks/useTouchDesignerBridge';
 
 const getSceneKey = (index: number) => `gen_${String.fromCharCode(97 + index)}`;
