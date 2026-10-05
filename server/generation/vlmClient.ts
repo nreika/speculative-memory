@@ -2,7 +2,7 @@
  * Local VLM scenario planner via Ollama.
  * Replaces the Gemini "predictFutureScenarios" text step.
  */
-import type { ScenarioResult } from "../../services/promptBuilder";
+import { parseClockVisible, type ScenarioResult } from "../../services/promptBuilder";
 
 const OLLAMA_URL = (process.env.OLLAMA_URL || "http://127.0.0.1:11434").replace(/\/$/, "");
 const VLM_MODEL = process.env.VLM_MODEL || "gemma3:latest";
@@ -23,7 +23,10 @@ const JSON_INSTRUCTION =
   "people's appearance; those stay identical. Base every change on what is actually visible in " +
   "this frame (no curtains, windows or objects that are not present).\n" +
   'Return ONLY a JSON object of the form ' +
-  '{"scenarios":[{"prediction_prompt":"...","scenario_description":"...","label":"..."}]}. ' +
+  '{"clock_visible":false,"scenarios":[{"prediction_prompt":"...","scenario_description":"...","label":"..."}]}. ' +
+  '"clock_visible" is a boolean: true ONLY if a clock, a digital time readout, or a physical ' +
+  "number/flip sign showing a time is clearly visible in this frame; false if there is none or " +
+  "you are unsure. Do not guess true. " +
   "No markdown, no commentary.";
 
 interface OllamaGenerateResponse {
@@ -35,6 +38,8 @@ export async function planScenariosLocal(args: {
   imageDataUrl: string;
   prompt: string;
   scenarioCount: number;
+  /** Aborting closes the request, which makes Ollama stop generating. */
+  signal?: AbortSignal;
 }): Promise<ScenarioResult[]> {
   const body = {
     model: VLM_MODEL,
@@ -54,7 +59,9 @@ export async function planScenariosLocal(args: {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(VLM_TIMEOUT_MS),
+      signal: args.signal
+        ? AbortSignal.any([args.signal, AbortSignal.timeout(VLM_TIMEOUT_MS)])
+        : AbortSignal.timeout(VLM_TIMEOUT_MS),
     });
     if (!res.ok) {
       throw new Error(`vlmClient: Ollama ${res.status} ${await res.text()}`);
@@ -74,7 +81,7 @@ export async function planScenariosLocal(args: {
   );
 }
 
-function parseScenarios(raw: string): ScenarioResult[] {
+export function parseScenarios(raw: string): ScenarioResult[] {
   let text = raw.trim();
   // Strip ```json fences if the model added them despite format:json.
   const fence = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
@@ -93,6 +100,9 @@ function parseScenarios(raw: string): ScenarioResult[] {
       return [];
     }
   }
+
+  // Missing / unparseable -> false ("not visible"); one scene-level flag copied onto each scenario.
+  const clockVisible = parseClockVisible((parsed as any)?.clock_visible);
 
   const list = Array.isArray((parsed as any)?.scenarios)
     ? (parsed as any).scenarios
@@ -115,6 +125,7 @@ function parseScenarios(raw: string): ScenarioResult[] {
     .map((item: ScenarioResult, index: number) => ({
       ...item,
       label: item.label || `Timeline ${index + 1}`,
+      clock_visible: clockVisible,
     }));
 }
 

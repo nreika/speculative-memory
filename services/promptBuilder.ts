@@ -10,6 +10,29 @@ export interface ScenarioResult {
   prediction_prompt: string;
   scenario_description: string;
   label: string;
+  /**
+   * Scene-level detection from the planning step (same value on every scenario
+   * of one frame): a clock, digital time readout or physical number/flip sign
+   * is clearly visible. Missing/unknown means "not visible" - never invent one.
+   */
+  clock_visible?: boolean;
+}
+
+/** Strict reading of the model's `clock_visible`: only true / "true" count. */
+export const parseClockVisible = (value: unknown): boolean =>
+  value === true || (typeof value === "string" && value.trim().toLowerCase() === "true");
+
+export type TimeDirection = "future" | "past";
+
+/** Which time direction a scenario represents (index convention + text fallback). */
+export function scenarioDirection(scenario: ScenarioResult, index: number): TimeDirection {
+  const t = `${scenario.scenario_description} ${scenario.label}`.toLowerCase();
+  // Use word boundaries to match explicit time phrases, not embedded words like 手前/後ろ
+  const pastMatches = /秒前|分前|過去|\bearlier\b|\brewind\b|seconds? before|\bprior\b/.test(t);
+  const futureMatches = /秒後|分後|未来|\blater\b|seconds? after|\bforward\b/.test(t);
+  if (pastMatches && !futureMatches) return "past";
+  if (futureMatches && !pastMatches) return "future";
+  return index >= 2 ? "past" : "future";
 }
 
 interface GeminiPromptConfig {
@@ -26,6 +49,8 @@ interface GeminiPromptConfig {
     };
     futureImageGeneration: {
       editInstructionTemplate: string;
+      /** Only added when a clock/number sign is visible and being edited. */
+      clockEditClause: string;
     };
   };
   systemFixed: {
@@ -35,6 +60,8 @@ interface GeminiPromptConfig {
     };
     futureImageGeneration: {
       hardRules: string[];
+      /** Only added when a clock/number sign is visible and being edited. */
+      clockHardRules: string[];
     };
   };
 }
@@ -134,18 +161,29 @@ export const buildScenarioPredictionPrompt = (
   );
 };
 
+/**
+ * `clockEdit` is true only when a clock / number sign is visible AND its digits
+ * are to be edited; otherwise the prompt says nothing about clocks or signs, so
+ * the image model has no reason to paint one.
+ */
 export const buildFutureImagePrompt = (
   predictionPrompt: string,
-  options?: PromptVariantOptions
+  options?: PromptVariantOptions,
+  clockEdit = false
 ): string => {
   const variantContext = buildPromptVariantContext(options);
+  const image = prompts.userEditable.futureImageGeneration;
+  const rules = prompts.systemFixed.futureImageGeneration;
 
   return joinPromptSections(
     replacePlaceholders(
-      prompts.userEditable.futureImageGeneration.editInstructionTemplate,
-      { PREDICTION_PROMPT: predictionPrompt }
+      image.editInstructionTemplate,
+      // Trim trailing periods to avoid duplication when template adds its own period
+      { PREDICTION_PROMPT: predictionPrompt.trim().replace(/\.+$/, "") }
     ),
+    clockEdit ? image.clockEditClause : "",
     variantContext,
-    prompts.systemFixed.futureImageGeneration.hardRules
+    rules.hardRules,
+    clockEdit ? rules.clockHardRules : []
   );
 };

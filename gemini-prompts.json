@@ -24,7 +24,8 @@
       "descriptionLanguageRule": "Write scenario_description in Japanese and mention whether it is 30 seconds later or 30 seconds earlier."
     },
     "futureImageGeneration": {
-      "editInstructionTemplate": "Edit this exact photo according to: {{PREDICTION_PROMPT}}. Change only the people's poses, positions, actions and the digits on any visible number sign. Everything else - the room, furniture, camera, lighting, the number of monitors and what each monitor displays - stays pixel-identical to the input."
+      "editInstructionTemplate": "Edit this exact photo according to: {{PREDICTION_PROMPT}}. Change only the people's poses, positions and actions. Everything else - the room, furniture, camera, lighting, the number of monitors and what each monitor displays - stays pixel-identical to the input.",
+      "clockEditClause": "The digits on the number sign that is visible in the input may also change, as instructed."
     }
   },
   "systemFixed": {
@@ -36,7 +37,7 @@
         "The background, furniture, and room layout are identical.",
         "Do not add, remove, or duplicate any people, monitors, screens, chairs, tables, or other objects - keep the exact same count of everything.",
         "Do not change what any wall-mounted monitor or TV is displaying.",
-        "If a clock, digital time readout, or physical number sign is visible, change ONLY its digits to reflect the time direction (about 30 seconds later or earlier), keeping its position and style identical. State the exact new reading inside prediction_prompt.",
+        "If a clock, digital time readout, or physical number sign is visible, do not mention it or any time reading in prediction_prompt - its digits are edited separately by the system. Never describe a clock, time readout or number sign that is not clearly visible.",
         "Change the behavior of people in the scene based on what they would most plausibly do next (or were doing just before)."
       ],
       "outputFormatRules": [
@@ -44,14 +45,17 @@
         "Each item must have:",
         "1. \"prediction_prompt\": Detailed visual prompt for image generation.",
         "2. \"scenario_description\": Short text explaining the outcome.",
-        "3. \"label\": A short unique label like \"Timeline 1\", \"Timeline 2\", \"Timeline 3\"."
+        "3. \"label\": A short unique label like \"Timeline 1\", \"Timeline 2\", \"Timeline 3\".",
+        "Also return a top-level boolean \"clock_visible\" (next to \"scenarios\"): true ONLY if a clock, a digital time readout, or a physical number/flip sign showing a time is clearly visible in this frame; false if there is none or you are unsure. Never guess true."
       ]
     },
     "futureImageGeneration": {
       "hardRules": [
         "Keep composition, framing and the number of monitors, screens and furniture identical.",
-        "Do not change what any monitor or TV displays.",
-        "Only a visible clock or physical number sign may change its digits, and only if the instruction says so."
+        "Do not change what any monitor or TV displays."
+      ],
+      "clockHardRules": [
+        "Only the visible clock or physical number sign may change its digits, and only as the instruction says."
       ]
     }
   }
