@@ -34,3 +34,10 @@ captures/*
 *.njsproj
 *.sln
 *.sw?
+
+# Recordings and sorted captures are data, not source. They live in
+# ../speculative-memory_data/ (see git history: 13GB of them once ended up
+# staged and then trapped in a GitHub Desktop stash).
+*.mov
+*.mp4
+captures_sorted/
