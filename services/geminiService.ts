@@ -7,13 +7,18 @@ import {
   buildFutureImagePrompt,
   buildScenarioPredictionPrompt,
   clampScenarioCount,
+  parseClockVisible,
 } from "./promptBuilder";
 
 // Re-export so existing imports (and tests) keep working.
 export type { PromptVariantOptions, ScenarioResult };
 export { buildScenarioPredictionPrompt, buildFutureImagePrompt };
 
-const getAI = () => new GoogleGenAI({ apiKey: process.env.API_KEY || "" });
+// API_KEY is what vite's `define` injects into the client bundle; GEMINI_API_KEY
+// is the raw .env name, which is all that exists when this module is imported
+// server-side (GENERATION_BACKEND=gemini|hybrid goes through the Node server).
+const getAI = () =>
+  new GoogleGenAI({ apiKey: process.env.API_KEY || process.env.GEMINI_API_KEY || "" });
 const IMAGE_DATA_URL_PATTERN = /^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/;
 
 const extractInlineImageData = (imageDataUrl: string) => {
@@ -51,7 +56,16 @@ export const predictFutureScenarios = async (
         responseMimeType: "application/json",
         responseSchema: {
           type: Type.OBJECT,
+          // clock_visible first, so the model decides it before writing prompts.
+          propertyOrdering: ["clock_visible", "scenarios"],
           properties: {
+            clock_visible: {
+              type: Type.BOOLEAN,
+              description:
+                "True ONLY if a clock, a digital time readout, or a physical number/flip sign " +
+                "showing a time is clearly visible in this frame. False if there is none, it is " +
+                "not clearly visible, or you are unsure. Do not guess true.",
+            },
             scenarios: {
               type: Type.ARRAY,
               items: {
@@ -69,19 +83,24 @@ export const predictFutureScenarios = async (
               },
             },
           },
-          required: ["scenarios"],
+          required: ["clock_visible", "scenarios"],
         },
       },
     });
 
     const parsed = JSON.parse(response.text || "{}");
+    // Missing / non-boolean counts as "not visible"; copied onto every scenario
+    // so it round-trips through /api/predict-scenarios -> /api/generate-image.
+    const clockVisible = parseClockVisible(parsed.clock_visible);
     const scenarios = Array.isArray(parsed.scenarios)
-      ? parsed.scenarios.filter(
-          (item): item is ScenarioResult =>
-            typeof item?.prediction_prompt === "string" &&
-            typeof item?.scenario_description === "string" &&
-            typeof item?.label === "string"
-        )
+      ? parsed.scenarios
+          .filter(
+            (item): item is ScenarioResult =>
+              typeof item?.prediction_prompt === "string" &&
+              typeof item?.scenario_description === "string" &&
+              typeof item?.label === "string"
+          )
+          .map((item) => ({ ...item, clock_visible: clockVisible }))
       : [];
 
     latestScenarioCount = scenarios.length;
@@ -101,7 +120,8 @@ export const predictFutureScenarios = async (
 export const generateFutureImage = async (
   originalBase64: string,
   predictionPrompt: string,
-  options?: PromptVariantOptions
+  options?: PromptVariantOptions,
+  clockEdit = false
 ): Promise<string> => {
   const ai = getAI();
   const sourceImage = extractInlineImageData(originalBase64);
@@ -111,7 +131,7 @@ export const generateFutureImage = async (
     contents: {
       parts: [
         { inlineData: sourceImage },
-        { text: buildFutureImagePrompt(predictionPrompt, options) },
+        { text: buildFutureImagePrompt(predictionPrompt, options, clockEdit) },
       ],
     },
     config: {
