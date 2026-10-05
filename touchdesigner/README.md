@@ -175,26 +175,46 @@ If you want manual capture over HTTP, set `CONTROL_TRANSPORT = 'http'` in `td_ca
 
 - `POST /api/touchdesigner-control/session/<sessionId>/capture`
 
-### Auto Capture Timer
+### Capture Modes (Timer / Chain / Manual)
 
-If you want automatic generation every 30 seconds, keep the responsibilities separate:
+`td_native_capture.py` (DAT `td_native_capture`) is the capture controller: it decides when to capture, grabs the frame from the `camera` TOP and POSTs it to `/api/generate`. Three modes, selected with custom parameters on `/project1` (page `Capture`; create them once with `op('/project1/td_native_capture').module.install_capture_parameters()`):
 
-- `td_capture_panel_controls.py`: manual button / keyboard capture triggers
-- `td_capture_listener.py`: UDP image receive + capture state updates
-- `td_auto_capture_timer.py`: Timer CHOP callback that calls `request_capture()` on each cycle
+| Parameter | Values | Meaning |
+| --- | --- | --- |
+| `Capturemode` | `timer` (default) / `chain` / `manual` | how captures are triggered |
+| `Captureinterval` | seconds, default `90` | Timer mode interval |
+| `Capturestatus` | read-only | e.g. `timer \| generating td-... (timer)` |
 
-Recommended setup:
+- **Timer**: every `Captureinterval` seconds a fresh frame is saved as `captures/record_<timestamp>.jpg` (so the time-lapse has no gaps). If the pipeline is idle, a generation starts from that frame; if one is running, the frame is only recorded (`POST /api/capture/record`, no lifecycle message, nothing displayed) and the running generation is left alone (`Capturestatus` shows `| recorded HH:MM:SS`). A generation finishing between ticks does not start another; the next idle tick does.
+- **Chain**: the next capture starts as soon as the server reports the previous one completed (all images delivered). After a failure it retries after 10 s. Switching to Chain while idle starts a capture immediately.
+- **Manual**: only the manual control. The manual control (`start_generation_btn`, key `1`) works in every mode; pressed during a generation it starts a fresh capture and the running one is cancelled (Gemini result discarded, ComfyUI prompts dequeued/interrupted). In Timer mode a manual press also restarts the countdown.
+- Switching mode during a generation never cancels it; the new mode applies from the next decision.
 
-1. Create a `Timer CHOP` named `timer1`
-2. Set `Length` to `30`
-3. Turn `Cycle` on
-4. Create a `Text DAT` named `timer1_callbacks`
-5. Set its `File` parameter to `td_auto_capture_timer.py`
-6. Turn `Sync to File` on
-7. Point the `Timer CHOP` `Callbacks DAT` parameter to `timer1_callbacks`
-8. Start the timer once so it begins cycling
+Without the custom parameters the controller runs Timer / 90 s. From Python: `op('/project1/td_native_capture').module.set_mode('chain')`, `.status()`, `.cancel_current()`.
 
-This keeps the auto-capture logic separate from the manual control callbacks, which makes the network easier to read and maintain.
+Heartbeat: `timer1` (callbacks `timer1_callbacks` = `td_auto_capture_timer.py`) calls `heartbeat()` on every cycle (recommended: Length `1`, Cycle on, Play on, press Start once). Once running, the controller also re-schedules itself every second with `run()`, so timing does not depend on the `timer1` length; `timer1` (or the server's `server.ready` message, or any capture) just has to start it after TouchDesigner opens.
+
+Display: images of a capture are held back by `td_capture_listener.py` and shown as a complete set (then the `timer2` ready fade), so a capture cancelled half way never reaches the `Gen_*` TOPs. Images arriving for a cancelled capture are dropped.
+
+#### Lifecycle messages (server -> TD, UDP 9989, next to `capture.saved`)
+
+```json
+{"type": "generation.started",   "captureId": "td-...", "source": "td-native|control|browser", "imageCount": 3, "startedAt": "..."}
+{"type": "generation.completed", "captureId": "td-...", "imageCount": 3, "deliveredCount": 3, "durationMs": 61234, "completedAt": "..."}
+{"type": "generation.cancelled", "captureId": "td-...", "reason": "superseded|requested|client-gone", "supersededBy": "td-...", "durationMs": 9000, "cancelledAt": "..."}
+{"type": "generation.failed",    "captureId": "td-...", "error": "...", "durationMs": 9000, "failedAt": "..."}
+{"type": "server.ready", "startedAt": "..."}
+```
+
+`capture.saved` is unchanged and carries the same `captureId`. Exactly one capture is active on the server; starting a new one cancels the active one (`superseded`).
+
+#### Control (TD -> server)
+
+- `POST /api/generate` `{image, imageCount, captureId}`: starts capture `captureId` (cancelling any active one). Answers `200` when complete, `409 {cancelled: true}` if it was cancelled.
+- `POST /api/capture/cancel` `{captureId?}`, or UDP 9990 `{"type": "cancel", "captureId": "..."}`: cancel without restarting.
+- `GET /api/capture/status`: `{active: {captureId, source, ...} | null}`.
+- `POST /api/capture/record` `{image}`: save a record-only frame; does not touch the active capture and sends nothing to TD.
+- Browser fallback: `POST /api/touchdesigner-control/session/<id>/capture` / UDP `{"type": "capture", ...}` accept an optional `captureId`; the server starts the capture immediately and fails it if no browser picks it up within 30 s.
 
 ## Notes
 

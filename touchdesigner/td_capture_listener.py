@@ -40,6 +40,16 @@ RELOAD_RETRY_FRAMES = (1, 6)
 DEFAULT_IMAGE_COUNT = 3
 MIN_IMAGE_COUNT = 1
 MAX_IMAGE_COUNT = 10
+CONTROLLER_DAT_PATH = '/project1/td_native_capture'
+# Captures announced by generation.started are held back and displayed only as
+# a complete set (on generation.completed, or once every expected scene has
+# arrived), so the images of a capture that gets cancelled half way never reach
+# the Movie File In TOPs. Captures without lifecycle messages (old senders) are
+# displayed image by image as before.
+DEFER_DISPLAY_UNTIL_COMPLETE = True
+# A failed capture (e.g. ComfyUI error on image 2) shows nothing by default;
+# True shows the images it did deliver (the old behaviour).
+SHOW_PARTIAL_ON_FAILURE = False
 
 KNOWN_SCENE_KEYS = tuple(sorted(MOVIE_FILE_IN_OPS))
 
@@ -69,6 +79,16 @@ BATCH_STATE = {
     'completedAt': '',
     'fadeTriggered': False,
 }
+# The capture currently being generated: its images wait here until complete.
+PENDING = {
+    'captureId': '',
+    'expectedImageCount': DEFAULT_IMAGE_COUNT,
+    'payloads': {},
+    'completed': False,
+}
+LIFECYCLE_CAPTURE_IDS = []   # captures announced by generation.started (bounded)
+CANCELLED_CAPTURE_IDS = []   # captures cancelled by the server (bounded)
+DISPLAYED_CAPTURE_IDS = []   # captures whose set has been displayed (bounded)
 
 
 def _utc_timestamp():
@@ -299,7 +319,12 @@ def _trigger_ready_fade_if_needed():
         BATCH_STATE['fadeTriggered'] = True
         _debug('TimeWarp bridge: ready fade started for capture {}'.format(BATCH_STATE['captureId']))
 
-def resync_latest_scenes(expected_capture_id=''):
+def _scene_index(payload):
+    value = payload.get('sceneIndex', 0)
+    return value if isinstance(value, int) else 0
+
+
+def _fetch_manifest_payloads(expected_capture_id=''):
     manifest = _fetch_latest_manifest()
     scenes = manifest.get('scenes', {}) if isinstance(manifest, dict) else {}
     payloads = []
@@ -312,15 +337,136 @@ def resync_latest_scenes(expected_capture_id=''):
         if expected_capture_id and payload.get('captureId', '') != expected_capture_id:
             continue
         payloads.append(payload)
+    payloads.sort(key=_scene_index)
+    return payloads
 
-    payloads.sort(
-        key=lambda item: item.get('sceneIndex', 0)
-        if isinstance(item.get('sceneIndex', 0), int)
-        else 0
-    )
+
+def resync_latest_scenes(expected_capture_id=''):
+    payloads = _fetch_manifest_payloads(expected_capture_id)
+    for payload in payloads:
+        if _is_cancelled(payload.get('captureId', '')):
+            continue
+        if _is_deferred(payload.get('captureId', '')):
+            _buffer_payload(payload)
+        else:
+            _apply_capture_payload(payload)
+    return bool(payloads)
+
+
+# --- capture lifecycle (generation.* messages from the server) ----------------
+
+def _controller_module():
+    controller = op(CONTROLLER_DAT_PATH)
+    return controller.module if controller is not None else None
+
+
+def _remember(id_list, capture_id, limit=50):
+    if capture_id and capture_id not in id_list:
+        id_list.append(capture_id)
+        del id_list[:-limit]
+
+
+def _is_cancelled(capture_id):
+    if not capture_id:
+        return False
+    if capture_id in CANCELLED_CAPTURE_IDS:
+        return True
+    controller = _controller_module()
+    try:
+        return bool(controller and controller.is_stale_capture(capture_id))
+    except Exception:
+        return False
+
+
+def _is_deferred(capture_id):
+    return DEFER_DISPLAY_UNTIL_COMPLETE and bool(capture_id) and capture_id in LIFECYCLE_CAPTURE_IDS
+
+
+def _reset_pending(capture_id='', expected_image_count=DEFAULT_IMAGE_COUNT):
+    PENDING.update({
+        'captureId': capture_id or '',
+        'expectedImageCount': _clamp_image_count(expected_image_count),
+        'payloads': {},
+        'completed': False,
+    })
+
+
+def _buffer_payload(payload):
+    capture_id = payload.get('captureId', '')
+    scene_key = _normalize_scene_key(payload.get('sceneKey', ''))
+    if scene_key not in SCENE_STATES:
+        return False
+    if capture_id != PENDING['captureId']:
+        _reset_pending(capture_id, payload.get('expectedImageCount', DEFAULT_IMAGE_COUNT))
+    PENDING['payloads'][scene_key] = payload
+    return True
+
+
+def _pending_is_complete():
+    expected = min(len(KNOWN_SCENE_KEYS), PENDING['expectedImageCount'])
+    return len(PENDING['payloads']) >= expected
+
+
+def _flush_pending(capture_id, completed):
+    """Display the buffered set of `capture_id` at once, then the ready fade."""
+    if PENDING['captureId'] != capture_id or not PENDING['payloads']:
+        return False
+    payloads = sorted(PENDING['payloads'].values(), key=_scene_index)
+    _reset_pending()
+    _remember(DISPLAYED_CAPTURE_IDS, capture_id)
     for payload in payloads:
         _apply_capture_payload(payload)
-    return bool(payloads)
+    if completed and BATCH_STATE['captureId'] == capture_id:
+        # The server says this is everything (it may have planned fewer
+        # scenarios than requested), so the set counts as ready.
+        BATCH_STATE['expectedImageCount'] = _clamp_image_count(len(payloads))
+        BATCH_STATE['isReady'] = len(BATCH_STATE['receivedSceneKeys']) >= _expected_scene_count()
+        if BATCH_STATE['isReady'] and not BATCH_STATE['completedAt']:
+            BATCH_STATE['completedAt'] = _utc_timestamp()
+    _trigger_ready_fade_if_needed()
+    _debug('TimeWarp bridge: displayed capture {} ({} images)'.format(capture_id, len(payloads)))
+    return True
+
+
+def _handle_lifecycle(payload):
+    msg_type = payload.get('type', '')
+    capture_id = str(payload.get('captureId', '') or '')
+
+    controller = _controller_module()
+    if controller is not None:
+        try:
+            if msg_type == 'server.ready':
+                controller.ensure_running()
+            else:
+                controller.on_server_message(payload)
+        except Exception as exc:
+            _debug('capture controller error: {}'.format(exc))
+
+    if msg_type == 'generation.started':
+        _remember(LIFECYCLE_CAPTURE_IDS, capture_id)
+        if PENDING['captureId'] != capture_id:
+            _reset_pending(capture_id, payload.get('imageCount', DEFAULT_IMAGE_COUNT))
+    elif msg_type == 'generation.completed':
+        if capture_id in DISPLAYED_CAPTURE_IDS:
+            return
+        if PENDING['captureId'] != capture_id or not _pending_is_complete():
+            if AUTO_RECOVER_FROM_MANIFEST:
+                # A capture.saved datagram went missing: fill in from the manifest.
+                for item in _fetch_manifest_payloads(capture_id):
+                    _buffer_payload(item)
+        _flush_pending(capture_id, completed=True)
+    elif msg_type == 'generation.cancelled':
+        _remember(CANCELLED_CAPTURE_IDS, capture_id)
+        if PENDING['captureId'] == capture_id:
+            _debug('TimeWarp bridge: dropped {} buffered image(s) of cancelled capture {}'.format(
+                len(PENDING['payloads']), capture_id))
+            _reset_pending()
+    elif msg_type == 'generation.failed':
+        if PENDING['captureId'] == capture_id:
+            if SHOW_PARTIAL_ON_FAILURE:
+                _flush_pending(capture_id, completed=False)
+            else:
+                _reset_pending()
 
 
 def onReceive(dat, rowIndex, message, bytes, peer):
@@ -330,6 +476,29 @@ def onReceive(dat, rowIndex, message, bytes, peer):
         _debug('TimeWarp bridge: invalid JSON {}'.format(exc))
         return
 
+    if not isinstance(payload, dict):
+        _debug('TimeWarp bridge: unsupported payload')
+        return
+
+    msg_type = str(payload.get('type', ''))
+    if msg_type.startswith('generation.') or msg_type == 'server.ready':
+        _handle_lifecycle(payload)
+        return
+
+    capture_id = payload.get('captureId', '')
+    if _is_cancelled(capture_id):
+        _debug('TimeWarp bridge: ignoring image of cancelled capture {}'.format(capture_id))
+        return
+
+    if _is_deferred(capture_id):
+        if not _buffer_payload(payload):
+            _debug('TimeWarp bridge: unsupported capture payload')
+            return
+        if _pending_is_complete():
+            _flush_pending(capture_id, completed=False)
+        return
+
+    # Untracked capture (no generation.started seen): display image by image.
     if not _apply_capture_payload(payload):
         _debug('TimeWarp bridge: unsupported capture payload')
         return

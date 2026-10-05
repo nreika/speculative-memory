@@ -124,16 +124,38 @@ NATIVE_CAPTURE_DAT_PATH = '/project1/td_native_capture'
 
 
 def request_capture():
-    image_count = _read_generation_count()
+    """Manual capture (button / key 1). Works in every capture mode.
 
+    Goes through the capture controller in td_native_capture: if a generation
+    is running it is cancelled and a fresh capture starts. The controller falls
+    back to the browser path (request_remote_capture) by itself when the
+    native frame grab fails.
+    """
     native = op(NATIVE_CAPTURE_DAT_PATH)
     if native is not None:
         try:
-            native.module.capture()
-            _debug('Native capture triggered (imageCount={}).'.format(image_count))
-            return {'native': True, 'imageCount': image_count}
+            capture_id = native.module.manual_capture()
+            _debug('Manual capture -> {}.'.format(capture_id))
+            return {'native': True, 'captureId': capture_id}
         except Exception as exc:
             _debug('Native capture failed, falling back to remote queue: {}'.format(exc))
+
+    return request_remote_capture()
+
+
+def request_capture_mode(mode, interval=None):
+    """Switch capture mode ('timer' | 'chain' | 'manual') from a callback."""
+    return op(NATIVE_CAPTURE_DAT_PATH).module.set_mode(mode, interval)
+
+
+def request_remote_capture(capture_id=None, image_count=None):
+    """Old control path: queue the capture for the browser app.
+
+    The server starts (and owns) the capture as soon as the command arrives,
+    cancelling any capture still in flight.
+    """
+    if image_count is None:
+        image_count = _read_generation_count()
 
     if CONTROL_TRANSPORT.lower() == 'udp':
         payload = {
@@ -141,6 +163,8 @@ def request_capture():
             'sessionId': SESSION_ID,
             'imageCount': image_count,
         }
+        if capture_id:
+            payload['captureId'] = capture_id
         _send_udp_json(CONTROL_UDP_HOST, CONTROL_UDP_PORT, payload)
         _debug(
             'Queued remote capture command via udp://{}:{} (imageCount={}).'.format(
@@ -155,7 +179,10 @@ def request_capture():
         SERVER_BASE_URL.rstrip('/'),
         SESSION_ID
     )
-    response = _post_json(url, {'imageCount': image_count})
+    body = {'imageCount': image_count}
+    if capture_id:
+        body['captureId'] = capture_id
+    response = _post_json(url, body)
     command_id = response.get('command', {}).get('id', '?')
     _debug('Queued remote capture command via HTTP #{} (imageCount={}).'.format(command_id, image_count))
     return response

@@ -4,7 +4,13 @@ import { motion, AnimatePresence } from 'motion/react';
 import { Download, WandSparkles } from 'lucide-react';
 import CameraPreview from './components/CameraPreview';
 import { AppState, PredictionData, Target, PredictionItem, TouchDesignerBridgeStatus } from './types';
-import { predictFutureScenarios, generateFutureImage } from './services/generationService';
+import {
+  CaptureCancelledError,
+  generateFutureImage,
+  isCaptureCancelled,
+  postJson,
+  predictFutureScenarios,
+} from './services/generationService';
 import { normalizeTouchDesignerSessionId, useTouchDesignerBridge } from './hooks/useTouchDesignerBridge';
 
 const getSceneKey = (index: number) => `gen_${String.fromCharCode(97 + index)}`;
@@ -16,6 +22,8 @@ const MAX_GENERATION_COUNT = 10;
 
 interface RemoteCaptureCommand {
   id: number;
+  /** Server-assigned capture this command starts (absent on old servers). */
+  captureId?: string;
   imageCount: number;
   promptVariant?: string | null;
   promptParams?: Record<string, number | string>;
@@ -144,10 +152,11 @@ const App: React.FC = () => {
 
         const items = Array.isArray(data.items) ? data.items : [];
         const captureCommands = items
-          .filter((item): item is { id: number; type: string; imageCount?: number; promptVariant?: unknown; promptParams?: Record<string, number | string> } => typeof item?.id === 'number' && typeof item?.type === 'string')
+          .filter((item): item is { id: number; type: string; captureId?: unknown; imageCount?: number; promptVariant?: unknown; promptParams?: Record<string, number | string> } => typeof item?.id === 'number' && typeof item?.type === 'string')
           .filter((item) => item.type === 'capture')
           .map((item) => ({
             id: item.id,
+            captureId: typeof item.captureId === 'string' && item.captureId ? item.captureId : undefined,
             imageCount: clampGenerationCount(
               typeof item.imageCount === 'number' ? item.imageCount : DEFAULT_GENERATION_COUNT
             ),
@@ -156,15 +165,12 @@ const App: React.FC = () => {
           }));
 
         if (captureCommands.length > 0) {
-          setRemoteCaptureQueue((current) => {
-            const next = [...current];
-            captureCommands.forEach((command) => {
-              if (!next.some((item) => item.id === command.id)) {
-                next.push(command);
-              }
-            });
-            return next;
-          });
+          // Latest capture wins: a newer command replaces any pending one
+          // (no backlog) and, once handled, cancels the capture in flight.
+          const latest = captureCommands[captureCommands.length - 1];
+          setRemoteCaptureQueue((current) =>
+            current.some((item) => item.id === latest.id) ? current : [latest]
+          );
         }
 
         if (typeof data.lastId === 'number') {
@@ -192,27 +198,53 @@ const App: React.FC = () => {
     };
   }, [cameraStream, normalizedTouchDesignerSessionId]);
 
+  // The capture this tab is running. A newer capture (TD manual press, the
+  // on-screen button) aborts it: its fetches are cancelled and nothing it
+  // produces is shown or saved.
+  const activeCaptureRef = useRef<{ captureId: string; controller: AbortController } | null>(null);
+
   const handleCapture = useCallback(async (
     base64: string,
     requestedImageCount = DEFAULT_GENERATION_COUNT,
-    promptOptions?: { variant?: string | null; params?: Record<string, number | string> }
+    promptOptions?: { variant?: string | null; params?: Record<string, number | string> },
+    requestedCaptureId?: string
   ) => {
+    activeCaptureRef.current?.controller.abort();
+    const captureId = requestedCaptureId || `web-${Date.now()}`;
+    const controller = new AbortController();
+    const run = { captureId, controller };
+    activeCaptureRef.current = run;
+    const capture = { captureId, signal: controller.signal };
+    const isCurrent = () => activeCaptureRef.current === run && !controller.signal.aborted;
+    const assertCurrent = () => {
+      if (!isCurrent()) {
+        throw new CaptureCancelledError(captureId);
+      }
+    };
+
     setAppState(AppState.ANALYZING);
     setError(null);
     setSelectedTimelineIndex(0);
 
     try {
       const imageCount = clampGenerationCount(requestedImageCount);
-      const scenarios = await predictFutureScenarios(base64, target, imageCount, promptOptions);
+      const sceneTime = new Date().toISOString();
+      const scenarios = await predictFutureScenarios(base64, target, imageCount, promptOptions, capture);
+      assertCurrent();
       setAppState(AppState.GENERATING);
 
       const items: PredictionItem[] = await Promise.all(
-        scenarios.map(async (s) => ({
-          predictedImage: await generateFutureImage(base64, s.prediction_prompt, promptOptions),
+        scenarios.map(async (s, index) => ({
+          predictedImage: await generateFutureImage(base64, s.prediction_prompt, promptOptions, capture, {
+            scenario: s,
+            index,
+            sceneTime
+          }),
           predictionText: s.scenario_description,
           label: s.label
         }))
       );
+      assertCurrent();
 
       const captureTimestamp = Date.now();
       const prediction: PredictionData = {
@@ -227,8 +259,9 @@ const App: React.FC = () => {
         const response = await fetch('/api/save-prediction-data', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
+          signal: controller.signal,
           body: JSON.stringify({
-            captureId: String(prediction.timestamp),
+            captureId,
             items: prediction.items.map((item, index) => ({
               sceneIndex: index,
               label: item.label,
@@ -246,36 +279,58 @@ const App: React.FC = () => {
         console.error('Prediction data save failed:', saveTextErr);
       }
 
-      // Automatically save to local folder via server API
+      // Automatically save to local folder via server API (this is what
+      // publishes the images to TouchDesigner; the server refuses saves for a
+      // capture it has cancelled).
       try {
         await Promise.all(prediction.items.map((item, index) =>
-          fetch('/api/save-image', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              image: item.predictedImage,
-              originalImage: prediction.originalImage,
-              captureId: String(prediction.timestamp),
-              label: getGenerationLabel(index),
-              sceneKey: getSceneKey(index),
-              sceneIndex: index,
-              expectedImageCount: prediction.items.length
-            })
-          })
+          postJson('/api/save-image', {
+            image: item.predictedImage,
+            originalImage: prediction.originalImage,
+            captureId,
+            label: getGenerationLabel(index),
+            sceneKey: getSceneKey(index),
+            sceneIndex: index,
+            expectedImageCount: prediction.items.length
+          }, controller.signal)
         ));
         console.log("All images auto-saved to server.");
       } catch (saveErr) {
+        if (isCaptureCancelled(saveErr)) {
+          throw saveErr;
+        }
         console.error("Auto-save failed:", saveErr);
       }
+      assertCurrent();
+
+      // Explicit end-of-capture signal: TD's Chain mode starts the next one.
+      await postJson(`/api/capture/${encodeURIComponent(captureId)}/complete`, {}).catch((completeErr) => {
+        console.warn('Capture completion report failed:', completeErr);
+      });
 
       setAppState(AppState.IDLE);
       // Auto-flash the first result
       setShowFuture(true);
       setTimeout(() => setShowFuture(false), 2500);
     } catch (err: any) {
+      if (isCaptureCancelled(err) || !isCurrent()) {
+        console.log(`Capture ${captureId} cancelled.`);
+        if (activeCaptureRef.current === run) {
+          activeCaptureRef.current = null;
+          setAppState(AppState.IDLE);
+        }
+        return;
+      }
       console.error(err);
+      void postJson(`/api/capture/${encodeURIComponent(captureId)}/fail`, {
+        error: err?.message || 'browser capture failed'
+      }).catch(() => undefined);
       setError(err.message || "An unexpected error occurred.");
       setAppState(AppState.ERROR);
+    } finally {
+      if (activeCaptureRef.current === run && !controller.signal.aborted) {
+        activeCaptureRef.current = null;
+      }
     }
   }, [target]);
 

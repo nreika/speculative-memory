@@ -13,6 +13,12 @@ import {
   predictScenarios,
   scenarioDirection,
 } from './server/generation/orchestrator';
+import {
+  CaptureLifecycleMessage,
+  CaptureManager,
+  CaptureSource,
+  isAbortError,
+} from './server/captureManager';
 
 interface CaptureEvent {
   type: 'capture.saved';
@@ -93,19 +99,27 @@ type TouchDesignerControlCommandType = 'capture';
 interface TouchDesignerControlCommand {
   id: number;
   type: TouchDesignerControlCommandType;
+  /** The capture this command starts; the browser sends it back on every request. */
+  captureId: string;
   imageCount: number;
   promptVariant?: string | null;
   promptParams?: Record<string, number | string>;
   createdAt: string;
 }
 
-interface ParsedTouchDesignerControlMessage {
-  sessionId: string;
-  type: TouchDesignerControlCommandType;
-  imageCount: number;
-  promptVariant?: string | null;
-  promptParams?: Record<string, number | string>;
-}
+type ParsedTouchDesignerControlMessage =
+  | {
+      sessionId: string;
+      type: 'capture';
+      captureId?: string;
+      imageCount: number;
+      promptVariant?: string | null;
+      promptParams?: Record<string, number | string>;
+    }
+  | {
+      type: 'cancel';
+      captureId?: string;
+    };
 
 interface TouchDesignerControlSession {
   sessionId: string;
@@ -155,6 +169,54 @@ async function startServer() {
   const touchDesignerStreamSessions = new Map<string, TouchDesignerStreamSession>();
   const touchDesignerControlSessions = new Map<string, TouchDesignerControlSession>();
   const sourceImageAssetsByCaptureId = new Map<string, SavedImageAsset>();
+  const sendToTouchDesigner = (payload: unknown, what: string) => {
+    if (!touchDesignerBridgeEnabled) {
+      return;
+    }
+
+    udpClient.send(Buffer.from(JSON.stringify(payload)), touchDesignerPort, touchDesignerHost, (error) => {
+      if (error) {
+        console.error(`Failed to notify TouchDesigner (${what}):`, error);
+      }
+    });
+  };
+  // Single active capture; lifecycle messages go to TD next to capture.saved.
+  const captureManager = new CaptureManager({
+    notify: (message: CaptureLifecycleMessage) => sendToTouchDesigner(message, message.type),
+    pickupTimeoutMs: Number(process.env.CAPTURE_PICKUP_TIMEOUT_MS || '30000'),
+    idleTimeoutMs: Number(process.env.CAPTURE_IDLE_TIMEOUT_MS || '360000'),
+  });
+  /**
+   * Signal for one HTTP request's share of a capture: aborts when the capture
+   * is cancelled, or when the client goes away mid-request (the browser
+   * aborted its fetch / the tab closed / TD dropped the connection). A client
+   * vanishing while its capture is still active cancels the capture.
+   */
+  const requestSignal = (res: express.Response, captureId: string | null, captureSignal?: AbortSignal) => {
+    const closed = new AbortController();
+    res.on('close', () => {
+      if (res.writableEnded) {
+        return;
+      }
+      closed.abort(new DOMException('client closed the request', 'AbortError'));
+      if (captureId && captureManager.isActive(captureId)) {
+        captureManager.cancel(captureId, 'client-gone');
+      }
+    });
+    return captureSignal ? AbortSignal.any([captureSignal, closed.signal]) : closed.signal;
+  };
+  const readCaptureId = (value: unknown): string | null => {
+    const rawValue = String(value ?? '').trim();
+    if (!rawValue) {
+      return null;
+    }
+    return rawValue.replace(/[^a-zA-Z0-9_-]/g, '') || null;
+  };
+  const sendCancelled = (res: express.Response, captureId: string) => {
+    if (!res.headersSent && !res.writableEnded && !res.destroyed) {
+      res.status(409).json({ cancelled: true, captureId, state: captureManager.stateOf(captureId) });
+    }
+  };
   const imageDataUrlPattern = /^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/;
   const normalizePath = (filePath: string) => filePath.replace(/\\/g, '/');
   const normalizeSceneKey = (value: unknown, fallbackLabel: unknown) => {
@@ -377,6 +439,7 @@ async function startServer() {
   const enqueueTouchDesignerControlCommand = (
     sessionId: string,
     type: TouchDesignerControlCommandType,
+    captureId: string,
     imageCount: number,
     promptVariant?: string | null,
     promptParams?: Record<string, number | string>
@@ -385,6 +448,7 @@ async function startServer() {
     const command: TouchDesignerControlCommand = {
       id: session.nextCommandId++,
       type,
+      captureId,
       imageCount: normalizeImageCount(imageCount),
       promptVariant: typeof promptVariant === 'string' ? promptVariant.trim() || null : null,
       promptParams: promptParams && typeof promptParams === 'object' ? promptParams : undefined,
@@ -403,21 +467,32 @@ async function startServer() {
     source: string,
     imageCount = defaultImageCount,
     promptVariant?: string | null,
-    promptParams?: Record<string, number | string>
+    promptParams?: Record<string, number | string>,
+    requestedCaptureId?: string | null
   ) => {
     cleanupExpiredTouchDesignerControlSessions();
 
     const normalizedSessionId = normalizeSessionId(sessionId);
     const normalizedImageCount = normalizeImageCount(imageCount);
+    const captureId = readCaptureId(requestedCaptureId) || `ctl-${Date.now()}`;
+    // The capture starts now (cancelling any capture still in flight), so TD
+    // sees generation.started right away; the browser attaches to it when it
+    // picks the command up, or the pickup watchdog fails it.
+    captureManager.begin(captureId, {
+      source: 'control',
+      imageCount: normalizedImageCount,
+      awaitingClient: true,
+    });
     const { session, command } = enqueueTouchDesignerControlCommand(
       normalizedSessionId,
       'capture',
+      captureId,
       normalizedImageCount,
       promptVariant,
       promptParams
     );
     console.log(
-      `TouchDesigner remote capture queued via ${source} for session "${normalizedSessionId}" (#${command.id}, imageCount=${normalizedImageCount}).`
+      `TouchDesigner remote capture queued via ${source} for session "${normalizedSessionId}" (#${command.id}, captureId=${captureId}, imageCount=${normalizedImageCount}).`
     );
     return { session, command };
   };
@@ -431,10 +506,14 @@ async function startServer() {
       const parsed = JSON.parse(trimmed);
       if (parsed && typeof parsed === 'object') {
         const type = parsed.type ?? parsed.action;
+        if (type === 'cancel') {
+          return { type: 'cancel', captureId: readCaptureId(parsed.captureId) ?? undefined };
+        }
         if (type === 'capture') {
           return {
             type: 'capture',
             sessionId: normalizeSessionId(parsed.sessionId),
+            captureId: readCaptureId(parsed.captureId) ?? undefined,
             imageCount: normalizeImageCount(parsed.imageCount ?? parsed.count),
             promptVariant: typeof parsed.promptVariant === 'string' ? parsed.promptVariant : null,
             promptParams: parsed.promptParams && typeof parsed.promptParams === 'object' ? parsed.promptParams : undefined
@@ -446,6 +525,9 @@ async function startServer() {
     }
 
     const [rawType, rawSessionId, rawImageCount] = trimmed.split(':', 3);
+    if (rawType === 'cancel') {
+      return { type: 'cancel', captureId: readCaptureId(rawSessionId) ?? undefined };
+    }
     if (rawType === 'capture') {
       return {
         type: 'capture',
@@ -465,15 +547,7 @@ async function startServer() {
     fs.writeFileSync(latestMetaPath, JSON.stringify(payload, null, 2), 'utf8');
     fs.writeFileSync(latestScenesMetaPath, JSON.stringify(latestScenesManifest, null, 2), 'utf8');
 
-    if (!touchDesignerBridgeEnabled) {
-      return;
-    }
-
-    udpClient.send(Buffer.from(JSON.stringify(payload)), touchDesignerPort, touchDesignerHost, (error) => {
-      if (error) {
-        console.error('Failed to notify TouchDesigner:', error);
-      }
-    });
+    sendToTouchDesigner(payload, 'capture.saved');
   };
 
   app.use(cors());
@@ -628,7 +702,14 @@ async function startServer() {
     const promptParams = req.body?.promptParams && typeof req.body.promptParams === 'object'
       ? req.body.promptParams as Record<string, number | string>
       : undefined;
-    const { session, command } = queueTouchDesignerCapture(sessionId, 'http', imageCount, promptVariant, promptParams);
+    const { session, command } = queueTouchDesignerCapture(
+      sessionId,
+      'http',
+      imageCount,
+      promptVariant,
+      promptParams,
+      req.body?.captureId
+    );
     res.json({
       success: true,
       command,
@@ -642,8 +723,11 @@ async function startServer() {
     const sessionId = normalizeSessionId(req.params.sessionId);
     const session = getTouchDesignerControlSession(sessionId) || createTouchDesignerControlSession(sessionId);
     const after = Number(req.query.after || '0');
-    const items = session.commands.filter((item) => item.id > after);
-    const lastId = items.length > 0 ? items[items.length - 1].id : after;
+    const newer = session.commands.filter((item) => item.id > after);
+    const lastId = newer.length > 0 ? newer[newer.length - 1].id : after;
+    // Only commands whose capture is still live: a browser that (re)connects
+    // must not replay a backlog of old/cancelled captures.
+    const items = newer.filter((item) => captureManager.isActive(item.captureId));
 
     res.json({
       items,
@@ -717,6 +801,17 @@ async function startServer() {
       return res.status(400).json({ error: 'No image data provided' });
     }
 
+    // Lifecycle-tracked captures (the browser sends the captureId it was given)
+    // are published only while still active. Unknown ids keep the old,
+    // untracked behaviour.
+    const trackedCaptureId = readCaptureId(captureId);
+    if (trackedCaptureId) {
+      const state = captureManager.stateOf(trackedCaptureId);
+      if (state !== 'active' && state !== 'unknown') {
+        return sendCancelled(res, trackedCaptureId);
+      }
+    }
+
     try {
       const normalizedCaptureId = normalizeCaptureId(captureId);
       const sourceImageAsset = ensureSourceImageSaved(originalImage, normalizedCaptureId);
@@ -749,6 +844,12 @@ async function startServer() {
         size: savedImageAsset.size
       };
 
+      if (trackedCaptureId && captureManager.stateOf(trackedCaptureId) !== 'unknown') {
+        if (!captureManager.isActive(trackedCaptureId)) {
+          return sendCancelled(res, trackedCaptureId);
+        }
+        captureManager.noteDelivered(trackedCaptureId);
+      }
       publishCapture(payload);
 
       console.log(`Saved image to: ${savedImageAsset.absolutePath}`);
@@ -770,6 +871,51 @@ async function startServer() {
     }
   });
 
+  // --- Capture lifecycle API ---
+  app.get('/api/capture/status', (_req, res) => {
+    res.json(captureManager.snapshot());
+  });
+
+  // Record-only frame (Timer mode tick while a generation is running): saved
+  // as captures/record_<timestamp>.<ext>, the same series as the source
+  // frames of generated captures. Deliberately inert: it does not touch the
+  // active capture, sends no generation.* message and nothing to TD's display.
+  app.post('/api/capture/record', (req, res) => {
+    const { image } = req.body || {};
+    if (typeof image !== 'string' || !imageDataUrlRe.test(image)) {
+      return res.status(400).json({ error: 'A base64 image data URL is required' });
+    }
+    try {
+      const { buffer, extension } = decodeImageDataUrl(image);
+      const asset = saveImageAsset(buildSavedFilename('record', extension), buffer);
+      console.log(`Saved record-only frame to: ${asset.absolutePath}`);
+      res.json({ success: true, record: asset, savedAt: new Date().toISOString() });
+    } catch (error: any) {
+      console.error('capture/record failed:', error);
+      res.status(500).json({ error: error?.message || 'record save failed' });
+    }
+  });
+
+  // Cancel the given capture (or whatever is active). Body: { captureId? }
+  app.post('/api/capture/cancel', (req, res) => {
+    const captureId = readCaptureId(req.body?.captureId);
+    const cancelled = captureManager.cancel(captureId, 'requested');
+    res.json({ cancelled, ...captureManager.snapshot() });
+  });
+
+  // The browser path reports the end of its capture explicitly.
+  app.post('/api/capture/:captureId/complete', (req, res) => {
+    const captureId = readCaptureId(req.params.captureId) || '';
+    const completed = captureManager.complete(captureId);
+    res.status(completed ? 200 : 409).json({ completed, state: captureManager.stateOf(captureId) });
+  });
+
+  app.post('/api/capture/:captureId/fail', (req, res) => {
+    const captureId = readCaptureId(req.params.captureId) || '';
+    const failed = captureManager.fail(captureId, new Error(String(req.body?.error || 'client reported failure')));
+    res.status(failed ? 200 : 409).json({ failed, state: captureManager.stateOf(captureId) });
+  });
+
   app.post('/api/predict-scenarios', async (req, res) => {
     const { image, target, scenarioCount, promptOptions, sceneTime } = req.body || {};
     if (typeof image !== 'string' || !imageDataUrlRe.test(image)) {
@@ -779,6 +925,29 @@ async function startServer() {
       target && typeof target.x === 'number' && typeof target.y === 'number'
         ? { x: target.x, y: target.y }
         : null;
+
+    // With a captureId this request is the first step of a tracked capture:
+    // attach to it if TD already started it (control command), start it if it
+    // is new (browser-initiated capture; cancels the one in flight), refuse it
+    // if it has already ended.
+    const captureId = readCaptureId(req.body?.captureId);
+    let signal: AbortSignal | undefined;
+    if (captureId) {
+      const state = captureManager.stateOf(captureId);
+      if (state !== 'active' && state !== 'unknown') {
+        return sendCancelled(res, captureId);
+      }
+      const capture =
+        state === 'active'
+          ? captureManager.get(captureId)!
+          : captureManager.begin(captureId, {
+              source: 'browser',
+              imageCount: normalizeImageCount(scenarioCount),
+            });
+      captureManager.touch(captureId);
+      signal = requestSignal(res, captureId, capture.signal);
+    }
+
     try {
       const scenarios = await predictScenarios({
         imageDataUrl: image,
@@ -786,16 +955,30 @@ async function startServer() {
         scenarioCount: normalizeImageCount(scenarioCount),
         options: promptOptions && typeof promptOptions === 'object' ? promptOptions : undefined,
         sceneTime: typeof sceneTime === 'string' ? sceneTime : undefined,
+        signal,
       });
-      res.json({ scenarios, backend: GENERATION_BACKEND });
+      if (captureId) {
+        if (!captureManager.isActive(captureId)) {
+          return sendCancelled(res, captureId);
+        }
+        captureManager.touch(captureId);
+      }
+      res.json({ scenarios, backend: GENERATION_BACKEND, captureId });
     } catch (error: any) {
+      if (captureId && (isAbortError(error) || !captureManager.isActive(captureId))) {
+        console.log(`predict-scenarios: capture ${captureId} cancelled during planning`);
+        return sendCancelled(res, captureId);
+      }
       console.error('predict-scenarios failed:', error);
+      if (captureId) {
+        captureManager.fail(captureId, error);
+      }
       res.status(502).json({ error: error?.message || 'scenario prediction failed' });
     }
   });
 
   app.post('/api/generate-image', async (req, res) => {
-    const { originalImage, predictionPrompt, promptOptions, faceImage, seed, timeDirection, sceneTime } =
+    const { originalImage, predictionPrompt, promptOptions, faceImage, seed, timeDirection, sceneTime, clockVisible } =
       req.body || {};
     if (typeof originalImage !== 'string' || !imageDataUrlRe.test(originalImage)) {
       return res.status(400).json({ error: 'originalImage (base64 data URL) is required' });
@@ -803,6 +986,18 @@ async function startServer() {
     if (typeof predictionPrompt !== 'string' || !predictionPrompt.trim()) {
       return res.status(400).json({ error: 'predictionPrompt is required' });
     }
+
+    const captureId = readCaptureId(req.body?.captureId);
+    let signal: AbortSignal | undefined;
+    if (captureId) {
+      const capture = captureManager.get(captureId);
+      if (!capture || capture.signal.aborted) {
+        return sendCancelled(res, captureId);
+      }
+      captureManager.touch(captureId);
+      signal = requestSignal(res, captureId, capture.signal);
+    }
+
     try {
       const image = await generateImage({
         originalImageDataUrl: originalImage,
@@ -814,12 +1009,31 @@ async function startServer() {
         filenamePrefix: 'SpecMem/gen',
         clock:
           timeDirection === 'future' || timeDirection === 'past'
-            ? { direction: timeDirection, sceneTime: typeof sceneTime === 'string' ? sceneTime : undefined }
+            ? {
+                direction: timeDirection,
+                sceneTime: typeof sceneTime === 'string' ? sceneTime : undefined,
+                // Detection round-tripped from /api/predict-scenarios (scenario.clock_visible).
+                visible: clockVisible === true,
+              }
             : undefined,
+        signal,
       });
-      res.json({ image, backend: GENERATION_BACKEND });
+      if (captureId) {
+        if (!captureManager.isActive(captureId)) {
+          return sendCancelled(res, captureId);
+        }
+        captureManager.touch(captureId);
+      }
+      res.json({ image, backend: GENERATION_BACKEND, captureId });
     } catch (error: any) {
+      if (captureId && (isAbortError(error) || !captureManager.isActive(captureId))) {
+        console.log(`generate-image: capture ${captureId} cancelled`);
+        return sendCancelled(res, captureId);
+      }
       console.error('generate-image failed:', error);
+      if (captureId) {
+        captureManager.fail(captureId, error);
+      }
       res.status(502).json({ error: error?.message || 'image generation failed' });
     }
   });
@@ -840,6 +1054,23 @@ async function startServer() {
       target && typeof target.x === 'number' && typeof target.y === 'number'
         ? { x: target.x, y: target.y }
         : null;
+    const source: CaptureSource = req.body?.source === 'browser' ? 'browser' : 'td-native';
+
+    // A new capture always wins: anything still in flight (TD pressed the
+    // manual capture during a generation) is cancelled here, and its own
+    // /api/generate request answers 409 { cancelled: true }.
+    const stateBefore = captureManager.stateOf(captureId);
+    if (stateBefore !== 'unknown' && stateBefore !== 'active') {
+      return sendCancelled(res, captureId);
+    }
+    const capture = captureManager.begin(captureId, { source, imageCount: count });
+    const signal = requestSignal(res, captureId, capture.signal);
+    const ensureActive = () => {
+      if (!captureManager.isActive(captureId)) {
+        throw new DOMException(`capture ${captureId} cancelled`, 'AbortError');
+      }
+      captureManager.touch(captureId);
+    };
 
     try {
       const sourceImageAsset = ensureSourceImageSaved(image, captureId);
@@ -849,7 +1080,9 @@ async function startServer() {
         target: normalizedTarget,
         scenarioCount: count,
         sceneTime: typeof sceneTime === 'string' ? sceneTime : new Date().toISOString(),
+        signal,
       });
+      ensureActive();
 
       try {
         fs.appendFileSync(
@@ -886,8 +1119,11 @@ async function startServer() {
           clock: {
             direction: scenarioDirection(scenario, index),
             sceneTime: resolvedSceneTime,
+            visible: scenario.clock_visible === true,
           },
+          signal,
         });
+        ensureActive();
 
         const { buffer, extension } = decodeImageDataUrl(dataUrl);
         const savedImageAsset = saveImageAsset(
@@ -919,14 +1155,25 @@ async function startServer() {
           size: savedImageAsset.size,
         };
 
+        // Synchronous from the isActive check above to the UDP send, so a
+        // cancel cannot slip in between: cancelled captures never publish.
+        ensureActive();
+        captureManager.noteDelivered(captureId);
         publishCapture(payload);
         console.log(`generate: saved ${sceneKey} -> ${savedImageAsset.absolutePath}`);
         results.push({ sceneKey, label, url: savedImageAsset.url, predictionText: scenario.scenario_description });
       }
 
+      ensureActive();
+      captureManager.complete(captureId);
       res.json({ captureId, backend: GENERATION_BACKEND, count: results.length, scenarios, images: results });
     } catch (error: any) {
+      if (isAbortError(error) || !captureManager.isActive(captureId)) {
+        console.log(`generate: capture ${captureId} cancelled (${captureManager.stateOf(captureId)})`);
+        return sendCancelled(res, captureId);
+      }
       console.error('generate pipeline failed:', error);
+      captureManager.fail(captureId, error);
       res.status(502).json({ error: error?.message || 'generation pipeline failed' });
     }
   });
@@ -958,13 +1205,22 @@ async function startServer() {
       return;
     }
 
+    if (parsed.type === 'cancel') {
+      const cancelled = captureManager.cancel(parsed.captureId ?? null, 'requested');
+      console.log(
+        `TouchDesigner UDP cancel from ${peer.address}:${peer.port}: ${cancelled ? `cancelled ${cancelled}` : 'nothing to cancel'}`
+      );
+      return;
+    }
+
     if (parsed.type === 'capture') {
       queueTouchDesignerCapture(
         parsed.sessionId,
         `udp://${peer.address}:${peer.port}`,
         parsed.imageCount,
         parsed.promptVariant,
-        parsed.promptParams
+        parsed.promptParams,
+        parsed.captureId
       );
     }
   });
@@ -989,6 +1245,8 @@ async function startServer() {
       `TouchDesigner control listener: ${touchDesignerControlUdpEnabled ? `udp://${touchDesignerControlUdpHost}:${touchDesignerControlUdpPort}` : 'disabled'}`
     );
     console.log(`Generation backend: ${GENERATION_BACKEND}`);
+    // Lets TD's capture controller (re)start its heartbeat when the server comes up.
+    sendToTouchDesigner({ type: 'server.ready', startedAt: new Date().toISOString() }, 'server.ready');
     void backendStatus()
       .then((status) => console.log('Generation status:', JSON.stringify(status)))
       .catch(() => undefined);

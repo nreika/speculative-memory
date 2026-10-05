@@ -1,31 +1,32 @@
-CONTROL_DAT_PATH = '/project1/td_capture_panel_controls'
+# Timer CHOP callbacks for /project1/timer1 (DAT: timer1_callbacks, synced to this file).
+#
+# timer1 is now only the HEARTBEAT of the capture controller in
+# td_native_capture.py; it no longer decides when to capture. Every cycle calls
+# heartbeat(), which applies the selected capture mode (timer / chain / manual,
+# custom parameters on /project1, page "Capture"), runs the Timer-mode interval
+# (Captureinterval, default 90s, ticks skipped while a generation is running)
+# and the Chain-mode retry, and picks up results from the HTTP worker thread.
+#
+# Recommended timer1 settings: Length 1 (second), Cycle On, Cycle Limit Off,
+# Play On (then press Start once). A longer Length still works, but every
+# timing decision is then only as precise as one cycle.
+
+NATIVE_CAPTURE_DAT_PATH = '/project1/td_native_capture'
 
 
 def _debug(message):
     print('[TD Auto Capture Timer] {}'.format(message))
 
 
-NATIVE_CAPTURE_DAT_PATH = '/project1/td_native_capture'
-
-
-def _request_capture():
+def _heartbeat():
     native = op(NATIVE_CAPTURE_DAT_PATH)
-    if native is not None:
-        try:
-            native.module.capture()
-            return
-        except Exception as exc:
-            _debug('native capture failed, falling back: {}'.format(exc))
-
-    controls = op(CONTROL_DAT_PATH)
-    if controls is None:
-        _debug('Control DAT not found: {}'.format(CONTROL_DAT_PATH))
+    if native is None:
+        _debug('capture controller DAT not found: {}'.format(NATIVE_CAPTURE_DAT_PATH))
         return
-
     try:
-        controls.module.request_capture()
+        native.module.heartbeat()
     except Exception as exc:
-        _debug('request_capture failed: {}'.format(exc))
+        _debug('heartbeat failed: {}'.format(exc))
 
 
 def onInitialize(timerOp, callCount):
@@ -37,6 +38,7 @@ def onReady(timerOp):
 
 
 def onStart(timerOp):
+    _heartbeat()
     return
 
 
@@ -65,11 +67,12 @@ def onCycleEndAlert(timerOp, segment, cycle, alertSegment, alertDone, interrupt)
 
 
 def onCycle(timerOp, segment, cycle):
-    _request_capture()
+    _heartbeat()
     return
 
 
 def onDone(timerOp, segment, interrupt):
+    _heartbeat()
     return
 
 

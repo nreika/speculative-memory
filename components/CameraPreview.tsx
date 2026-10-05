@@ -3,7 +3,7 @@ import React, { useRef, useEffect, useCallback, useState } from 'react';
 import { Target, PredictionData } from '../types';
 
 interface CameraPreviewProps {
-  onCapture: (base64: string, requestedImageCount?: number, promptOptions?: { variant?: string | null; params?: Record<string, number | string> }) => void;
+  onCapture: (base64: string, requestedImageCount?: number, promptOptions?: { variant?: string | null; params?: Record<string, number | string> }, captureId?: string) => void;
   isProcessing: boolean;
   target: Target | null;
   onSetTarget: (target: Target | null) => void;
@@ -13,7 +13,7 @@ interface CameraPreviewProps {
   selectedTimelineIndex: number;
   showFuture: boolean;
   setShowFuture: (show: boolean) => void;
-  captureRequest?: { id: number; imageCount: number; promptVariant?: string | null; promptParams?: Record<string, number | string> } | null;
+  captureRequest?: { id: number; captureId?: string; imageCount: number; promptVariant?: string | null; promptParams?: Record<string, number | string> } | null;
   onCaptureRequestHandled?: (requestId: number) => void;
 }
 
@@ -101,7 +101,7 @@ const CameraPreview: React.FC<CameraPreviewProps> = ({
     onSetTarget({ x, y });
   };
 
-  const captureFrame = useCallback((requestedImageCount?: number, promptOptions?: { variant?: string | null; params?: Record<string, number | string> }) => {
+  const captureFrame = useCallback((requestedImageCount?: number, promptOptions?: { variant?: string | null; params?: Record<string, number | string> }, captureId?: string) => {
     if (videoRef.current && canvasRef.current) {
       const video = videoRef.current;
       if (video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA || video.videoWidth === 0 || video.videoHeight === 0) {
@@ -114,7 +114,7 @@ const CameraPreview: React.FC<CameraPreviewProps> = ({
       const ctx = canvas.getContext('2d');
       if (ctx) {
         ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-        onCapture(canvas.toDataURL('image/jpeg', 0.8), requestedImageCount, promptOptions);
+        onCapture(canvas.toDataURL('image/jpeg', 0.8), requestedImageCount, promptOptions, captureId);
         return true;
       }
     }
@@ -127,18 +127,20 @@ const CameraPreview: React.FC<CameraPreviewProps> = ({
       return;
     }
 
-    if (captureRequestId === lastHandledCaptureRequestIdRef.current || isProcessing || !isVideoReady) {
+    // Not gated on isProcessing: a new remote capture replaces the one in
+    // flight (App aborts it), it does not wait behind it.
+    if (captureRequestId === lastHandledCaptureRequestIdRef.current || !isVideoReady) {
       return;
     }
 
     if (captureFrame(captureRequest?.imageCount, {
       variant: captureRequest?.promptVariant ?? null,
       params: captureRequest?.promptParams
-    })) {
+    }, captureRequest?.captureId)) {
       lastHandledCaptureRequestIdRef.current = captureRequestId;
       onCaptureRequestHandled?.(captureRequestId);
     }
-  }, [captureFrame, captureRequest, isProcessing, isVideoReady, onCaptureRequestHandled]);
+  }, [captureFrame, captureRequest, isVideoReady, onCaptureRequestHandled]);
 
   const currentTimeline = prediction?.items[selectedTimelineIndex];
 
