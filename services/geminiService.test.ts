@@ -12,8 +12,17 @@ test('buildScenarioPredictionPrompt applies prompt variant and numeric parameter
     }
   });
 
-  assert.match(prompt, /dramatic/i);
-  assert.match(prompt, /high/i);
-  assert.match(prompt, /detailed/i);
-  assert.match(prompt, /growth/i);
+  assert.match(prompt, /Prompt variant: dramatic\./);
+  assert.match(
+    prompt,
+    /Additional prompt controls: intensity=2, detail=3, growthBias=1\./
+  );
+});
+
+test('buildScenarioPredictionPrompt omits variant section without options', () => {
+  const prompt = buildScenarioPredictionPrompt(null, 3);
+
+  assert.doesNotMatch(prompt, /Prompt variant:/);
+  assert.doesNotMatch(prompt, /Additional prompt controls:/);
+  assert.match(prompt, /Predict 3 DISTINCT/);
 });
