@@ -45,6 +45,19 @@ interface PredictionDataLogItem {
   predictionText: string;
 }
 
+interface ActionLogEntry {
+  captureId: string;
+  at: string;
+  observation: string;
+}
+
+interface LatestPredictionSnapshot {
+  captureId: string;
+  observation: string;
+  savedAt: string;
+  scenarios: { sceneKey: string; label: string; text: string }[];
+}
+
 interface LatestScenesManifest {
   updatedAt: string;
   scenes: Record<string, CaptureEvent>;
@@ -124,6 +137,8 @@ async function startServer() {
   const latestMetaPath = path.join(capturesDir, 'latest.json');
   const latestScenesMetaPath = path.join(capturesDir, 'latest_scenes.json');
   const predictionDataLogPath = path.join(capturesDir, 'prediction_data.md');
+  const actionLogPath = path.join(capturesDir, 'action_log.jsonl');
+  let latestPredictionSnapshot: LatestPredictionSnapshot | null = null;
   const touchDesignerBridgeEnabled = (process.env.TOUCHDESIGNER_BRIDGE_ENABLED ?? 'true').toLowerCase() !== 'false';
   const touchDesignerHost = process.env.TOUCHDESIGNER_UDP_HOST || '127.0.0.1';
   const touchDesignerPort = Number(process.env.TOUCHDESIGNER_UDP_PORT || '9989');
@@ -219,9 +234,45 @@ async function startServer() {
     formatTokyoTimestampForFilename(date).replace('_', ' ');
   const normalizePredictionLogText = (value: unknown) =>
     String(value || '').replace(/\r\n/g, '\n').trim();
+  const readActionLog = (): ActionLogEntry[] => {
+    if (!fs.existsSync(actionLogPath)) {
+      return [];
+    }
+
+    try {
+      return fs.readFileSync(actionLogPath, 'utf8')
+        .split('\n')
+        .map((line) => line.trim())
+        .filter(Boolean)
+        .map((line) => {
+          try {
+            return JSON.parse(line) as ActionLogEntry;
+          } catch (_error) {
+            return null;
+          }
+        })
+        .filter((entry): entry is ActionLogEntry =>
+          Boolean(entry && typeof entry.observation === 'string' && entry.observation.trim())
+        );
+    } catch (error) {
+      console.error('Failed to read action log:', error);
+      return [];
+    }
+  };
+  const appendActionLog = (captureId: string, observation: string, date = new Date()): ActionLogEntry | null => {
+    const text = normalizePredictionLogText(observation);
+    if (!text) {
+      return null;
+    }
+
+    const entry: ActionLogEntry = { captureId, at: date.toISOString(), observation: text };
+    fs.appendFileSync(actionLogPath, `${JSON.stringify(entry)}\n`, 'utf8');
+    return entry;
+  };
   const buildPredictionDataLogEntry = (
     captureId: string,
     items: PredictionDataLogItem[],
+    observation = '',
     date = new Date()
   ) => {
     const lines = [
@@ -230,6 +281,11 @@ async function startServer() {
       `- captureId: ${captureId}`,
       ''
     ];
+
+    const observationText = normalizePredictionLogText(observation);
+    if (observationText) {
+      lines.push('### Observation', observationText, '');
+    }
 
     items.forEach((item, fallbackIndex) => {
       const sceneIndex = Number.isInteger(item.sceneIndex) ? Number(item.sceneIndex) : fallbackIndex;
@@ -667,8 +723,73 @@ async function startServer() {
     }
   });
 
+  app.get('/api/action-history', (req, res) => {
+    const requestedLimit = Number(req.query.limit);
+    const limit = Number.isFinite(requestedLimit)
+      ? Math.min(50, Math.max(1, Math.round(requestedLimit)))
+      : 8;
+
+    try {
+      const entries = readActionLog();
+      const recent = entries.slice(-limit);
+      res.json({
+        count: recent.length,
+        items: recent,
+        text: recent.map((entry, index) => `${index + 1}. ${entry.observation}`).join('\n')
+      });
+    } catch (error) {
+      console.error('Failed to read action history:', error);
+      res.status(500).json({ error: 'Failed to read action history' });
+    }
+  });
+
+  app.get('/api/latest-prediction', (_req, res) => {
+    if (!latestPredictionSnapshot) {
+      return res.status(404).json({ error: 'No prediction data yet' });
+    }
+
+    res.json(latestPredictionSnapshot);
+  });
+
+  app.post('/api/reset-history', (_req, res) => {
+    try {
+      const archiveDir = path.join(capturesDir, 'archive');
+      if (!fs.existsSync(archiveDir)) {
+        fs.mkdirSync(archiveDir);
+      }
+
+      const stamp = formatTokyoTimestampForFilename();
+      const archived: string[] = [];
+
+      for (const filePath of [predictionDataLogPath, actionLogPath]) {
+        if (fs.existsSync(filePath) && fs.statSync(filePath).size > 0) {
+          const base = path.basename(filePath);
+          const dotIndex = base.lastIndexOf('.');
+          const archivedName = dotIndex > 0
+            ? `${base.slice(0, dotIndex)}_${stamp}${base.slice(dotIndex)}`
+            : `${base}_${stamp}`;
+          const target = path.join(archiveDir, archivedName);
+          fs.renameSync(filePath, target);
+          archived.push(normalizePath(target));
+        }
+      }
+
+      fs.writeFileSync(predictionDataLogPath, '', 'utf8');
+      fs.writeFileSync(actionLogPath, '', 'utf8');
+      latestPredictionSnapshot = null;
+      sourceImageAssetsByCaptureId.clear();
+
+      console.log(`History reset (stamp ${stamp}). Archived: ${archived.join(', ') || '(nothing)'}`);
+      res.json({ success: true, stamp, archived });
+    } catch (error) {
+      console.error('Failed to reset history:', error);
+      res.status(500).json({ error: 'Failed to reset history' });
+    }
+  });
+
   app.post('/api/save-prediction-data', (req, res) => {
     const normalizedCaptureId = normalizeCaptureId(req.body?.captureId);
+    const observation = normalizePredictionLogText(req.body?.observation);
     const rawItems = Array.isArray(req.body?.items) ? req.body.items : [];
     const items: PredictionDataLogItem[] = rawItems
       .map((item, fallbackIndex) => ({
@@ -685,12 +806,30 @@ async function startServer() {
     try {
       fs.appendFileSync(
         predictionDataLogPath,
-        buildPredictionDataLogEntry(normalizedCaptureId, items),
+        buildPredictionDataLogEntry(normalizedCaptureId, items, observation),
         'utf8'
       );
 
+      const actionEntry = appendActionLog(normalizedCaptureId, observation);
+
+      latestPredictionSnapshot = {
+        captureId: normalizedCaptureId,
+        observation,
+        savedAt: new Date().toISOString(),
+        scenarios: items.map((item, index) => {
+          const sceneIndex = Number.isInteger(item.sceneIndex) ? Number(item.sceneIndex) : index;
+          return {
+            sceneKey: `gen_${String.fromCharCode(97 + sceneIndex)}`,
+            label: item.label || '',
+            text: item.predictionText
+          };
+        })
+      };
+
       res.json({
         success: true,
+        observation,
+        actionLogged: Boolean(actionEntry),
         filename: path.basename(predictionDataLogPath),
         absolutePath: predictionDataLogPath,
         normalizedPath: normalizePath(predictionDataLogPath),

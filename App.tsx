@@ -203,7 +203,30 @@ const App: React.FC = () => {
 
     try {
       const imageCount = clampGenerationCount(requestedImageCount);
-      const scenarios = await predictFutureScenarios(base64, target, imageCount, promptOptions);
+
+      // Pull the recent action history so the prediction is continuous, not instantaneous.
+      let actionHistory: string[] = [];
+      try {
+        const historyResponse = await fetch('/api/action-history?limit=8');
+        if (historyResponse.ok) {
+          const historyData = await historyResponse.json();
+          actionHistory = Array.isArray(historyData?.items)
+            ? historyData.items
+                .map((item: any) => String(item?.observation || '').trim())
+                .filter(Boolean)
+            : [];
+        }
+      } catch (historyErr) {
+        console.warn('Action history fetch failed:', historyErr);
+      }
+
+      const { observation, scenarios } = await predictFutureScenarios(
+        base64,
+        target,
+        imageCount,
+        promptOptions,
+        actionHistory
+      );
       setAppState(AppState.GENERATING);
 
       const items: PredictionItem[] = await Promise.all(
@@ -229,6 +252,7 @@ const App: React.FC = () => {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             captureId: String(prediction.timestamp),
+            observation,
             items: prediction.items.map((item, index) => ({
               sceneIndex: index,
               label: item.label,

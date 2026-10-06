@@ -23,6 +23,8 @@ interface GeminiPromptConfig {
       predictionRequest: string;
       variationGuidance: string;
       descriptionLanguageRule: string;
+      observationRequest: string;
+      historyIntroTemplate: string;
     };
     futureImageGeneration: {
       editInstructionTemplate: string;
@@ -66,6 +68,25 @@ const replacePlaceholders = (
 const buildDefaultScenarioContext = (): string =>
   prompts.userEditable.scenarioPrediction.defaultTargetContext.trim();
 
+const buildHistoryContext = (history?: string[]): string => {
+  const entries = (history || [])
+    .map((entry) => String(entry || '').replace(/\s+/g, ' ').trim())
+    .filter(Boolean);
+
+  if (entries.length === 0) {
+    return '';
+  }
+
+  const bulletList = entries
+    .map((entry, index) => `${index + 1}. ${entry}`)
+    .join('\n');
+
+  return replacePlaceholders(
+    prompts.userEditable.scenarioPrediction.historyIntroTemplate,
+    { HISTORY: bulletList }
+  );
+};
+
 const buildPromptVariantContext = (options?: PromptVariantOptions): string => {
   if (!options?.variant) {
     return '';
@@ -103,22 +124,26 @@ const clampScenarioCount = (value: number): number => {
 export const buildScenarioPredictionPrompt = (
   target: Target | null,
   scenarioCount: number,
-  options?: PromptVariantOptions
+  options?: PromptVariantOptions,
+  history?: string[]
 ): string => {
   const targetContext = target
     ? buildTargetedScenarioContext(target)
     : buildDefaultScenarioContext();
   const countPlaceholders = { SCENARIO_COUNT: String(scenarioCount) };
   const variantContext = buildPromptVariantContext(options);
+  const historyContext = buildHistoryContext(history);
 
   return joinPromptSections(
     prompts.userEditable.scenarioPrediction.sceneAnalysisIntro,
     targetContext,
+    historyContext,
     variantContext,
     replacePlaceholders(
       prompts.userEditable.scenarioPrediction.predictionRequest,
       countPlaceholders
     ),
+    prompts.userEditable.scenarioPrediction.observationRequest,
     prompts.systemFixed.scenarioPrediction.hardRules,
     prompts.userEditable.scenarioPrediction.variationGuidance,
     prompts.userEditable.scenarioPrediction.descriptionLanguageRule,
@@ -160,19 +185,27 @@ export interface ScenarioResult {
   label: string;
 }
 
+export interface ScenarioPredictionResult {
+  observation: string;
+  scenarios: ScenarioResult[];
+}
+
 /**
  * Step 1: Analyze frame and predict the requested number of realistic 5-minute outcomes.
+ * `history` is an oldest-to-newest list of prior "current action" observations, used to
+ * make the prediction continuous rather than instantaneous.
  */
 export const predictFutureScenarios = async (
   base64Image: string,
   target: Target | null,
   requestedScenarioCount = DEFAULT_SCENARIO_COUNT,
-  options?: PromptVariantOptions
-): Promise<ScenarioResult[]> => {
+  options?: PromptVariantOptions,
+  history?: string[]
+): Promise<ScenarioPredictionResult> => {
   const ai = getAI();
   const sourceImage = extractInlineImageData(base64Image);
   const scenarioCount = clampScenarioCount(requestedScenarioCount);
-  const prompt = buildScenarioPredictionPrompt(target, scenarioCount, options);
+  const prompt = buildScenarioPredictionPrompt(target, scenarioCount, options, history);
   let latestScenarioCount = 0;
 
   for (let attempt = 0; attempt < 3; attempt += 1) {
@@ -189,6 +222,7 @@ export const predictFutureScenarios = async (
         responseSchema: {
           type: Type.OBJECT,
           properties: {
+            current_observation: { type: Type.STRING },
             scenarios: {
               type: Type.ARRAY,
               items: {
@@ -202,12 +236,15 @@ export const predictFutureScenarios = async (
               }
             }
           },
-          required: ["scenarios"]
+          required: ["current_observation", "scenarios"]
         }
       }
     });
 
     const parsed = JSON.parse(response.text || "{}");
+    const observation = typeof parsed.current_observation === 'string'
+      ? parsed.current_observation.trim()
+      : '';
     const scenarios = Array.isArray(parsed.scenarios)
       ? parsed.scenarios.filter((item): item is ScenarioResult =>
           typeof item?.prediction_prompt === 'string' &&
@@ -218,7 +255,7 @@ export const predictFutureScenarios = async (
 
     latestScenarioCount = scenarios.length;
     if (scenarios.length >= scenarioCount) {
-      return scenarios.slice(0, scenarioCount);
+      return { observation, scenarios: scenarios.slice(0, scenarioCount) };
     }
   }
 

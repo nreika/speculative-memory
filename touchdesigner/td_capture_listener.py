@@ -1,10 +1,11 @@
 ﻿import json
-from datetime import datetime
+import re
+from datetime import datetime, timedelta
 
 try:
-    from urllib.request import urlopen
+    from urllib.request import Request, urlopen
 except ImportError:
-    from urllib2 import urlopen
+    from urllib2 import Request, urlopen
 
 SCRIPT_DAT_PATH = me.path
 MOVIE_FILE_IN_OPS = {
@@ -35,6 +36,23 @@ ORIGINAL_MOVIE_FILE_IN_OP = ('Record_t1', 'record_original', 'moviefilein_origin
 INFO_TABLE_OP = 'capture_info'
 LATEST_CAPTURES_URL = 'http://127.0.0.1:3000/api/latest-captures'
 AUTO_RECOVER_FROM_MANIFEST = True
+AUTO_FADE_IN_ON_CAPTURE_READY = True
+DISPLAY_FADE_STATE_OP_PATH = '/project1/fade_state'
+DISPLAY_FADE_EXEC_DAT_PATH = '/project1/start_display_exec'
+DISPLAY_FADE_LAG_OP_PATH = '/project1/fade_lag'
+FADE_REARM_HOLD_MS = None  # None -> derive from fade_lag down time; or set an int (ms)
+
+# --- Text ingestion (scenarios / analysis) --------------------------------
+SCENARIO_LOG_DAT_PATH = '/project1/scenario_log'            # full prediction_data.md
+ACTION_LOG_DAT_PATH = '/project1/action_log'                # full action_log.jsonl
+SCENARIO_CURRENT_DAT_PATH = '/project1/scenario_current'    # table: sceneKey / label / text
+OBSERVATION_CURRENT_DAT_PATH = '/project1/observation_current'  # current "what the person is doing"
+HISTORY_CURRENT_DAT_PATH = '/project1/history_current'      # table: at / captureId / observation (newest first)
+SCENARIO_LATEST_DAT_PATH = '/project1/scenario_latest'      # readable text of the newest capture only
+PREDICTION_LOG_FILE = r'C:/Users/81808/Desktop/speculative-memory-main/captures/prediction_data.md'
+ACTION_LOG_FILE = r'C:/Users/81808/Desktop/speculative-memory-main/captures/action_log.jsonl'
+LATEST_PREDICTION_URL = 'http://127.0.0.1:3000/api/latest-prediction'  # optional (phase 2)
+RESET_HISTORY_URL = 'http://127.0.0.1:3000/api/reset-history'          # Stream Deck history reset
 RELOAD_RETRY_FRAMES = (1, 6)
 DEFAULT_IMAGE_COUNT = 3
 MIN_IMAGE_COUNT = 1
@@ -67,6 +85,8 @@ BATCH_STATE = {
     'isReady': False,
     'completedAt': '',
 }
+_LAST_FADE_CAPTURE_ID = {'value': None}
+_PENDING_FADE_REARM = {'run': None}
 
 
 def _utc_timestamp():
@@ -295,6 +315,320 @@ def resync_latest_scenes(expected_capture_id=''):
     return bool(payloads)
 
 
+def _display_currently_visible():
+    fade_lag = op(DISPLAY_FADE_LAG_OP_PATH)
+    if fade_lag is not None and getattr(fade_lag, 'numChans', 0) > 0:
+        return fade_lag['chan1'] > 0.001
+
+    fade_state = op(DISPLAY_FADE_STATE_OP_PATH)
+    return fade_state is not None and fade_state.par.const0value.eval() > 0.5
+
+
+def _fade_out_hold_ms(fade_lag):
+    if FADE_REARM_HOLD_MS is not None:
+        return FADE_REARM_HOLD_MS
+    try:
+        lag_down = fade_lag.par.lag2.eval()
+        current = fade_lag['chan1'] if getattr(fade_lag, 'numChans', 0) > 0 else 1.0
+        return max(0.0, current) * lag_down * 1000.0 + 120.0
+    except Exception:
+        return 1600.0
+
+
+def _kill_pending_fade_rearm():
+    pending = _PENDING_FADE_REARM.get('run')
+    if pending is not None:
+        try:
+            pending.kill()
+        except Exception:
+            pass
+    _PENDING_FADE_REARM['run'] = None
+
+
+def _trigger_display_fade_in(capture_id):
+    if not AUTO_FADE_IN_ON_CAPTURE_READY:
+        return
+
+    if capture_id and _LAST_FADE_CAPTURE_ID['value'] == capture_id:
+        return
+    _LAST_FADE_CAPTURE_ID['value'] = capture_id
+
+    # Cancel the SHOW button's auto fade-out so the new batch stays up.
+    display_exec = op(DISPLAY_FADE_EXEC_DAT_PATH)
+    if display_exec is not None:
+        try:
+            display_exec.module.cancel_pending()
+        except Exception:
+            pass
+
+    _kill_pending_fade_rearm()
+
+    fade_state = op(DISPLAY_FADE_STATE_OP_PATH)
+    if fade_state is None:
+        _debug('Fade state CHOP not found: {}'.format(DISPLAY_FADE_STATE_OP_PATH))
+        return
+
+    fade_lag = op(DISPLAY_FADE_LAG_OP_PATH)
+
+    if _display_currently_visible():
+        # Already showing: drop to 0 first so the fade-in replays from black.
+        # (With fade_lag down time near 0 this is an instant cut, then fade in.)
+        fade_state.par.const0value = 0
+        if fade_lag is not None:
+            fade_lag.cook(force=True)
+        hold_ms = _fade_out_hold_ms(fade_lag)
+        _PENDING_FADE_REARM['run'] = run(
+            "op({!r}).module._raise_fade_state()".format(SCRIPT_DAT_PATH),
+            delayMilliSeconds=hold_ms
+        )
+        _debug(
+            'Display re-fade for capture batch {} (hold {:.0f}ms).'.format(
+                capture_id or '<unknown>', hold_ms
+            )
+        )
+    else:
+        fade_state.par.const0value = 1
+        _debug('Display fade-in for capture batch {}.'.format(capture_id or '<unknown>'))
+
+
+def _raise_fade_state():
+    _PENDING_FADE_REARM['run'] = None
+    fade_state = op(DISPLAY_FADE_STATE_OP_PATH)
+    if fade_state is not None:
+        fade_state.par.const0value = 1
+
+
+def _reload_text_dat(path):
+    text_dat = op(path)
+    if text_dat is not None and getattr(text_dat.par, 'loadonstartpulse', None) is not None:
+        text_dat.par.loadonstartpulse.pulse()
+
+
+def _read_prediction_md():
+    log_dat = op(SCENARIO_LOG_DAT_PATH)
+    if log_dat is not None and log_dat.text:
+        return log_dat.text
+    try:
+        with open(PREDICTION_LOG_FILE, 'r', encoding='utf-8') as handle:
+            return handle.read()
+    except Exception:
+        return ''
+
+
+def _parse_prediction_md_section(md_text, capture_id):
+    """Return (observation, [(label, text), ...]) for the capture_id block."""
+    lines = md_text.splitlines()
+    target = '- captureId: {}'.format(capture_id)
+    start = None
+    for index, line in enumerate(lines):
+        if line.strip() == target:
+            start = index
+            break
+    if start is None:
+        return '', []
+
+    items = []
+    observation_buf = []
+    section = None          # None -> 'observation' -> 'prediction'
+    label = None
+    buffer = []
+    for line in lines[start + 1:]:
+        if line.startswith('## Capture'):
+            break
+        stripped = line.strip()
+        if re.match(r'###\s*Observation\s*$', stripped):
+            section = 'observation'
+            observation_buf = []
+            continue
+        match = re.match(r'###\s*Prediction_Data\s*\(([^)]*)\)(?:\s*-\s*(.*))?\s*$', stripped)
+        if match:
+            if label is not None:
+                items.append((label, '\n'.join(buffer).strip()))
+            section = 'prediction'
+            label = (match.group(2) or match.group(1) or '').strip()
+            buffer = []
+        elif section == 'prediction' and label is not None:
+            buffer.append(line)
+        elif section == 'observation':
+            observation_buf.append(line)
+    if label is not None:
+        items.append((label, '\n'.join(buffer).strip()))
+    return '\n'.join(observation_buf).strip(), items
+
+
+def _fetch_latest_prediction(capture_id):
+    """Phase 2: structured current batch text from the server. Optional."""
+    if not LATEST_PREDICTION_URL:
+        return None
+    try:
+        with urlopen(LATEST_PREDICTION_URL, timeout=1.0) as response:
+            data = json.loads(response.read().decode('utf-8'))
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    if capture_id and str(data.get('captureId', '')) not in ('', str(capture_id)):
+        return None
+    return data
+
+
+def _update_scenario_dats(capture_id):
+    _reload_text_dat(SCENARIO_LOG_DAT_PATH)
+    _reload_text_dat(ACTION_LOG_DAT_PATH)
+
+    table = op(SCENARIO_CURRENT_DAT_PATH)
+    observation_dat = op(OBSERVATION_CURRENT_DAT_PATH)
+
+    server_data = _fetch_latest_prediction(capture_id)
+
+    rows = []
+    observation = ''
+    if server_data:
+        observation = str(server_data.get('observation', '') or '')
+        for index, scene in enumerate(server_data.get('scenarios', []) or []):
+            if not isinstance(scene, dict):
+                continue
+            scene_key = scene.get('sceneKey') or (
+                KNOWN_SCENE_KEYS[index] if index < len(KNOWN_SCENE_KEYS) else 'gen_{}'.format(index)
+            )
+            rows.append([scene_key, scene.get('label', ''), scene.get('text', '')])
+
+    if not rows:
+        # Fall back to parsing the accumulating markdown document.
+        md_observation, md_items = _parse_prediction_md_section(_read_prediction_md(), capture_id)
+        if not observation:
+            observation = md_observation
+        for index, (label, text) in enumerate(md_items):
+            scene_key = KNOWN_SCENE_KEYS[index] if index < len(KNOWN_SCENE_KEYS) else 'gen_{}'.format(index)
+            rows.append([scene_key, label, text])
+
+    if table is not None:
+        table.clear()
+        table.appendRow(['sceneKey', 'label', 'text'])
+        for row in rows:
+            table.appendRow(row)
+
+    if observation_dat is not None and observation:
+        observation_dat.text = observation
+
+    _update_history_dat()
+    _update_scenario_latest_dat(capture_id, observation, rows)
+
+    _debug(
+        'Text ingest for capture {}: {} scenario rows{}.'.format(
+            capture_id or '<unknown>',
+            len(rows),
+            ', observation set' if observation else ''
+        )
+    )
+
+
+def _read_action_log_entries():
+    text = ''
+    log_dat = op(ACTION_LOG_DAT_PATH)
+    if log_dat is not None and log_dat.text:
+        text = log_dat.text
+    if not text:
+        try:
+            with open(ACTION_LOG_FILE, 'r', encoding='utf-8') as handle:
+                text = handle.read()
+        except Exception:
+            text = ''
+
+    entries = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entry = json.loads(line)
+        except Exception:
+            continue
+        if isinstance(entry, dict) and entry.get('observation'):
+            entries.append(entry)
+    return entries
+
+
+def _format_jst(iso_utc):
+    try:
+        stamp = str(iso_utc).replace('Z', '').split('.')[0]
+        parsed = datetime.strptime(stamp, '%Y-%m-%dT%H:%M:%S') + timedelta(hours=9)
+        return parsed.strftime('%Y-%m-%d %H:%M:%S')
+    except Exception:
+        return str(iso_utc or '')
+
+
+def _update_history_dat():
+    table = op(HISTORY_CURRENT_DAT_PATH)
+    if table is None:
+        return
+
+    entries = _read_action_log_entries()
+    table.clear()
+    table.appendRow(['time', 'captureId', 'observation'])
+    for entry in reversed(entries):  # newest first
+        table.appendRow([
+            _format_jst(entry.get('at', '')),
+            entry.get('captureId', ''),
+            entry.get('observation', ''),
+        ])
+
+
+def _update_scenario_latest_dat(capture_id, observation, rows):
+    dat = op(SCENARIO_LATEST_DAT_PATH)
+    if dat is None:
+        return
+
+    blocks = ['[captureId: {}]'.format(capture_id or '<unknown>')]
+    if observation:
+        blocks.append('■ 現在\n{}'.format(observation))
+    for scene_key, label, text in rows:
+        blocks.append('● {} ({})\n{}'.format(label or scene_key, scene_key, text))
+    dat.text = '\n\n'.join(blocks) + '\n'
+
+
+def reset_history():
+    """Archive the accumulated history on the server and clear every TD-side view.
+
+    Bound to a Stream Deck button (Shift+Ctrl+Alt+n) for demo turnover. If the
+    server is unreachable the TD-side views are still cleared.
+    """
+    server_ok = False
+    try:
+        request = Request(
+            RESET_HISTORY_URL,
+            data=b'{}',
+            headers={'Content-Type': 'application/json'},
+            method='POST'
+        )
+        with urlopen(request, timeout=3.0) as response:
+            result = json.loads(response.read().decode('utf-8'))
+        server_ok = bool(result.get('success'))
+        _debug('History archived on server: {}'.format(result.get('archived') or '(nothing)'))
+    except Exception as exc:
+        _debug('Server history reset failed ({}); clearing TD side only.'.format(exc))
+
+    # TD-side batch / fade state
+    _LAST_FADE_CAPTURE_ID['value'] = None
+    _kill_pending_fade_rearm()
+    _reset_batch('', DEFAULT_IMAGE_COUNT)
+
+    # Reload the now-empty raw log DATs and clear the derived views.
+    _reload_text_dat(SCENARIO_LOG_DAT_PATH)
+    _reload_text_dat(ACTION_LOG_DAT_PATH)
+    for table_path in (SCENARIO_CURRENT_DAT_PATH, HISTORY_CURRENT_DAT_PATH):
+        table = op(table_path)
+        if table is not None:
+            table.clear()
+    for text_path in (OBSERVATION_CURRENT_DAT_PATH, SCENARIO_LATEST_DAT_PATH):
+        text_dat = op(text_path)
+        if text_dat is not None:
+            text_dat.text = ''
+
+    _debug('History reset complete (server_ok={}).'.format(server_ok))
+    return server_ok
+
+
 def onReceive(dat, rowIndex, message, bytes, peer):
     try:
         payload = json.loads(message)
@@ -308,4 +642,8 @@ def onReceive(dat, rowIndex, message, bytes, peer):
 
     if AUTO_RECOVER_FROM_MANIFEST and not BATCH_STATE['isReady']:
         resync_latest_scenes(payload.get('captureId', ''))
+
+    if BATCH_STATE['isReady']:
+        _update_scenario_dats(BATCH_STATE['captureId'])
+        _trigger_display_fade_in(BATCH_STATE['captureId'])
 

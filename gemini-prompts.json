@@ -21,7 +21,9 @@
       "targetedTargetFocus": "Focus on the movement, state change, or likely outcome for this specific object. Scenario 1 and Scenario 2 should show possible states exactly 30 seconds from now; Scenario 3 should show a possible state exactly 30 seconds before now.",
       "predictionRequest": "Predict {{SCENARIO_COUNT}} DISTINCT, realistic, and logically sound possible worlds: Scenario 1 and Scenario 2 must occur exactly 30 seconds from now, while Scenario 3 must occur exactly 30 seconds before now.",
       "variationGuidance": "Each outcome should be different. Clearly make Scenario 3 a past or rewind branch, not another future branch.",
-      "descriptionLanguageRule": "Write scenario_description in Japanese and mention whether it is 30 seconds later or 30 seconds earlier."
+      "descriptionLanguageRule": "Write scenario_description in Japanese and mention whether it is 30 seconds later or 30 seconds earlier.",
+      "observationRequest": "Also report a top-level \"current_observation\" field: one short Japanese sentence describing what the person in this frame is doing at the present moment (their current action and posture).",
+      "historyIntroTemplate": "これまでに観測されたこの人物の行動の流れです（古い順）:\n{{HISTORY}}\n\nこの連続した流れを踏まえ、人物が次に取るであろう自然な行動を予測してください（例: 帰宅した直後なら手を洗いに行く・上着を脱ぐ・カバンを下ろす など、文脈的に妥当な次の動作）。Scenario 1 と Scenario 2 はこの流れの次に起こりうる30秒後、Scenario 3 はこの流れの直前にあたる30秒前にしてください。"
     },
     "futureImageGeneration": {
       "editInstructionTemplate": "Modify this scene realistically according to the time direction in this prompt: {{PREDICTION_PROMPT}}. If the prompt describes 30 seconds later, show a plausible future change. If the prompt describes 30 seconds earlier, reconstruct a plausible past state before the current frame. If food or drink is present, show a realistic increase, decrease, opening, closing, preparation, consumption, or restoration that matches the time direction."
@@ -40,8 +42,9 @@
         "change the behavior of people in the scene based on what the people would want to do next."
       ],
       "outputFormatRules": [
-        "Return a JSON object with a \"scenarios\" array containing exactly {{SCENARIO_COUNT}} items.",
-        "Each item must have:",
+        "Return a JSON object with a top-level \"current_observation\" string and a \"scenarios\" array containing exactly {{SCENARIO_COUNT}} items.",
+        "\"current_observation\": one short Japanese sentence describing the person's present action.",
+        "Each scenarios item must have:",
         "1. \"prediction_prompt\": Detailed visual prompt for image generation.",
         "2. \"scenario_description\": Short text explaining the outcome.",
         "3. \"label\": A short unique label like \"Timeline 1\", \"Timeline 2\", \"Timeline 3\"."
