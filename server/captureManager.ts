@@ -14,7 +14,7 @@
  * for skipping Timer ticks while busy, and to drop stale images.
  */
 
-export type CaptureSource = 'td-native' | 'control' | 'browser';
+export type CaptureSource = 'td-native' | 'control' | 'browser' | 'mobile';
 
 export type CaptureCancelReason =
   /** A newer capture started (manual capture while generating). */
@@ -67,6 +67,8 @@ export interface ActiveCapture {
   /** Queued for the browser but not picked up yet (control-command path). */
   awaitingClient: boolean;
   deliveredCount: number;
+  /** Current pipeline stage of /api/generate ('detect' | 'plan' | 'sceneA'...), for the phone page. */
+  stage: string | null;
   controller: AbortController;
   signal: AbortSignal;
 }
@@ -121,6 +123,7 @@ export class CaptureManager {
       lastActivityAt: now,
       awaitingClient: Boolean(init.awaitingClient),
       deliveredCount: 0,
+      stage: null,
       controller,
       signal: controller.signal,
     };
@@ -162,6 +165,11 @@ export class CaptureManager {
     capture.awaitingClient = false;
   }
 
+  setStage(captureId: string, stage: string): void {
+    const capture = this.get(captureId);
+    if (capture) capture.stage = stage;
+  }
+
   noteDelivered(captureId: string): void {
     const capture = this.get(captureId);
     if (!capture) return;
@@ -199,6 +207,7 @@ export class CaptureManager {
             source: capture.source,
             imageCount: capture.imageCount,
             deliveredCount: capture.deliveredCount,
+            stage: capture.stage,
             awaitingClient: capture.awaitingClient,
             startedAt: new Date(capture.startedAt).toISOString(),
             elapsedMs: Date.now() - capture.startedAt,

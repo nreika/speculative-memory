@@ -188,6 +188,12 @@ def request_remote_capture(capture_id=None, image_count=None):
     return response
 
 
+def reset_history():
+    """Archive the server history and clear the TD display (DATs, fade, scene text).
+    Call from a Keyboard In DAT callback (Shift+Ctrl+Alt+n) or a panel button; see td_capture_listener.reset_history()."""
+    return _listener_module().reset_history()
+
+
 def _channel_name(channel):
     try:
         return str(channel.name).lower()

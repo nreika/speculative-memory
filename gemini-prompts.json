@@ -15,30 +15,105 @@
   },
   "userEditable": {
     "scenarioPrediction": {
+      "historyIntroTemplate": "Scene history observed in this room so far (oldest first):\n{{HISTORY_LINES}}\nUse this flow to predict the natural next changes. Still keep every scenario's direction and time span, the People and Tone instructions, and the rule on people: if nobody was seen in the room recently, do not introduce any person.",
+      "recentPersonTemplate": "A person was seen in this room {{MINUTES}} minutes ago ({{DESCRIPTION}}). If a person appears in a scenario it must be that same person (same clothing and hair) being present or re-entering from a frame edge; never invent a different person, and only that one person (the last one seen) may appear: never two or more people. If that person appears while the frame itself shows nobody, they are seen from behind with their back turned to the camera, the face not visible, in the same clothes. If the frame itself shows nobody, a scenario may still show that person returning, but only calmly and from a frame edge.",
       "sceneAnalysisIntro": "Analyze this camera frame.",
-      "defaultTargetContext": "Create plausible alternate worlds around this exact camera frame. For Scenario 1 and Scenario 2, predict realistic changes for the most prominent elements over the next 30 seconds. For Scenario 3, infer a realistic possible state from exactly 30 seconds before this frame.",
+      "defaultTargetContext": "Create plausible alternate worlds around this exact camera frame. Each scenario has its own direction and time span relative to this frame (listed below). For a scenario AFTER this frame, predict realistic changes for the most prominent elements over exactly that time span. For a scenario BEFORE this frame, infer a realistic possible state from exactly that time span before this frame.",
       "targetedTargetContextTemplate": "The user has specifically targeted an object at (x: {{TARGET_X}}, y: {{TARGET_Y}}).",
-      "targetedTargetFocus": "Focus on the movement, state change, or likely outcome for this specific object. Scenario 1 and Scenario 2 should show possible states exactly 30 seconds from now; Scenario 3 should show a possible state exactly 30 seconds before now.",
-      "predictionRequest": "Predict {{SCENARIO_COUNT}} DISTINCT, realistic, logically sound possible worlds. Scenario 1 and Scenario 2 both happen exactly about 30 seconds AFTER this frame. Scenario 3 happens exactly about 30 seconds BEFORE this frame. Every change must involve a person or object that is actually visible in this frame - never invent windows, curtains, blinds, doors, or objects that are not clearly present.",
-      "variationGuidance": "Scenario 2 must be clearly different from Scenario 1: a different person moving, a different direction of motion, or an interaction with a different visible object. Never make Scenario 2 a reworded copy of Scenario 1. Make Scenario 3 an unmistakable rewind (a state that plausibly led into this frame), never another forward branch.",
-      "descriptionLanguageRule": "Write scenario_description in Japanese and mention whether it is 30 seconds later or 30 seconds earlier."
+      "targetedTargetFocus": "Focus on the movement, state change, or likely outcome for this specific object. Each scenario should show a possible state at exactly its own time span from now (after or before, as listed below).",
+      "predictionRequest": "Predict {{SCENARIO_COUNT}} DISTINCT, realistic, logically sound possible worlds, one per scenario, each at its own moment relative to this frame:\n{{SCENARIO_TIMELINE}}\nKeep scenario order: the first scenario in the JSON array is Scenario 1, and so on. Every change must involve a person or object that is actually visible in this frame - never invent windows, curtains, blinds, doors, or objects that are not clearly present.",
+      "scenarioTimelineLine": "Scenario {{N}}: exactly about {{DISTANCE}} {{DIRECTION}} this frame",
+      "sameMomentPairGuidance": "Scenario {{B}} must be clearly different from Scenario {{A}}: a different person moving, a different direction of motion, or an interaction with a different visible object. Never make Scenario {{B}} a reworded copy of Scenario {{A}}.",
+      "sameMomentGroupGuidance": "Scenarios {{LIST}} happen at exactly the same moment, so they must be clearly different alternatives of each other: a different person moving, a different direction of motion, or an interaction with a different visible object. Never make one of them a reworded copy of another.",
+      "rewindGuidance": "Make {{LIST}} {{EACH}}an unmistakable rewind (a state that plausibly led into this frame), never another forward branch.",
+      "differentSpanGuidance": "{{LIST}} are {{BOTH_ALL}} {{DIRECTION}} this frame but at different time spans: the longer the time span, the larger the difference from this frame must be, so the scenarios read as clearly different moments.",
+      "descriptionLanguageRule": "Write scenario_description in Japanese and begin each one with the exact time phrase of its own scenario, followed by a comma: {{DESCRIPTION_PHRASES}} - always keep that exact time phrase.",
+      "sceneControls": {
+        "notes": [
+          "Edit the sentences only. 'below' = the band applies while the value is below it; the last band of each list has no limit. For distanceScale the value is the time span in seconds (the absolute distance, 5..600) and {{DISTANCE}} is replaced by that time span (e.g. 30 seconds); it applies to scenarios both before and after the frame."
+        ],
+        "distanceScale": [
+          {
+            "below": 20,
+            "text": "{{DISTANCE}} is a very short time: only tiny changes - a small shift of posture, a head turn, a hand moving a little, a chair swiveling. Nobody walks across the room and nothing major changes."
+          },
+          {
+            "below": 60,
+            "text": "{{DISTANCE}} is a short time: small to modest changes - a person may shift position slightly, reach for something within arm's reach, stand up or sit down, or turn to face something. Prefer changing what is already there."
+          },
+          {
+            "below": 150,
+            "text": "{{DISTANCE}} is a moderate time: noticeable changes are plausible - a person may get up and walk a few steps or to another spot in the room, pick up or put down something nearby, or start or stop an activity."
+          },
+          {
+            "below": 300,
+            "text": "{{DISTANCE}} is a fairly long time: larger changes are plausible - people may cross the room, leave the frame, sit down somewhere else, or finish one activity and start another, and the light may have changed slightly. Everything must still be physically plausible, with no fantasy."
+          },
+          {
+            "below": 450,
+            "text": "{{DISTANCE}} is a long time (several minutes): large changes are plausible - people who are visible now may be sitting or standing in a completely different posture or doing a completely different activity, may have moved to another part of the room, and may have left the frame (nobody who is not in this frame appears); the light may have shifted, and a visible screen or lamp may be off or dimmer. Nothing may be invented: the fixed camera, the room layout, the furniture and every object stay exactly the same, a screen that is on keeps showing what it shows now, and no fantasy."
+          },
+          {
+            "text": "{{DISTANCE}} is a very long time: the situation can be completely different from this frame - people who are visible now may be doing something entirely unrelated, sitting in another spot, standing, turned away, or gone from the frame, and nobody who is not in this frame appears; the light may be clearly different, and a visible screen or lamp may be off. Still, the fixed camera, the room layout, the furniture and all objects stay exactly the same, nothing that is not visible in this frame may be invented, a screen that is on keeps showing what it shows now, and nothing is surreal. An empty room simply stays an empty room."
+          }
+        ],
+        "presence": [
+          {
+            "below": 0.15,
+            "text": "People: nobody who is not already visible appears, not even partly at a frame edge. People who are visible stay almost still and stay in the frame: only minimal motion (a slight shift of posture, a head turn). If nobody is visible, the room stays empty and only the light or small in-place details of things that already exist change."
+          },
+          {
+            "below": 0.45,
+            "text": "People: nobody new appears. People who are visible move slightly and naturally (small posture changes, a head turn, a small hand movement) and stay where they are in the frame. If nobody is visible, the room stays empty and only the light or small in-place details of things that already exist change."
+          },
+          {
+            "below": 0.75,
+            "text": "People: nobody new appears. People who are visible move naturally for the time span (changing posture, using their hands, shifting position a little, turning to look elsewhere) and stay in the frame. If nobody is visible, the room stays empty and only the light or small in-place details of things that already exist change."
+          },
+          {
+            "text": "People: nobody new appears. People who are visible may move a lot: stand up, turn around, walk to another spot, or leave the frame through an edge or doorway (the frame is then empty of that person). If nobody is visible, the room stays empty and only the light or small in-place details of things that already exist change."
+          }
+        ],
+        "tone": [
+          {
+            "below": 0.15,
+            "text": "Tone (applies to ALL scenarios, including the one before this frame; it sets how eventful and expressive the moment is, and it takes priority over any \"small changes\" wording above): TONE 0 = CALM. Almost nothing happens. Only micro-movements: a slow blink, a small gaze shift, a breath, a tiny settling of posture, fingers resting. No new activity, no visible emotion, no reaching for anything. Keep the change minimal even if the time span would allow more."
+          },
+          {
+            "below": 0.45,
+            "text": "Tone (applies to ALL scenarios, including the one before this frame; it sets how eventful and expressive the moment is): TONE LOW = QUIET. One small, ordinary, calm action that is visible in the picture, for example a gentle change of posture, looking at something else, resting a chin on a hand, a small hand movement, a calm everyday expression. Nothing sudden, no strong emotion."
+          },
+          {
+            "below": 0.75,
+            "text": "Tone (applies to ALL scenarios, including the one before this frame; it sets how eventful and expressive the moment is, and it takes priority over any \"move slightly\" or \"small changes\" wording above): TONE MEDIUM = LIVELY. A clear, energetic everyday action with a readable expression, for example leaning in toward a screen with interest, turning sharply to look at something, rubbing the eyes, smiling or laughing, picking up or putting down something that is already in easy reach, rapidly switching activity. The pose must differ clearly from the current frame."
+          },
+          {
+            "text": "Tone (applies to ALL scenarios, including the one before this frame; it sets how eventful and expressive the moment is, and it OVERRIDES any \"small changes\", \"move slightly\", \"short time\" or \"prefer changing what is already there\" wording above; only the safety and anatomy rules still bind): TONE HIGH = DRAMATIC. Each scenario must show an abrupt, emotionally charged or surprising moment, frozen mid-action and unmistakable in a single still image. For people: a startle (the head and torso jerking back, eyes wide), standing up suddenly so the chair rolls or swings away, leaning far toward a screen in shock or excitement, laughing out loud with the head thrown back, turning the whole body sharply, doubling over, a wide-eyed stare at something. Use only body parts and surfaces that are actually inside the frame: if a person's hands, lap or desk are cut off by the frame edge, show the drama with the face, head, shoulders and torso instead of inventing a desk or table. Keep the arms in modest positions: no raising both arms overhead, no stretching, no waving. For things: an object that is already visible tips over or falls (say where it ends up and that its original spot is empty), a visible screen or light abruptly switches off or its brightness jumps. Make the posture and facial expression large and clear. These are examples of KINDS of events, not scripts: choose something different for each scenario and fit it to what this person is doing and what is visible. Everything must remain physically possible within {{DISTANCE}}, with no fantasy, and the drama must come only from the people who are already visible and from state changes of things already visible - never from new people, new objects or a changed room."
+          }
+        ]
+      }
     },
     "futureImageGeneration": {
       "editInstructionTemplate": "Edit this exact photo according to: {{PREDICTION_PROMPT}}. Change only the people's poses, positions and actions. Everything else - the room, furniture, camera, lighting, the number of monitors and what each monitor displays - stays pixel-identical to the input.",
-      "clockEditClause": "The digits on the number sign that is visible in the input may also change, as instructed."
+      "clockEditClause": "The digits on the number sign that is visible in the input may also change, as instructed.",
+      "longSpanClause": "The instruction describes a larger change over a long time span, but this is still the same photograph from the same fixed camera: keep the whole background - walls, floor, ceiling, windows, furniture, screens, lamps, the room's lighting and perspective and every object the instruction does not mention - identical to the input, pixel for pixel, and redraw only the people and the things the instruction names."
     }
   },
   "systemFixed": {
     "scenarioPrediction": {
       "hardRules": [
         "Avoid surreal or impossible events.",
-        "The people act more dynamically and naturally, but do not change their outfits, hair, or belongings.",
+        "Use only what is visible inside this frame. A person may only touch, use, look at or walk toward people and objects that are clearly visible in the frame. If a keyboard, mouse, desk, door, phone, laptop or any other item is cut off by the frame edge or not shown, it does not exist for this task: do not mention it, use it, or reach toward it, and do not describe any surface, furniture or object that is not clearly visible in the image.",
+        "Do not change the people's outfits, hair, or belongings.",
         "The camera angle, framing, and perspective are strictly fixed.",
         "The background, furniture, and room layout are identical.",
-        "Do not add, remove, or duplicate any people, monitors, screens, chairs, tables, or other objects - keep the exact same count of everything.",
+        "Never duplicate any person or object, and do not add or remove monitors, screens, chairs, tables or other objects - keep the exact same count of everything. Never add a person who is not in this frame (the only exception is a recently seen person that the context note names).",
         "Do not change what any wall-mounted monitor or TV is displaying.",
         "If a clock, digital time readout, or physical number sign is visible, do not mention it or any time reading in prediction_prompt - its digits are edited separately by the system. Never describe a clock, time readout or number sign that is not clearly visible.",
-        "Change the behavior of people in the scene based on what they would most plausibly do next (or were doing just before)."
+        "Change the behavior of people in the scene based on what they would most plausibly do next (or were doing just before). The amount of movement is limited by the time-span and People instructions below, but how eventful, abrupt and expressive the moment is follows the Tone instruction below.",
+        "For every person whose arms or hands move, prediction_prompt must state the FINAL position of BOTH arms/hands, e.g. \"his right hand leaves the keyboard and picks up the paper on the right while his left hand stays on the keyboard\". Describe the resulting pose, not an action added on top of the current pose: never write \"also reaches\" or \"reaches with one arm\" without saying where the other arm ends up and where the moved arm came from. If a person moves to a different spot, say they leave their original spot (e.g. \"he stands up from the chair and walks to the desk behind him\") - the image shows them only at the new spot.",
+        "Do not add new objects, and do not relocate small loose items (bags, papers, cups, boxes): the image editor tends to leave a copy behind at the old spot. Prefer changes in place - a chair rotated or pushed in, a monitor switched off, the light level. A monitor or screen that is dark in the input must stay dark (never switch it on: its content would be invented). If an object really must change place, say explicitly that it is moved FROM its original spot TO the new spot and that the original spot becomes empty. There must always be exactly one of each object.",
+        "Every person keeps exactly two arms and two hands - the anatomy rule above always applies."
       ],
       "outputFormatRules": [
         "Return a JSON object with a \"scenarios\" array containing exactly {{SCENARIO_COUNT}} items.",
@@ -52,11 +127,14 @@
     "futureImageGeneration": {
       "hardRules": [
         "Keep composition, framing and the number of monitors, screens and furniture identical.",
-        "Do not change what any monitor or TV displays."
+        "Do not change what any monitor or TV displays.",
+        "Do not add any new object. If an object or person changes place, remove it from its original position so it appears only once, at the new position."
       ],
       "clockHardRules": [
         "Only the visible clock or physical number sign may change its digits, and only as the instruction says."
-      ]
+      ],
+      "newPersonRule": "Do not add any new person that is not in the input.",
+      "enteringPersonRule": "A new person may appear only if the instruction says someone enters the frame; draw them exactly once, with exactly two arms and two hands, never a copy of anyone already in the photo."
     }
   }
 }

@@ -1,0 +1,415 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Speculative Memory ログ</title>
+<style>
+  :root {
+    --bg: #14161a; --panel: #1d2026; --panel2: #252932; --line: #333945; --text: #e6e8ec; --mute: #8f97a6;
+    --ok: #3fb97a; --ng: #e5534b; --warn: #d9a441; --gray: #6b7280;
+    --c-detect: #5b8def; --c-plan: #a971e0; --c-a: #3fb97a; --c-b: #d9a441; --c-c: #e0804a;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.5 "Yu Gothic UI", "Meiryo", system-ui, sans-serif; }
+  header { display: flex; flex-wrap: wrap; align-items: center; gap: 16px; padding: 10px 16px; background: var(--panel); border-bottom: 1px solid var(--line); position: sticky; top: 0; z-index: 5; }
+  h1 { font-size: 16px; margin: 0 8px 0 0; }
+  .stat { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+  .dot { width: 11px; height: 11px; border-radius: 50%; background: var(--gray); display: inline-block; }
+  .dot.ok { background: var(--ok); } .dot.ng { background: var(--ng); }
+  .num { font-weight: 700; font-variant-numeric: tabular-nums; }
+  .ng-t { color: var(--ng); } .ok-t { color: var(--ok); } .mute { color: var(--mute); }
+  button { background: var(--panel2); color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 4px 12px; cursor: pointer; font: inherit; }
+  button:hover { border-color: var(--mute); }
+  main { padding: 12px 16px 40px; max-width: 1500px; margin: 0 auto; }
+  .charts { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 12px; }
+  .chart { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
+  .chart h3 { margin: 0 0 4px; font-size: 12px; color: var(--mute); font-weight: 600; }
+  canvas { display: block; }
+  .filters { display: flex; flex-wrap: wrap; gap: 16px; align-items: center; margin: 8px 0 10px; }
+  .filters label { cursor: pointer; user-select: none; }
+  .legend { display: flex; gap: 10px; flex-wrap: wrap; font-size: 12px; color: var(--mute); margin-left: auto; }
+  .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 4px; vertical-align: -1px; }
+  .row { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; margin-bottom: 6px; }
+  .row.failed { border-left: 4px solid var(--ng); } .row.cancelled { border-left: 4px solid var(--gray); } .row.completed { border-left: 4px solid var(--ok); } .row.running { border-left: 4px solid var(--c-detect); }
+  .row.run { border-left: 4px solid var(--ng); background: #2a1d1f; }
+  .head { display: grid; grid-template-columns: 138px 320px 1fr; gap: 12px; align-items: center; padding: 8px 12px; cursor: pointer; }
+  .head:hover { background: var(--panel2); border-radius: 8px; }
+  .time { font-variant-numeric: tabular-nums; font-size: 13px; }
+  .time small { display: block; color: var(--mute); font-size: 11px; }
+  .bar { position: relative; height: 18px; background: #0f1114; border-radius: 4px; overflow: hidden; display: flex; }
+  .bar span { height: 100%; display: block; min-width: 2px; }
+  .bar .dur { position: absolute; right: 4px; top: 0; font-size: 11px; line-height: 18px; color: #fff; text-shadow: 0 0 3px #000; }
+  .badges { display: flex; flex-wrap: wrap; gap: 5px; align-items: center; }
+  .b { font-size: 12px; padding: 1px 8px; border-radius: 10px; background: var(--panel2); border: 1px solid var(--line); white-space: nowrap; }
+  .b.ok { color: var(--ok); border-color: #2a6b4b; } .b.ng { color: #ff8a82; border-color: #7a3430; } .b.warn { color: var(--warn); border-color: #6e5a26; }
+  .b.gem { color: #9cc2ff; border-color: #2f4f86; } .b.disp { color: #cfe; border-color: #2d5a55; }
+  .detail { padding: 6px 14px 14px; border-top: 1px solid var(--line); }
+  .thumbs { display: flex; gap: 8px; flex-wrap: wrap; margin: 8px 0; }
+  .thumbs figure { margin: 0; width: 230px; } .thumbs img { width: 230px; height: 130px; object-fit: cover; border-radius: 4px; background: #000; display: block; }
+  .thumbs figcaption { font-size: 12px; color: var(--mute); }
+  h4 { margin: 12px 0 4px; font-size: 13px; color: var(--mute); }
+  pre { margin: 0; padding: 8px 10px; background: #0f1114; border-radius: 6px; white-space: pre-wrap; word-break: break-word; font: 12px/1.5 Consolas, "Cascadia Mono", monospace; max-height: 260px; overflow: auto; }
+  pre.err { color: #ff9b94; max-height: none; }
+  table { border-collapse: collapse; font-size: 12px; } td, th { padding: 2px 10px; border-bottom: 1px solid var(--line); text-align: left; }
+  .scn { border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px; margin: 6px 0; }
+  .runlist { padding: 4px 8px 8px 24px; }
+  .empty { text-align: center; color: var(--mute); padding: 40px; }
+  @media (max-width: 900px) { .head { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>Speculative Memory ログ</h1>
+  <div class="stat"><span class="dot" id="d-server"></span>サーバー</div>
+  <div class="stat"><span class="dot" id="d-comfy"></span>ComfyUI</div>
+  <div class="stat"><span class="dot" id="d-ollama"></span>Ollama</div>
+  <div class="stat">最後の撮影 <span class="num" id="s-last">–</span></div>
+  <div class="stat">今日 成功 <span class="num ok-t" id="s-ok">–</span> / 失敗 <span class="num" id="s-ng">–</span></div>
+  <div class="stat">今日の費用 <span class="num" id="s-cost">–</span></div>
+  <div class="stat" style="margin-left:auto"><span class="mute" id="s-upd"></span><button id="btn">更新</button></div>
+</header>
+<main>
+  <div class="charts">
+    <div class="chart"><h3>所要時間の推移(直近 100 件の成功、秒)</h3><canvas id="c-dur" width="620" height="130"></canvas></div>
+    <div class="chart"><h3>1 時間ごとの失敗件数(今日)</h3><canvas id="c-fail" width="520" height="130"></canvas></div>
+  </div>
+  <div class="chart" id="rb-panel" style="margin-bottom:12px"><h3>ルールブック と 継続 QA(ローカル Qwen)</h3><div id="rb-body" class="mute">読み込み中…</div></div>
+  <div class="chart" id="gl-panel" style="margin-bottom:12px"><h3>プロンプト生成のガイドライン(固定制約・自動改善は変更しない)</h3><div id="gl-body" class="mute">読み込み中…</div></div>
+  <div class="filters">
+    <label><input type="checkbox" id="f-failed"> 失敗のみ</label>
+    <label><input type="checkbox" id="f-extras"> extras あり</label>
+    <label><input type="checkbox" id="f-people"> 人物あり</label>
+    <label><input type="checkbox" id="f-gemini"> Gemini 使用</label>
+    <div class="legend">
+      <span><i style="background:var(--c-detect)"></i>検出+記述</span><span><i style="background:var(--c-plan)"></i>計画</span>
+      <span><i style="background:var(--c-a)"></i>A</span><span><i style="background:var(--c-b)"></i>B</span><span><i style="background:var(--c-c)"></i>C</span>
+      <span><i style="background:var(--ng)"></i>失敗した段</span>
+    </div>
+  </div>
+  <div id="list"></div>
+</main>
+<script>
+(function () {
+  'use strict';
+  var STAGES = [
+    { key: 'detect', ms: 'detectDescribeMs', name: '検出+記述', color: 'var(--c-detect)' },
+    { key: 'plan', ms: 'planMs', name: '計画', color: 'var(--c-plan)' },
+    { key: 'sceneA', ms: 'sceneAMs', name: 'A', color: 'var(--c-a)' },
+    { key: 'sceneB', ms: 'sceneBMs', name: 'B', color: 'var(--c-b)' },
+    { key: 'sceneC', ms: 'sceneCMs', name: 'C', color: 'var(--c-c)' }
+  ];
+  var BAR_SCALE_MS = 150000;
+  var $ = function (id) { return document.getElementById(id); };
+  var openRows = {};       // captureId or run key -> true
+  var detailCache = {};
+
+  function el(tag, cls, text) { var e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; }
+  function pad(n) { return (n < 10 ? '0' : '') + n; }
+  function hm(iso) { var d = new Date(iso); return pad(d.getHours()) + ':' + pad(d.getMinutes()); }
+  function hms(iso) { var d = new Date(iso); return pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds()); }
+  function md(iso) { var d = new Date(iso); return (d.getMonth() + 1) + '/' + d.getDate(); }
+  function sec(ms) { return ms == null ? '–' : (ms / 1000).toFixed(1) + 's'; }
+  function stageName(key) {
+    for (var i = 0; i < STAGES.length; i++) if (STAGES[i].key === key) return STAGES[i].name === 'A' || STAGES[i].name === 'B' || STAGES[i].name === 'C' ? '画像 ' + STAGES[i].name : STAGES[i].name;
+    return key === 'setup' ? '準備' : '不明';
+  }
+  function failLabel(stage, head) {
+    var conn = /fetch failed|ECONNREFUSED|ECONNRESET|ETIMEDOUT|UND_ERR|connect/i.test(head || '');
+    if (conn && (stage === 'detect' || stage === 'plan')) return 'VLM 接続失敗';
+    if (conn && /^scene/.test(stage)) return '画像生成の接続失敗';
+    return stageName(stage) + ' 失敗';
+  }
+  function get(url) { return fetch(url, { cache: 'no-store' }).then(function (r) { if (!r.ok) throw new Error(url + ' ' + r.status); return r.json(); }); }
+
+  // ---------- header ----------
+  function setDot(id, v) { var d = $(id); d.className = 'dot' + (v === true ? ' ok' : v === false ? ' ng' : ''); }
+  function refreshHeader() {
+    get('/api/health').then(function (h) { setDot('d-server', !!h.ok); setDot('d-comfy', !!h.comfyui); setDot('d-ollama', !!h.ollama); })
+      .catch(function () { setDot('d-server', false); setDot('d-comfy', null); setDot('d-ollama', null); });
+    return get('/api/events/summary').then(function (s) {
+      $('s-ok').textContent = s.completed;
+      var ng = $('s-ng'); ng.textContent = s.failed; ng.className = 'num ' + (s.failed ? 'ng-t' : '');
+      $('s-cost').textContent = '¥' + (s.costJpy || 0).toFixed(1);
+      var last = s.lastCaptureAt;
+      $('s-last').textContent = last ? (Math.max(0, Math.round((Date.now() - Date.parse(last)) / 60000)) + ' 分前') : '–';
+      drawFailChart(s.failedByHour);
+    }).catch(function () {});
+  }
+
+  // ---------- charts ----------
+  function ctxFor(id) {
+    var c = $(id), dpr = window.devicePixelRatio || 1;
+    if (!c.dataset.w) { c.dataset.w = c.width; c.dataset.h = c.height; }
+    var w = +c.dataset.w, h = +c.dataset.h;
+    c.width = w * dpr; c.height = h * dpr; c.style.width = w + 'px'; c.style.height = h + 'px';
+    var g = c.getContext('2d'); g.scale(dpr, dpr); g.font = '11px sans-serif';
+    return { g: g, w: w, h: h };
+  }
+  function drawDurChart(events) {
+    var c = ctxFor('c-dur'), g = c.g;
+    var pts = events.filter(function (e) { return e.result === 'completed' && e.totalMs; }).slice(0, 100).reverse();
+    g.fillStyle = '#8f97a6';
+    if (!pts.length) { g.fillText('データなし', 10, 20); return; }
+    var max = 0; pts.forEach(function (e) { max = Math.max(max, e.totalMs); });
+    max = Math.ceil(max / 20000) * 20000;
+    var L = 34, B = 16, W = c.w - L - 6, H = c.h - B - 6;
+    g.strokeStyle = '#333945'; g.lineWidth = 1;
+    for (var v = 0; v <= max; v += 20000) {
+      var y = 4 + H - (v / max) * H; g.beginPath(); g.moveTo(L, y); g.lineTo(L + W, y); g.stroke();
+      g.fillText(String(v / 1000), 4, y + 3);
+    }
+    g.strokeStyle = '#5b8def'; g.lineWidth = 1.6; g.beginPath();
+    pts.forEach(function (e, i) { var x = L + (pts.length === 1 ? W / 2 : i * W / (pts.length - 1)), y2 = 4 + H - (e.totalMs / max) * H; i ? g.lineTo(x, y2) : g.moveTo(x, y2); });
+    g.stroke();
+    g.fillStyle = '#8f97a6'; g.fillText(hm(pts[0].startedAt), L, c.h - 3); var t = hm(pts[pts.length - 1].startedAt); g.fillText(t, L + W - g.measureText(t).width, c.h - 3);
+  }
+  function drawFailChart(byHour) {
+    var c = ctxFor('c-fail'), g = c.g, max = 1;
+    byHour.forEach(function (n) { max = Math.max(max, n); });
+    var L = 28, B = 16, T = 16, W = c.w - L - 6, H = c.h - B - T, bw = W / 24;
+    g.fillStyle = '#8f97a6'; g.strokeStyle = '#333945';
+    g.beginPath(); g.moveTo(L, T + H); g.lineTo(L + W, T + H); g.stroke();
+    g.fillText(String(max), 6, T + 8); g.fillText('0', 14, T + H);
+    byHour.forEach(function (n, h) {
+      var bh = n ? Math.max(2, n / max * H) : 0;
+      g.fillStyle = '#e5534b'; g.fillRect(L + h * bw + 2, T + H - bh, bw - 4, bh);
+      if (h % 3 === 0) { g.fillStyle = '#8f97a6'; g.fillText(String(h), L + h * bw + 2, c.h - 3); }
+      if (n) { g.fillStyle = '#e6e8ec'; g.fillText(String(n), L + h * bw + 2, T + H - bh - 3); }
+    });
+  }
+
+  // ---------- row pieces ----------
+  function timeline(e) {
+    var bar = el('div', 'bar');
+    var used = 0, failedHere = false;
+    STAGES.forEach(function (s) {
+      var ms = e[s.ms];
+      if (ms != null && !failedHere) {
+        var sp = el('span'); sp.style.width = (ms / BAR_SCALE_MS * 100) + '%'; sp.style.background = s.color; sp.title = s.name + ' ' + sec(ms);
+        bar.appendChild(sp); used += ms;
+      } else if (!failedHere && e.result !== 'completed') {
+        failedHere = true;
+        var rest = e.totalMs != null ? Math.max(e.totalMs - used, 0) : 0;
+        var f = el('span'); f.style.width = Math.max(rest / BAR_SCALE_MS * 100, 1.5) + '%';
+        f.style.background = e.result === 'failed' ? 'var(--ng)' : 'var(--gray)';
+        f.title = (e.result === 'failed' ? '失敗: ' : '中断: ') + stageName(s.key) + ' ' + sec(rest);
+        bar.appendChild(f);
+      }
+    });
+    var dur = el('span', 'dur', e.totalMs != null ? sec(e.totalMs) : (e.result === 'running' ? '実行中' : ''));
+    bar.appendChild(dur);
+    return bar;
+  }
+
+  function sceneLabel(scene) { return !scene ? '–' : scene === 'now' ? 'NOW' : scene.replace('gen_', '').toUpperCase(); }
+  function displayText(e) {
+    if (!e.displays || !e.displays.length) return null;
+    var last = e.displays[e.displays.length - 1];
+    return last.assignments.slice().sort(function (a, b) { return a.display - b.display; }).map(function (a) {
+      return a.display + ': ' + sceneLabel(a.scene) + (a.open ? '' : '(閉)');
+    }).join(' / ');
+  }
+  function badges(e) {
+    var box = el('div', 'badges');
+    function add(text, cls, title) { var b = el('span', 'b' + (cls ? ' ' + cls : ''), text); if (title) b.title = title; box.appendChild(b); }
+    if (e.test) add('テスト', 'warn');
+    if (e.result === 'failed') add('失敗: ' + stageName(e.errorStage), 'ng', e.errorMessage || '');
+    else if (e.result === 'cancelled') add('キャンセル', '', e.errorMessage || '');
+    else if (e.result === 'running') add('実行中', 'warn');
+    if (e.obstructed === true) add('遮蔽?', 'warn', 'カメラが近くの物体で遮られている可能性' + (e.obstructedBy ? ': ' + e.obstructedBy : ''));
+    if (e.occupied === true) add('人物あり' + (e.people ? ' ' + e.people + '人' : '') + (e.occupancySource ? '(' + ({ detector: '検出', text: '文', both: '両方' }[e.occupancySource] || e.occupancySource) + ')' : ''), 'ok');
+    else if (e.occupied === false) add('人物なし', '');
+    if (e.extras) Object.keys(e.extras).forEach(function (k) {
+      var x = e.extras[k], st = x.synthesized ? '合成' : x.reflected === true ? '反映' : x.reflected === false ? '未反映' : '未確認';
+      add('extras ' + sceneLabel(k) + ' ' + st, x.reflected === false && !x.synthesized ? 'ng' : x.synthesized ? 'warn' : 'ok', x.text);
+    });
+    if (e.guard && e.guard.synthesized) add('ガード合成', 'warn');
+    else if (e.guard && e.guard.replaced) add('ガード置換 ' + e.guard.replaced, 'warn');
+    if (e.guard && e.guard.duplicateRetried) add('重複再試行', '');
+    if (typeof e.presence === 'number') add('presence ' + e.presence.toFixed(2) + (typeof e.effectivePresence === 'number' && e.effectivePresence !== e.presence ? '→' + e.effectivePresence.toFixed(2) : ''), '', '写っている人物の動きの量（→は無人のため実際に使った値）');
+    if (typeof e.tone === 'number') add('tone ' + e.tone.toFixed(2), '', '変化の振れ幅（表情・動き・光の変化量）');
+    if (e.rulebookVersion) add('ルール v' + e.rulebookVersion, '', 'この撮影のプロンプトを作ったルールブックの版');
+    if (e.qa) add(e.qa.defective ? 'QA 不良 ' + e.qa.defective + '/' + e.qa.judged : 'QA OK', e.qa.defective ? 'ng' : 'ok', e.qa.defects && Object.keys(e.qa.defects).length ? Object.keys(e.qa.defects).map(function (k) { return k + ' ' + e.qa.defects[k]; }).join(', ') : '不良なし');
+    if (e.vlmBackend) add('認識:' + e.vlmBackend, e.vlmBackend === 'gemini' ? 'gem' : '', e.vlmModel || '');
+    if (e.imageBackend) add('生成:' + e.imageBackend, e.imageBackend === 'gemini' ? 'gem' : '', e.imageModel || '');
+    if (e.vlmBackend === 'gemini' || e.imageBackend === 'gemini') add('¥' + (e.cost || 0).toFixed(1), 'gem');
+    var d = displayText(e); if (d) add('DISPLAY ' + d, 'disp');
+    return box;
+  }
+  function eventRow(e, parent) {
+    var row = el('div', 'row ' + e.result);
+    var head = el('div', 'head');
+    var t = el('div', 'time', hms(e.startedAt)); t.appendChild(el('small', null, md(e.startedAt) + '  ' + e.captureId.slice(0, 22)));
+    head.appendChild(t); head.appendChild(timeline(e)); head.appendChild(badges(e));
+    row.appendChild(head);
+    var body = el('div');
+    row.appendChild(body);
+    function show() { body.textContent = ''; if (openRows[e.captureId]) { renderDetail(body, e); } }
+    head.addEventListener('click', function () { openRows[e.captureId] = !openRows[e.captureId]; show(); });
+    show();
+    parent.appendChild(row);
+  }
+  function runRow(item, parent) {
+    var evs = item.events, key = 'run:' + evs[0].captureId;
+    var row = el('div', 'row run');
+    var head = el('div', 'head');
+    var newest = evs[0].startedAt, oldest = evs[evs.length - 1].startedAt;
+    head.appendChild(el('div', 'time', hm(oldest) + '〜' + hm(newest)));
+    head.appendChild(el('div', 'mute', md(oldest) + (md(oldest) !== md(newest) ? '〜' + md(newest) : '')));
+    var b = el('div', 'badges');
+    b.appendChild(el('span', 'b ng', failLabel(item.stage, item.messageHead) + ' ×' + evs.length));
+    b.appendChild(el('span', 'b', item.messageHead));
+    head.appendChild(b); row.appendChild(head);
+    var body = el('div', 'runlist'); row.appendChild(body);
+    function show() { body.textContent = ''; if (openRows[key]) evs.forEach(function (e) { eventRow(e, body); }); }
+    head.addEventListener('click', function () { openRows[key] = !openRows[key]; show(); });
+    show(); parent.appendChild(row);
+  }
+
+  // ---------- detail ----------
+  function renderDetail(box, e) {
+    var d = el('div', 'detail'); box.appendChild(d);
+    function section(title, node) { d.appendChild(el('h4', null, title)); d.appendChild(node); }
+    function pre(text, cls) { return el('pre', cls || '', text == null || text === '' ? '(なし)' : String(text)); }
+    var cached = detailCache[e.captureId];
+    var tt = el('div', 'mute', '撮影ID ' + e.captureId + ' / 入力元 ' + (e.source || '?') + ' / 開始 ' + hms(e.startedAt) + (e.endedAt ? ' / 終了 ' + hms(e.endedAt) : '') +
+      ' / 計画 ' + sec(e.planMs) + (e.planCalls != null ? '(' + e.planCalls + ' 回)' : '') + ' / 検出+記述 ' + sec(e.detectDescribeMs) + ' / A ' + sec(e.sceneAMs) + ' B ' + sec(e.sceneBMs) + ' C ' + sec(e.sceneCMs) +
+      (e.vlmModel ? ' / VLM ' + e.vlmModel : '') + (e.imageModel ? ' / 画像 ' + e.imageModel : ''));
+    d.appendChild(tt);
+    if (e.errorMessage && e.result !== 'completed') section('エラー(' + stageName(e.errorStage) + ')', pre(e.errorMessage, 'err'));
+    var th = el('div', 'thumbs'); d.appendChild(th);
+    [['now', 'NOW'], ['a', 'A'], ['b', 'B'], ['c', 'C']].forEach(function (p) {
+      var url = e.images && e.images[p[0]];
+      if (!url && !e.archiveDir) return;
+      var fig = el('figure'), img = new Image(); img.loading = 'lazy'; img.alt = p[1];
+      var fallback = '/api/events/' + encodeURIComponent(e.captureId) + '/image/' + p[0], tried = !url;
+      img.onerror = function () { if (!tried && e.archiveDir) { tried = true; img.src = fallback; } else { fig.style.display = 'none'; } };
+      img.src = url || fallback; fig.appendChild(img); fig.appendChild(el('figcaption', null, p[1]));
+      th.appendChild(fig);
+    });
+    if (e.displays && e.displays.length) {
+      var tb = el('table'); var hr = el('tr'); ['時刻', 'reason', '割り当て'].forEach(function (h) { hr.appendChild(el('th', null, h)); }); tb.appendChild(hr);
+      e.displays.forEach(function (x) {
+        var tr = el('tr'); tr.appendChild(el('td', null, hms(x.at))); tr.appendChild(el('td', null, ({ batch: '表示する撮影が変わった', layout: '割り当て変更', window: 'ウィンドウ開閉' }[x.reason] || x.reason) + ' (' + x.reason + ')'));
+        tr.appendChild(el('td', null, x.assignments.slice().sort(function (a, b) { return a.display - b.display; }).map(function (a) { return a.display + ': ' + sceneLabel(a.scene) + (a.open ? '' : '(閉)'); }).join(' / ')));
+        tb.appendChild(tr);
+      });
+      section('表示先の履歴', tb);
+    }
+    var slot = el('div'); d.appendChild(slot);
+    function fill(full) {
+      slot.textContent = '';
+      var p = full && full.prompts;
+      if (!p) { slot.appendChild(el('div', 'mute', '詳細(prompts.json)なし')); return; }
+      var sc = (p.vlm && p.vlm.parsedScenarios) || [];
+      var nowJa = sc[0] && sc[0].scene_now;
+      slot.appendChild(el('h4', null, '状況記述(日本語)')); slot.appendChild(pre(nowJa));
+      (p.scenes || []).forEach(function (s, i) {
+        var box2 = el('div', 'scn');
+        box2.appendChild(el('b', null, 'シナリオ ' + s.letter + '  (' + (s.temporalLabelJa || '') + ' / ' + sec(s.elapsedMs) + ')'));
+        box2.appendChild(el('h4', null, '表示文')); box2.appendChild(pre(s.scenarioDescription));
+        box2.appendChild(el('h4', null, 'prediction_prompt')); box2.appendChild(pre(s.predictionPrompt));
+        box2.appendChild(el('h4', null, '画像プロンプト全文')); box2.appendChild(pre(s.imagePromptFull));
+        box2.appendChild(el('h4', null, '負のプロンプト')); box2.appendChild(pre(s.negativePrompt));
+        if (s.sceneExtra) { box2.appendChild(el('h4', null, 'extras 指定')); box2.appendChild(pre(s.sceneExtra)); }
+        slot.appendChild(box2);
+      });
+      if (!(p.scenes || []).length && sc.length) sc.forEach(function (s, i) {
+        var box3 = el('div', 'scn'); box3.appendChild(el('b', null, 'シナリオ ' + 'ABC'[i]));
+        box3.appendChild(pre(s.scenario_description)); box3.appendChild(pre(s.prediction_prompt)); slot.appendChild(box3);
+      });
+      var h = p.vlm && p.vlm.history;
+      slot.appendChild(el('h4', null, '履歴文(historyText)')); slot.appendChild(pre(h && h.historyText));
+      if (p.errors && p.errors.length) { slot.appendChild(el('h4', null, 'アーカイブのエラー')); slot.appendChild(pre(p.errors.join('\n'), 'err')); }
+    }
+    if (cached) fill(cached);
+    else { slot.appendChild(el('div', 'mute', '読み込み中…')); get('/api/events/' + encodeURIComponent(e.captureId)).then(function (full) { detailCache[e.captureId] = full; fill(full); }).catch(function () { slot.textContent = '詳細を取得できませんでした'; }); }
+  }
+
+  // ---------- list ----------
+  function query() {
+    var q = 'limit=600&group=1';
+    if ($('f-failed').checked) q += '&failedOnly=1';
+    if ($('f-extras').checked) q += '&extras=1';
+    if ($('f-people').checked) q += '&people=1';
+    if ($('f-gemini').checked) q += '&gemini=1';
+    return '/api/events?' + q;
+  }
+  function refreshList() {
+    return get(query()).then(function (items) {
+      var list = $('list'), scroll = window.scrollY;
+      var frag = document.createDocumentFragment();
+      if (!items.length) frag.appendChild(el('div', 'empty', '該当する撮影はありません'));
+      items.forEach(function (it) { it.kind === 'run' ? runRow(it, frag) : eventRow(it.event, frag); });
+      list.textContent = ''; list.appendChild(frag); window.scrollTo(0, scroll);
+    });
+  }
+  function refreshChart() {
+    return get('/api/events?limit=300').then(drawDurChart).catch(function () {});
+  }
+  function pct(n) { return n == null ? '–' : (n * 100).toFixed(1) + '%'; }
+  function refreshRulebook() {
+    return Promise.all([get('/api/rulebook?limit=8'), get('/api/qa/summary?by=rulebookVersion'), get('/api/qa/proposals')]).then(function (r) {
+      var rb = r[0], sum = r[1], pr = r[2], box = $('rb-body');
+      box.className = ''; box.textContent = '';
+      var head = el('div', null, '有効な版: v' + rb.active.version + (rb.active.appliedAt ? '(' + md(rb.active.appliedAt) + ' ' + hm(rb.active.appliedAt) + ' から、' + (rb.active.by || '') + ')' : '') + ' / 全 ' + rb.versions.length + ' 版 / 却下 ' + rb.rejected.length + ' 版');
+      head.style.marginBottom = '6px'; box.appendChild(head);
+      var tb = el('table'); var hr = el('tr');
+      ['版', '判定した画像', '不良の画像', '不良率', '主な不良', '平均秒/枚'].forEach(function (h) { hr.appendChild(el('th', null, h)); }); tb.appendChild(hr);
+      sum.groups.forEach(function (g) {
+        var tr = el('tr');
+        var types = Object.keys(g.byType).sort(function (a, b) { return g.byType[b].count - g.byType[a].count; }).slice(0, 3).map(function (t) { return t + ' ' + g.byType[t].count; }).join(', ');
+        [g.key === 'none' ? '(なし)' : 'v' + g.key, g.judged + (g.unknown ? '(+不明 ' + g.unknown + ')' : ''), g.defective, pct(g.defectRate), types || '–', g.avgElapsedMs == null ? '–' : (g.avgElapsedMs / 1000).toFixed(1)].forEach(function (c) { tr.appendChild(el('td', null, String(c))); });
+        tb.appendChild(tr);
+      });
+      box.appendChild(tb);
+      if (rb.changes.length) {
+        box.appendChild(el('h4', null, '最近の変更(自動適用・ロールバック・要確認)'));
+        var ul = el('div');
+        rb.changes.forEach(function (c) {
+          var kind = { apply: '適用', rollback: 'ロールバック', ask: '要確認' }[c.kind] || c.kind;
+          var items = (c.changes || []).map(function (x) { return x.path + ' += ' + (Array.isArray(x.value) ? x.value.join('/') : x.value); }).join(' | ');
+          var line = el('div', 'mute', hm(c.time) + ' ' + kind + ' v' + c.from + '→v' + c.to + ' ' + (items ? '[' + items + '] ' : '') + (c.reason || ''));
+          line.style.whiteSpace = 'normal'; ul.appendChild(line);
+        });
+        box.appendChild(ul);
+      }
+      var open = pr.proposals.filter(function (p) { return p.status === 'open'; });
+      if (open.length) {
+        var w = el('div', 'b warn', '要確認の提案 ' + open.length + ' 件: ' + open.map(function (p) { return p.file; }).join(', ')); w.style.marginTop = '6px'; w.style.display = 'inline-block'; box.appendChild(w);
+      }
+    }).catch(function () { $('rb-body').textContent = '取得できません'; });
+  }
+  function refreshGuidelines() {
+    return get('/api/guidelines').then(function (g) {
+      var box = $('gl-body'); box.className = ''; box.textContent = '';
+      var tb = el('table'); var hr = el('tr');
+      ['ID', '日付', '内容', '種別'].forEach(function (h) { hr.appendChild(el('th', null, h)); }); tb.appendChild(hr);
+      g.items.forEach(function (it) {
+        var tr = el('tr');
+        [it.id, it.date || '', it.title, it.kind].forEach(function (c, i) { var td = el('td', null, c); if (i === 2) td.title = it.quote || ''; tr.appendChild(td); });
+        tb.appendChild(tr);
+      });
+      box.appendChild(tb);
+      if (g.history.length) {
+        box.appendChild(el('h4', null, '追加履歴'));
+        g.history.forEach(function (h) { var d = el('div', 'mute', h); d.style.whiteSpace = 'normal'; box.appendChild(d); });
+      }
+    }).catch(function () { $('gl-body').textContent = '取得できません'; });
+  }
+  var busy = false;
+  function refresh() {
+    if (busy) return; busy = true;
+    Promise.all([refreshHeader(), refreshList(), refreshChart(), refreshRulebook(), refreshGuidelines()]).then(function () {
+      $('s-upd').textContent = '更新 ' + hms(new Date().toISOString());
+    }).catch(function (err) { $('s-upd').textContent = '取得失敗: ' + err.message; }).then(function () { busy = false; });
+  }
+  $('btn').addEventListener('click', refresh);
+  ['f-failed', 'f-extras', 'f-people', 'f-gemini'].forEach(function (id) { $(id).addEventListener('change', refresh); });
+  refresh();
+  setInterval(refresh, 10000);
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,11 @@
+Prepare distributed generation and laptop handover
+
+Preserve pending server, prompt, quality-check and TD Python changes for
+remote image delivery and per-scene controls. Document the desktop base,
+combined Ollama/TD laptop, optional separate vision worker and future
+mobile display. Add a read-only laptop inventory tool and transfer steps.
+
+Disable Ollama thinking to keep the output budget available for scenario JSON.
+Validation: TypeScript check and 54 unit tests pass, including the regression.
+Multi-PC integration, GPU sharing and mobile output remain unverified.
+TouchDesigner project binaries and local capture data are not included.

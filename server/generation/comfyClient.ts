@@ -14,6 +14,8 @@
  */
 
 import { createHash } from "node:crypto";
+import { DEFAULT_NEGATIVE_PROMPT } from "./ruleTexts";
+import { hairNegativeTerms, negativePrompt as rulebookNegativePrompt, qualitySuffix as rulebookQualitySuffix } from "./rulebook";
 
 const COMFY_URL = (process.env.COMFYUI_URL || "http://127.0.0.1:8000").replace(/\/$/, "");
 
@@ -80,43 +82,31 @@ const DEFAULTS = {
   sharpenAlpha: Number(process.env.COMFYUI_SHARPEN_ALPHA || "0.2"),
 };
 
-/**
- * Appended to every edit instruction — the quality guard rails found during
- * testing. Deliberately says nothing about clocks or number signs: naming one
- * when the frame has none makes the edit model paint one (COMFYUI_CLOCK_EDIT).
- */
-export const QUALITY_SUFFIX =
-  "Sharp, crisp, high-detail photo, in focus edge to edge, fully solid opaque people, no transparency, no ghosting. " +
-  "Keep the exact same number of monitors, screens and furniture as the input — do not add or remove any. " +
-  "Do not change what any monitor or TV displays.";
+// The fixed prompt wording lives in ruleTexts.ts (v1 literals) and the versioned rulebook (rulebook.ts); these names stay
+// exported for the tests and for tools that want the v1 text.
+export {
+  QUALITY_SUFFIX,
+  QUALITY_SUFFIX_ENTERING,
+  CLOCK_QUALITY_SUFFIX,
+  LONG_SPAN_QUALITY_SUFFIX,
+  DEFAULT_NEGATIVE_PROMPT,
+  CLOCK_NEGATIVE_PROMPT,
+  NO_PERSON_NEGATIVE_PROMPT,
+  BEHIND_VIEW_NEGATIVE_PROMPT,
+} from "./ruleTexts";
 
-/** Added to QUALITY_SUFFIX only when a visible clock/number sign is being edited. */
-export const CLOCK_QUALITY_SUFFIX =
-  "The only text that may change is the physical flip-number sign; keep it as two rows of two-digit cards, " +
-  "always showing a leading zero (08, not 8), same size and position as the input.";
-
-export const buildQualitySuffix = (clockEdit: boolean): string =>
-  clockEdit ? `${QUALITY_SUFFIX} ${CLOCK_QUALITY_SUFFIX}` : QUALITY_SUFFIX;
-
-export const DEFAULT_NEGATIVE_PROMPT =
-  "blurry, soft focus, out of focus, hazy, low detail, motion blur, " +
-  "transparent, translucent, see-through, ghost, double exposure, " +
-  "creature, monster face, melted face, distorted face, disfigured, deformed hands, extra limbs, " +
-  "duplicated person, merged bodies, extra people, " +
-  "extra monitor, additional screen, more televisions, duplicated display, extra furniture, " +
-  "changed screen content, different monitor image";
-
-/** Digit guards, only when a clock edit applies. */
-export const CLOCK_NEGATIVE_PROMPT =
-  "single-digit clock number, missing leading zero, garbled digits, distorted numbers";
+/** Hair-length terms for the negative prompt: a long-haired person must not become a bob, and the other way round. */
+export const hairNegative = hairNegativeTerms;
 
 /**
- * NOTE: with the Lightning LoRA (cfg 1.0) the negative prompt is inert, so it
- * cannot stop an invented clock; the guard against that is leaving clock
- * wording out of the positive prompt. At cfg > 1 (non-Lightning) it is active.
+ * NOTE: with the Lightning LoRA (cfg 1.0) the negative prompt is inert, so it cannot stop an invented clock; the guard
+ * against that is leaving clock wording out of the positive prompt. At cfg > 1 (non-Lightning) it is active.
  */
-export const buildNegativePrompt = (clockEdit: boolean): string =>
-  clockEdit ? `${DEFAULT_NEGATIVE_PROMPT}, ${CLOCK_NEGATIVE_PROMPT}` : DEFAULT_NEGATIVE_PROMPT;
+export const buildQualitySuffix = (clockEdit: boolean, allowNewPerson = false, longSpan = false): string =>
+  rulebookQualitySuffix(clockEdit, allowNewPerson, longSpan);
+
+export const buildNegativePrompt = (clockEdit: boolean, noPerson = false, behindView: boolean | { hair?: string } = false): string =>
+  rulebookNegativePrompt(clockEdit, noPerson, behindView);
 
 const DATA_URL_PATTERN = /^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/;
 
@@ -163,6 +153,10 @@ export interface QwenEditParams {
   negativePrompt?: string;
   /** Optional identity reference (face / upper-body crop) as a data URL. */
   faceImage?: string;
+  /** Rough rectangle of the person inside faceImage (pixels): cut and enlarged inside ComfyUI before it is used as image2. */
+  faceCrop?: { x: number; y: number; width: number; height: number };
+  /** Extra identity references (downscaled recent frames) as data URLs; image2/image3 = [faceImage, ...referenceImages] (max 2). */
+  referenceImages?: string[];
   seed?: number;
   steps?: number;
   cfg?: number;
@@ -179,6 +173,9 @@ export interface QwenEditParams {
 function buildWorkflow(opts: {
   sceneName: string;
   faceName?: string;
+  faceCrop?: { x: number; y: number; width: number; height: number };
+  /** Uploaded names of extra reference frames; they take the image slots after the face (max 2 slots in all). */
+  refNames?: string[];
   prompt: string;
   negativePrompt: string;
   seed: number;
@@ -194,7 +191,12 @@ function buildWorkflow(opts: {
       image1: ["20", 0],
       prompt,
     };
-    if (opts.faceName) inputs.image2 = ["11", 0];
+    const slots: Array<[string, number]> = [];
+    if (opts.faceName) slots.push(opts.faceCrop ? ["13", 0] : ["11", 0]);
+    (opts.refNames ?? []).forEach((_, i) => slots.push([`${16 + i}`, 0]));
+    slots.slice(0, 2).forEach((ref, i) => {
+      inputs[`image${i + 2}`] = ref;
+    });
     return { class_type: "TextEncodeQwenImageEditPlus", inputs };
   };
 
@@ -289,7 +291,17 @@ function buildWorkflow(opts: {
 
   if (opts.faceName) {
     wf["11"] = { class_type: "LoadImage", inputs: { image: opts.faceName } };
+    if (opts.faceCrop) {
+      const c = opts.faceCrop;
+      const outH = 768;
+      const outW = Math.max(64, Math.round((c.width * outH) / c.height / 8) * 8);
+      wf["12"] = { class_type: "ImageCrop", inputs: { image: ["11", 0], width: c.width, height: c.height, x: c.x, y: c.y } };
+      wf["13"] = { class_type: "ImageScale", inputs: { image: ["12", 0], upscale_method: "lanczos", width: outW, height: outH, crop: "disabled" } };
+    }
   }
+  (opts.refNames ?? []).slice(0, opts.faceName ? 1 : 2).forEach((name, i) => {
+    wf[`${16 + i}`] = { class_type: "LoadImage", inputs: { image: name } };
+  });
   return wf;
 }
 
@@ -493,10 +505,16 @@ export async function generateQwenEdit(
     const faceName = params.faceImage
       ? await uploadImage(params.faceImage, "specmem_face", signal)
       : undefined;
+    const refNames: string[] = [];
+    for (const ref of (params.referenceImages ?? []).slice(0, faceName ? 1 : 2)) {
+      refNames.push(await uploadImage(ref, "specmem_ref", signal));
+    }
 
     const workflow = buildWorkflow({
       sceneName,
       faceName,
+      refNames,
+      faceCrop: params.faceCrop,
       prompt: params.prompt,
       negativePrompt: params.negativePrompt ?? DEFAULT_NEGATIVE_PROMPT,
       seed: params.seed ?? Math.floor(Math.random() * 2 ** 31),

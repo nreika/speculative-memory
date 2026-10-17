@@ -216,6 +216,23 @@ Display: images of a capture are held back by `td_capture_listener.py` and shown
 - `POST /api/capture/record` `{image}`: save a record-only frame; does not touch the active capture and sends nothing to TD.
 - Browser fallback: `POST /api/touchdesigner-control/session/<id>/capture` / UDP `{"type": "capture", ...}` accept an optional `captureId`; the server starts the capture immediately and fails it if no browser picks it up within 30 s.
 
+## Display sync (history DATs, fade-in, reset_history)
+
+Ported from the September exhibition build into `td_capture_listener.py`; the pure helpers (HTTP fetch, formatting, fade decisions) are in `td_display_sync.py` and tested by `python -I tests/test_display_sync.py`.
+
+- **Needs** a file-synced Text DAT `/project1/td_display_sync` (`td_display_sync.py`) next to the listener. Without it nothing below runs (the old timer2 fade stays).
+- **Data source**: the server's `GET /api/latest-prediction` and `GET /api/action-history?limit=50` at the `Serverurl` of the Network page. HTTP runs on a worker thread; results are applied on the main thread.
+- **DATs** (updated once per completed batch): `scenario_current` (Table sceneKey/label/text), `observation_current` (Text), `history_current` (Table time(JST)/captureId/observation/hasPerson, newest first), `scenario_latest` (Text, "■ 現在" / "● ラベル (sceneKey)"), `action_log` (Text).
+- **Fade**: Constant CHOP `fade_state` (`fade` 0/1) -> Lag CHOP `fade_lag` (0.8 s / 0.8 s). A completed batch sets 1 once per captureId (already visible: drop to 0, wait for the lag, raise again to replay from black) and calls `/project1/start_display_exec` `cancel_pending()` when it exists. **Export `fade_lag`'s `fade` channel to the Alpha / opacity of the display COMP** (CHOP Export, or a parameter expression `op('/project1/fade_lag')['fade']`). `/project1` Display page `Fademode` = `fade_state` (default) or `legacy_timer2` (the old timer2 pulse; also used while the par or `fade_state` does not exist).
+- **Setup** (idempotent): `op('/project1/td_capture_listener').module.install_display_sync()` (alias `build()`), wire the opacity, Ctrl+S.
+- **Reset**: `op('/project1/td_capture_listener').module.reset_history()` or `op('/project1/td_capture_panel_controls').module.reset_history()` -> POST `/api/reset-history`; on success clears batch state, `fade_state` = 0, the DATs and the scene text panels. Example Keyboard In DAT callback for Shift+Ctrl+Alt+n (check the key channel names of your Keyboard In):
+
+```python
+def onOffToOn(channel, sampleIndex, val, prev):
+    if channel.name == 'n' and all(op('keyboardin1')[k] for k in ('shift', 'ctrl', 'alt')):
+        op('/project1/td_capture_panel_controls').module.reset_history()
+```
+
 ## Notes
 
 - The app now supports `1` to `10` timeline images per capture.
