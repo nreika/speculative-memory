@@ -227,3 +227,8 @@ test('depth_order_broken class', () => {
   assert.equal(normalizeDefectType('depth order broken'), 'depth_order_broken');
   assert.equal(normalizeDefectType('monitors pasted in front of the mesh'), 'depth_order_broken');
 });
+
+test('light_artifact class', () => {
+  assert.equal(normalizeDefectType('rainbow light streaks'), 'light_artifact');
+  assert.equal(normalizeDefectType('lens flare'), 'light_artifact');
+});

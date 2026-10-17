@@ -48,3 +48,10 @@
 - 元: v10。G-07 補足 3: 遮蔽と判定された撮影では、画像プロンプトの先頭に「遮蔽物（obstructedBy）が画像の最前面で、透けて見える物はぼやけて暗いまま」の文を置く（imagePrompt.obstructedLeadRule）。実験 scripts/obstruct-ab.ts（同 seed・同プロンプト）で、現行はモニターがメッシュの手前に出る・先頭に置くと奥に収まる・denoise 0.6 も収まる（不採用）。
 - 自動改善の検証・ロールバック対象外（ユーザー判断のため）。
 
+## v12 — 2026-10-17T04:30:31.542Z（ユーザー承認）
+- 元: v11。G-17: 画像プロンプトに「レンズフレア・光条・虹色の線・光彩・きらめきを描かない」（noLightArtifactRule、両テンプレート）、無人時は「明るさと色温度だけが変わる」（emptyRoomLightRule）、toneImage.emptyRoom の 4 段階から「影が動く・長い影」等の光の形状変化を除去、負のプロンプトと計画への 1 文を追加。
+- 自動改善の検証・ロールバック対象外（ユーザー判断のため）。
+
+## v13 — 2026-10-17T04:46:54.207Z（G-17 の修正）
+- 元: v12。v12 の「No lens flare, no light streaks, no rainbow lines…」は、名指しした虹色の光条をむしろ描かせた（同 seed の実験: v12 再現=光条あり、肯定表現に置換=光条なし。人物語の否定文 G-01 と同じ逆効果）。noLightArtifactRule を肯定表現「The lighting stays natural and soft, exactly like an ordinary unprocessed photograph.」に置換、計画への 1 文も光条等の語を使わない言い方に変更。
+

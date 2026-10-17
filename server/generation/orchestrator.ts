@@ -330,7 +330,7 @@ export function composeEditInstruction(args: {
       "\n\n" +
       foregroundScaleRule(args.foregroundObject) +
       "\n\n" + physicsBlock(rb) +
-      screenAndFrameText(rb, args.obstructed) +
+      screenAndFrameText(rb, args.obstructed, true) +
       (args.tone !== undefined ? "\n\n" + toneImageRule(args.tone, true, rb) : "") +
       `\n\n${er.tail}`
     );
@@ -370,10 +370,10 @@ The result must be free of: ${avoid}.` : editInstruction;
 /** Filled by generateImage when passed as `trace`: the final positive/negative prompt and seed. */
 /**
  * Obstructed captures (a near object blocks the lens) use a lower denoise so the composition stays closer to the input:
- * env COMFYUI_OBSTRUCTED_DENOISE (default 0.6; 1 or invalid = off). Experiment 2026-10-17 (scripts/obstruct-ab.ts).
+ * env COMFYUI_OBSTRUCTED_DENOISE (default 0.8; 1 or invalid = off). 0.6 drew rainbow light streaks on the A scenes, 1.0 pasted screens onto the mesh; 0.8 was clean on 4 of 4 test cases (scripts/obstruct-ab.ts, 2026-10-17).
  */
 export function obstructedDenoise(env: NodeJS.ProcessEnv = process.env): number | null {
-  const v = Number(env.COMFYUI_OBSTRUCTED_DENOISE ?? "0.6");
+  const v = Number(env.COMFYUI_OBSTRUCTED_DENOISE ?? "0.8");
   return Number.isFinite(v) && v >= 0.2 && v < 1 ? v : null;
 }
 

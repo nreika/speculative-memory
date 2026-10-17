@@ -40,6 +40,10 @@ export interface Rulebook {
     obstructedRule?: string;
     /** G-07 supplement 3: first sentence of the prompt when obstructed; placeholders {by}, {through}, {pattern} (absent in older files). */
     obstructedLeadRule?: string;
+    /** G-17: no lens flare / light streaks / glow, in both templates (absent in older files). */
+    noLightArtifactRule?: string;
+    /** G-17: in an empty room the light changes in brightness and colour temperature only (absent in older files). */
+    emptyRoomLightRule?: string;
     /** Extra sentences after the physics rule (both templates; must contain no person words). Automatic improvements go here. */
     extraConstraints: string[];
   };
@@ -156,6 +160,8 @@ export function validateRulebook(rb: any): string[] {
   need(ip.noNewTextRule === undefined || isStr(ip.noNewTextRule), 'imagePrompt.noNewTextRule');
   need(ip.obstructedRule === undefined || isStr(ip.obstructedRule), 'imagePrompt.obstructedRule');
   need(ip.obstructedLeadRule === undefined || isStr(ip.obstructedLeadRule), 'imagePrompt.obstructedLeadRule');
+  need(ip.noLightArtifactRule === undefined || isStr(ip.noLightArtifactRule), 'imagePrompt.noLightArtifactRule');
+  need(ip.emptyRoomLightRule === undefined || isStr(ip.emptyRoomLightRule), 'imagePrompt.emptyRoomLightRule');
   need(rb.negative?.noNewText === undefined || isStr(rb.negative.noNewText), 'negative.noNewText');
   need(rb.negative?.obstructed === undefined || isStr(rb.negative.obstructed), 'negative.obstructed');
   need(rb.toneImage === undefined || (isStrArr(rb.toneImage?.people) && isStrArr(rb.toneImage?.emptyRoom)), 'toneImage');
@@ -284,8 +290,8 @@ export function obstructedLead(rb: Rulebook = getRulebook(), obstructed = false,
 }
 
 /** G-16 (no new text/clock/UI) and the G-07 supplement (obstructed camera: keep the obstruction); '' when the version has none. */
-export function screenAndFrameText(rb: Rulebook = getRulebook(), obstructed = false): string {
-  const parts = [rb.imagePrompt.noNewTextRule, obstructed ? rb.imagePrompt.obstructedRule : undefined].filter((s): s is string => !!s);
+export function screenAndFrameText(rb: Rulebook = getRulebook(), obstructed = false, emptyRoom = false): string {
+  const parts = [rb.imagePrompt.noNewTextRule, rb.imagePrompt.noLightArtifactRule, emptyRoom ? rb.imagePrompt.emptyRoomLightRule : undefined, obstructed ? rb.imagePrompt.obstructedRule : undefined].filter((s): s is string => !!s);
   return parts.map((s) => `\n\n${s}`).join('');
 }
 

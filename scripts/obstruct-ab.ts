@@ -26,7 +26,11 @@ const nowFile = fs.readdirSync(dir).find((f) => /_NOW\.(jpg|jpeg|png)$/i.test(f)
 const sceneImage = `data:image/${nowFile.endsWith('.png') ? 'png' : 'jpeg'};base64,${fs.readFileSync(path.join(dir, nowFile)).toString('base64')}`;
 const FRONT =
   'The mesh chair backrest is the frontmost layer of the whole image; everything seen through the mesh stays dim, blurred and partially hidden by the mesh pattern, exactly as in the input.';
-const prompt = variant === 'c' ? `${FRONT}\n\n${scene.imagePromptFull}` : scene.imagePromptFull;
+const NO_ARTIFACT = 'No lens flare, no light streaks, no rainbow lines, no added glow or sparkles.';
+const POSITIVE_LIGHT = 'The lighting stays natural and soft, exactly like an ordinary unprocessed photograph.';
+// e = the G-17 negated wording replaced by a positive sentence (hypothesis: naming the artifacts makes the model draw them)
+const prompt =
+  variant === 'c' ? `${FRONT}\n\n${scene.imagePromptFull}` : variant === 'e' ? String(scene.imagePromptFull).replace(NO_ARTIFACT, POSITIVE_LIGHT) : scene.imagePromptFull;
 
 const serverUrl = (process.env.SERVER_URL || 'http://127.0.0.1:3000').replace(/\/$/, '');
 async function state(): Promise<{ idle: boolean; est: number | null; active: boolean; elapsedMs: number }> {
@@ -60,14 +64,14 @@ for (let attempt = 1; attempt <= 6; attempt++) {
       prompt,
       negativePrompt: scene.negativePrompt,
       seed: scene.seed,
-      denoise: variant === 'd' ? denoise : undefined,
+      denoise: variant === 'd' || variant === 'e' ? denoise : undefined,
       filenamePrefix: `SpecMem/obstruct-ab-${variant}`,
       signal: ctl.signal,
     });
     clearInterval(watch);
     const secs = (Date.now() - t0) / 1000;
     const m = /^data:image\/(\w+);base64,(.+)$/.exec(r.dataUrl)!;
-    const file = path.join(out, `obstruct-ab-${variant}${variant === 'd' ? `-${denoise}` : ''}_${gid}_${letter}.${m[1] === 'jpeg' ? 'jpg' : m[1]}`);
+    const file = path.join(out, `obstruct-ab-${variant}${variant === 'd' || variant === 'e' ? `-${denoise}` : ''}_${gid}_${letter}.${m[1] === 'jpeg' ? 'jpg' : m[1]}`);
     fs.writeFileSync(file, Buffer.from(m[2], 'base64'));
     console.log(JSON.stringify({ variant, file, seconds: Math.round(secs * 10) / 10, attempt }));
     process.exit(0);

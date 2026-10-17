@@ -34,6 +34,8 @@ export const DEFECT_TYPES = [
   'obstruction_removed',
   // G-07 supplement 2 (2026-10-17): something behind the obstruction is drawn in front of it / too sharp
   'depth_order_broken',
+  // G-17 (2026-10-17): lens flare / rainbow light streaks / added glow
+  'light_artifact',
   'other',
 ] as const;
 export type DefectType = (typeof DEFECT_TYPES)[number];
@@ -79,6 +81,7 @@ export function normalizeDefectType(raw: unknown): DefectType {
   if (/float|levitat|hover/.test(t)) return 'floating';
   if (/placement|implausible|physic|gravity|\bhang/.test(t)) return 'implausible_placement';
   if (/new_?text|text_or_clock|garbled|clock|digit/.test(t)) return 'new_text_or_clock';
+  if (/light_?artifact|lens_?flare|light_?streak|rainbow|sparkle|glow/.test(t)) return 'light_artifact';
   if (/depth_?order|in_front_of_(the_)?(mesh|chair)|pasted/.test(t)) return 'depth_order_broken';
   if (/obstruction|removed_?obstruct|backrest_?removed/.test(t)) return 'obstruction_removed';
   if (/lost_?belong|belongings|held_?item|dropped_?item/.test(t)) return 'lost_belongings';
@@ -154,7 +157,7 @@ export function parseSingleAnswer(raw: unknown): QaDefect[] | null {
   for (const d of (Array.isArray(j.defects) ? j.defects : []).slice(0, 4)) {
     if (!d || typeof d !== 'object') continue;
     const type = normalizeDefectType(d.type);
-    if (!['floating', 'anatomy', 'scale', 'implausible_placement', 'hair_mismatch', 'arms_raised', 'other'].includes(type)) continue;
+    if (!['floating', 'anatomy', 'scale', 'implausible_placement', 'hair_mismatch', 'arms_raised', 'light_artifact', 'other'].includes(type)) continue;
     out.push({ type, where: clip(d.where, 80), note: clip(d.note, 160) });
   }
   return out;
@@ -223,8 +226,8 @@ const PAIR_PROMPT = (a: string, b: string) =>
   'Ignore lighting, colour and screen glow. Short noun phrases with the place, at most 4 each; use empty lists if nothing. JSON only: {"added":[],"removed":[]}';
 
 export const SINGLE_PROMPT =
-  'Inspect this photo for rendering defects only: objects floating in the air or hanging in an impossible way, malformed or extra hands/arms/fingers, distorted face, a person duplicated, an object near the camera that is absurdly huge. ' +
-  'Report only clear defects. JSON only: {"defects":[{"type":"floating|anatomy|scale|implausible_placement","where":"...","note":"..."}]}';
+  'Inspect this photo for rendering defects only: objects floating in the air or hanging in an impossible way, malformed or extra hands/arms/fingers, distorted face, a person duplicated, lens flare or rainbow-coloured light streaks, added glow or sparkles, an object near the camera that is absurdly huge. ' +
+  'Report only clear defects. JSON only: {"defects":[{"type":"floating|anatomy|scale|implausible_placement|light_artifact","where":"...","note":"..."}]}';
 
 export const buildPairPrompt = () => PAIR_PROMPT('IMAGE 1', 'IMAGE 2');
 

@@ -77,7 +77,7 @@ export function safeScenario(sceneDescription: string, original: ScenarioResult,
   const templates = [
     `The room stays empty; only the light on the ${obj} shifts slightly.`,
     `The room stays empty and still; the ${obj} sits in a slightly softer shade.`,
-    `Nobody enters the room; the light across the ${obj} changes slightly.`,
+    `Nobody enters the room; the brightness of the ${obj} changes slightly.`,
   ];
   const text = templates[index % templates.length];
   return {

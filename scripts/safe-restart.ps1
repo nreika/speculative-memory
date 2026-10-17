@@ -14,7 +14,9 @@ if ($c) {
   if (((Get-Date) - $p.StartTime).TotalSeconds -lt 60) { "NOT RESTARTING: server started $([int]((Get-Date) - $p.StartTime).TotalSeconds) s ago"; exit 1 }
 }
 $cmd = "cmd.exe /c `"cd /d $repo && node_modules\.bin\tsx.cmd server.ts >> logs\server.log 2>> logs\server.err.log`""
-function Start-Server { (Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = $cmd; CurrentDirectory = $repo }).ReturnValue }
+# ShowWindow=0 (SW_HIDE): the server's console window stays hidden (stop it with stop-server.ps1 or taskkill)
+$si = New-CimInstance -ClassName Win32_ProcessStartup -ClientOnly -Property @{ ShowWindow = [uint16]0 }
+function Start-Server { (Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = $cmd; CurrentDirectory = $repo; ProcessStartupInformation = $si }).ReturnValue }
 function Test-Up {
   $l = Get-NetTCPConnection -LocalPort 3000 -State Listen -ErrorAction SilentlyContinue
   if (-not $l) { return $false }

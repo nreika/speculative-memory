@@ -86,4 +86,8 @@ npx tsx scripts/qa-improve.ts --apply-proposal <ファイル>  # ユーザーが
 
 ## 9. 遮蔽時の追加対策（2026-10-17）
 - G-07 補足 3: 遮蔽と判定された撮影は、画像プロンプトの先頭に「遮蔽物が最前面」の文（`obstructedLeadRule`、v11）。
-- 遮蔽時だけ KSampler の denoise を下げる: 環境変数 `COMFYUI_OBSTRUCTED_DENOISE`（既定 0.6、1 または不正値で無効）。通常の撮影は 1.0 のまま。使った値は prompts.json の各シーンの `denoise`（使わなければ null）に残る。実験 `scripts/obstruct-ab.ts`（出力は `speculative-memory_data/experiments/obstruct-ab/`）。
+- 遮蔽時だけ KSampler の denoise を下げる: 環境変数 `COMFYUI_OBSTRUCTED_DENOISE`（既定 0.8（0.6 は A に虹色の光条、1.0 は B に画面の貼り付きが出た。0.8 は 4 件の比較で全て良好）、1 または不正値で無効）。通常の撮影は 1.0 のまま。使った値は prompts.json の各シーンの `denoise`（使わなければ null）に残る。実験 `scripts/obstruct-ab.ts`（出力は `speculative-memory_data/experiments/obstruct-ab/`）。
+
+## 10. G-17（光のアーティファクト、2026-10-17）
+- v12 で入れた否定文（No lens flare, no light streaks, no rainbow lines…）は、名指しした虹色の光条をむしろ描かせた（同 seed の実験 `scripts/obstruct-ab.ts` e: 再現=光条あり、肯定表現に置換=光条なし）。**画像プロンプトにアーティファクトの語を書かない。肯定表現にする**（人物語の否定文 G-01 と同じ原理）。v13 で `The lighting stays natural and soft, exactly like an ordinary unprocessed photograph.` に置換。
+- 無人時の光の変化は明るさと色温度だけ（`emptyRoomLightRule`、`toneImage.emptyRoom`、合成シナリオ文、計画への 1 文）。QA 分類 `light_artifact`。

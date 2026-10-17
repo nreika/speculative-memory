@@ -33,7 +33,9 @@ $args = @(
 ) -join ' '
 $cmd = "cmd.exe /c `"cd /d $cwd && `"$py`" $args >> `"$log`" 2>&1`""
 if ($DryRun) { "DRY RUN: $cmd"; exit 0 }
-$rc = (Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = $cmd; CurrentDirectory = $cwd }).ReturnValue
+# ShowWindow=0 (SW_HIDE): no console window is left open on the desktop
+$si = New-CimInstance -ClassName Win32_ProcessStartup -ClientOnly -Property @{ ShowWindow = [uint16]0 }
+$rc = (Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = $cmd; CurrentDirectory = $cwd; ProcessStartupInformation = $si }).ReturnValue
 "started rc=$rc"
 
 for ($i = 0; $i -lt $WaitSec; $i++) {

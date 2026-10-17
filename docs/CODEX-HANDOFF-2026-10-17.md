@@ -86,6 +86,7 @@ AGENTS.md の第0章とユーザーの運用指示から。
 - `.env.local` を編集すると自動で再起動がかかる（vite）。撮影の合間にだけ編集する。
 - ノートの Ollama に、撮影中に手動スクリプトを当てない。2026-10-16 20:50、手動プローブで describe が 297 秒止まった。
 - テスト撮影は短く、間隔を空けてまとめる（テスト中は TD のタイマー撮影が「生成中」扱いで記録のみになる）。
+- サーバーと ComfyUI は非表示のコンソールで動く（safe-restart.ps1 / restart-comfyui.ps1 が ShowWindow=0 で起動）。止めるときはスクリプト（stop-server.ps1 等）か taskkill。
 - ComfyUI がハングしたら（連続タイムアウト）: サーバーが自動で `scripts/restart-comfyui.ps1` を実行する（`COMFYUI_FAIL_RESTART_AFTER`、既定 2 回。`COMFYUI_AUTO_RESTART=false` で無効）。/logs に赤バナー、`GET /api/health` の `comfyQueue`（待ちが増え続けたらハング）・`autoRestarts`・`comfyAlert`。手動で復旧するときは同じスクリプトを実行（75 秒以内に /queue が応答すれば成功、終了コード 0）。/interrupt と /queue clear ではハングしたジョブは消えない。
 - ログ: `logs/server.log`、`logs/server.err.log`、`logs/capture-events.jsonl`、`logs/scene-history.jsonl`、`logs/history-summary.json`、`logs/qa-local.jsonl`、`logs/rulebook-changes.jsonl`。
 - 2026-10-16 15:08〜15:19 に、再起動で起動プロセスが無言で落ちて約 10 分止まった事故あり。再起動のたびに停止・復帰時刻と停止秒数を報告する。
@@ -138,3 +139,14 @@ $t = @(Get-ChildItem -Path 'server' -Filter '*.test.ts' -File -Recurse | ForEach
 - 05:31〜12:38 ComfyUI ハング(ジョブ 1 件がカーネル内で停止、キュー 71 件滞留)。復旧手順は `scripts/restart-comfyui.ps1`。連続タイムアウト 2 回で自動再起動、`/api/health` の comfyQueue / autoRestarts / comfyAlert、UDP `alert`(TD は赤帯表示)。
 - ルールブック v9〜v11: G-16(画面に新しい文字・数字・時計・UI を描かない)、G-07 補足(obstructed 時は遮蔽物を含む構図維持、奥の物を手前に出さない、先頭文 obstructedLeadRule)。obstructed 撮影だけ `COMFYUI_OBSTRUCTED_DENOISE`(既定 0.6)。実験は `speculative-memory_data/experiments/obstruct-ab`。
 - ノートだけにある設定(Ollama 監視タスク、TD の最新 .toe は integrated-msi.28)は `docs/LAPTOP-HANDOFF.md` 末尾の追記と、ノートの `Documents\SpeculativeMemory-msi\LAPTOP-HANDOVER-CODEX.md` を参照。
+
+## 11. 2026-10-17 午後の状態(14:20 時点、最新)
+
+- **ルールブックは v13**(`GET /api/rulebook`)。v4〜v8 は自動改善(fabricated_object 対策)で付いた版、v9 G-16、v10/v11 G-07 補足(前後関係、遮蔽時の先頭文 `obstructedLeadRule`)、v12 G-17(光条禁止)、v13 G-17 を肯定表現に書き換え(「虹色の線を描かない」と名指しするとモデルが描くため。人物語と同じ逆効果)。
+- **遮蔽時の denoise は 0.8**(`COMFYUI_OBSTRUCTED_DENOISE`、14:12 の撮影から)。0.6 では B の貼り付きは消えたが A に虹色の光条が出た。0.8 + v13 で 14:12 以降の A は光条なし、B は貼り付きなし(14:15 の A を目視確認)。通常撮影は denoise 1.0。
+- **A/B の実験記録**: `speculative-memory_data/experiments/obstruct-ab/`、スクリプト `scripts/obstruct-ab.ts`(test:true、撮影の合間に 1 枚ずつ)。
+- **コンソール窓**: 以前の `safe-restart.ps1` / `restart-comfyui.ps1` は見える cmd 窓を残していた。14:05 に ShowWindow=0(非表示)へ変更済み。次の再起動から窓は出ない。**サーバーと ComfyUI は非表示のコンソールで動くので、止めるときは `scripts/stop-server.ps1` か taskkill**。ComfyUI は Comfy Desktop のウィンドウとは別に `restart-comfyui.ps1` の経路で動いている(Desktop の画面は「停止」表示のままでよい)。
+- **git**: da82134(10-15/16 分)と d7e8a9e(10-17 午前分)はコミット済みだが、`git push` は Git Credential Manager の GitHub サインイン待ちで未完了。サインイン後に `git -c maintenance.auto=false -c gc.auto=0 push -u origin feat/capture-modes-gguf`。その後の変更(v12/v13、denoise 0.8、非表示起動、この節)は次のコミットに入れる。
+- **ノートのファイル**: `integrated-msi.28_20261017.toe`、`ollama-watchdog.ps1`、`run-hidden.vbs`、`LAPTOP-HANDOFF-append-20261017.md` が `C:\Users\nmrei\Downloads` に届いているが、未反映(このセッションの権限でコピーが拒否された)。`touchdesigner/integrated-msi.28.toe`、`scripts/laptop/`、`docs/LAPTOP-HANDOFF.md` 末尾へ手で入れる。
+- **未解決**: カメラは椅子の背もたれで塞がれたまま(20:00 以前から)。遮蔽が解けたら obstructed=false に戻り、denoise 1.0・通常プロンプトに戻る(確認未)。参照フレーム(REF_FRAMES_ENABLED)の効果測定と、直近人物の後ろ姿描画の実機確認は、人が来るまで進まない。QA の自動改善は 30 判定ごとに走る(`logs/rulebook-changes.jsonl`、`/api/rulebook` の changes)。
+

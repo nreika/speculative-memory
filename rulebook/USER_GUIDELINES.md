@@ -126,6 +126,16 @@
 - 反映先: 画像プロンプト（`noNewTextRule`、有人・無人の両テンプレート）、負のプロンプト（`negative.noNewText` = clock, digits, text on screen, garbled text, numbers。時計ずらしがあるときは入れない）、QA 分類 `new_text_or_clock`。
 - エンジン用の文: `Do not add any new text, numbers, clock or user interface to any screen, sign or surface that is not in the input; every screen keeps exactly the content it has in the input, or stays dark if it is dark. The only digits that may change are on a clock or number sign that is already visible in the input.`
 
+## G-17 光のアーティファクト（レンズフレア・光条・虹色の線）を描かない。無人時の光の変化は明るさと色温度だけ
+- 日付: 2026-10-17
+- 原文（ユーザー、親セッション経由）: 「虹色の光条（赤・青・緑の細い斜線、レンズフレア風）が出ている。直して」
+- 根拠の撮影: Gen_a_2026-10-17_13-26-19（-556 A、obstructed、無人、tone 0.70。アーカイブ 2026-10-17_13-25-20 の A）。カーテンと背もたれ上部に虹色の斜線が多数。
+- 見立て: 無人時の「光がわずかに変化する」系の計画文と tone LIVELY の「The light visibly changes … with shadows that have moved」が合わさり、光の筋として描かれた。
+- 意味: 光のアーティファクト（レンズフレア、光条、虹色の線、光彩、きらめき）を足さない。無人時は光の変化を明るさと色温度だけに限り、光の形状や影の移動は書かない。
+- 反映先: 画像プロンプト（`noLightArtifactRule` を両テンプレート、`emptyRoomLightRule` を無人テンプレート。Lightning では負のプロンプトが無効なので本文に入れる）、`toneImage.emptyRoom`（tone 4 段階の無人向け文から影の移動等を除去）、無人の合成シナリオ（`synthesizeEmptyRoom`、`safeScenario` の文を明るさ・色温度に限定）、計画への 1 文（`vlm.extraInstructions`）、負のプロンプト（lens flare, light streaks, rainbow lines, glow, sparkles）、QA 分類 `light_artifact`。
+- **修正（2026-10-17、実験で確認）**: 最初の規則文 `No lens flare, no light streaks, no rainbow lines, no added glow or sparkles.` は、名指しした虹色の光条をむしろ描かせた（人物語の否定文 G-01 と同じ逆効果。同 seed の比較: v12 再現=光条あり、肯定表現に置換=光条なし。scripts/obstruct-ab.ts）。**アーティファクトの語は画像プロンプト・計画文に書かない**。肯定表現にする。
+- エンジン用の文（v13 以降）: `The lighting stays natural and soft, exactly like an ordinary unprocessed photograph.`（無人時はさらに）`In this empty room only the brightness and colour temperature of the light change; the light keeps its shape and the shadows stay where they are.`
+
 ---
 
 ## 運用上の判断（プロンプトの文言ではないが、ガイドラインとして蓄積）
@@ -142,6 +152,8 @@
 - 2026-10-17: G-16（画面・表示物に新しい文字・数字・時計・UI を描かない）を追加、G-07 に補足（遮蔽時は遮蔽物と構図を維持）。
 - 2026-10-17: G-07 補足 2（遮蔽物の奥の物を手前に出さない・輪郭をくっきりさせない）を追加。
 - 2026-10-17: G-07 補足 3（遮蔽時は遮蔽物を最前面と明示する文を画像プロンプトの先頭に置く）を追加。
+- 2026-10-17: G-17（光のアーティファクトを描かない、無人時の光の変化は明るさと色温度だけ）を追加。
+- 2026-10-17: G-17 を修正（否定語がアーティファクトを描かせたため、肯定表現に置換）。
 
 ---
 

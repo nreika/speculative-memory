@@ -227,10 +227,29 @@ test('G-07 supplement 3: obstruction lead sentence is first, obstructed only, na
   });
 });
 
-test('obstructed denoise: default 0.6, env override, off for 1 / invalid', async () => {
+test('obstructed denoise: default 0.8, env override, off for 1 / invalid', async () => {
   const { obstructedDenoise } = await import('./orchestrator');
-  assert.equal(obstructedDenoise({}), 0.6);
+  assert.equal(obstructedDenoise({}), 0.8);
   assert.equal(obstructedDenoise({ COMFYUI_OBSTRUCTED_DENOISE: '0.5' }), 0.5);
   assert.equal(obstructedDenoise({ COMFYUI_OBSTRUCTED_DENOISE: '1' }), null);
   assert.equal(obstructedDenoise({ COMFYUI_OBSTRUCTED_DENOISE: 'x' }), null);
+});
+
+test('G-17: no-light-artifact sentence in both templates, empty-room light sentence only when empty, tone empty rules without shadow shapes', async () => {
+  const { synthesizeEmptyRoom } = await import('./peopleDescribe');
+  withDir((dir) => {
+    ensureRulebookFiles(dir);
+    const v2 = buildV1();
+    v2.version = 2;
+    v2.parent = 1;
+    v2.imagePrompt.noLightArtifactRule = 'No lens flare.';
+    v2.imagePrompt.emptyRoomLightRule = 'Only brightness and colour temperature change.';
+    writeRulebook(v2, dir);
+    setActive(2, {}, dir);
+    const empty = composeEditInstruction({ predictionPrompt: 'The light dims.', presence: 0, distanceSec: 30 });
+    assert.ok(empty.includes('No lens flare.\n\nOnly brightness and colour temperature change.'));
+    const occupied = composeEditInstruction({ predictionPrompt: 'A person sits.', presence: 0.8, distanceSec: 30 });
+    assert.ok(occupied.includes('No lens flare.') && !occupied.includes('Only brightness and colour temperature change.'));
+  });
+  for (const s of synthesizeEmptyRoom({ distances: [30, 30, 300], count: 3 })) assert.doesNotMatch(s.prediction_prompt, /glow|brighter on one side|deeper shadow/);
 });

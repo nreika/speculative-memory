@@ -182,14 +182,14 @@ const EMPTY_OBJECTS = ["curtain", "shelf", "overhead light", "monitor screen", "
 export function synthesizeEmptyRoom(args: { distances: number[]; objects?: string[]; count: number }): ScenarioResult[] {
   const objs = (args.objects && args.objects.length ? args.objects : EMPTY_OBJECTS).slice(0, 5);
   const short = [
-    (o: string) => `The light on the ${o} shifts slightly.`,
+    (o: string) => `The brightness of the light on the ${o} shifts slightly.`,
     (o: string) => `The ${o} sits in a slightly softer shade.`,
-    (o: string) => `The screen glow reflected on the ${o} changes a little.`,
+    (o: string) => `The colour temperature of the light on the ${o} shifts a little.`,
   ];
   const long = [
-    (o: string) => `The overall light in the room dims a little and the ${o} falls into deeper shadow.`,
-    (o: string) => `The ${o} catches a clearly different light than before, brighter on one side.`,
-    (o: string) => `The room's light shifts toward a cooler tone and the ${o} looks slightly different in it.`,
+    (o: string) => `The overall brightness in the room dims a little and the ${o} looks darker.`,
+    (o: string) => `The ${o} looks clearly brighter and warmer than before in the same light.`,
+    (o: string) => `The room's light shifts toward a cooler colour temperature and the ${o} looks slightly different in it.`,
   ];
   return Array.from({ length: args.count }, (_, i) => {
     const d = args.distances[i] ?? 30;
