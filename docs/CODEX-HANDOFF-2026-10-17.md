@@ -150,3 +150,6 @@ $t = @(Get-ChildItem -Path 'server' -Filter '*.test.ts' -File -Recurse | ForEach
 - **ノートのファイル**: `integrated-msi.28_20261017.toe`、`ollama-watchdog.ps1`、`run-hidden.vbs`、`LAPTOP-HANDOFF-append-20261017.md` が `C:\Users\nmrei\Downloads` に届いているが、未反映(このセッションの権限でコピーが拒否された)。`touchdesigner/integrated-msi.28.toe`、`scripts/laptop/`、`docs/LAPTOP-HANDOFF.md` 末尾へ手で入れる。
 - **未解決**: カメラは椅子の背もたれで塞がれたまま(20:00 以前から)。遮蔽が解けたら obstructed=false に戻り、denoise 1.0・通常プロンプトに戻る(確認未)。参照フレーム(REF_FRAMES_ENABLED)の効果測定と、直近人物の後ろ姿描画の実機確認は、人が来るまで進まない。QA の自動改善は 30 判定ごとに走る(`logs/rulebook-changes.jsonl`、`/api/rulebook` の changes)。
 
+- **A/B 実験の結果（QA セッション、同 seed・ComfyUI のみ）**: 否定語の文（v12「No lens flare, no rainbow lines…」）は名指しした光条をむしろ描かせた → v13 で肯定表現に置換（光条なし）。denoise: 0.6 は A に光条（v11 の文だけでも再現）、1.0 は B 型の貼り付き（メッシュ上に黒いモニター）、**0.8 は 4 件の比較（A 光条例・B 貼り付き例 2 件）で全て良好** → 採用。
+- **実撮影の目視（obstructed）**: v13+denoise 0.6 の A 3 件・B 3 件（13-48-49 / 13-51-09 / 13-53-30）は全て良好。v13+denoise 0.8 は 14-12-19 の A 良好・**B は不具合（メッシュ奥と右端に青く光る画面が出た＝画面の新規描画、G-16 系）**、14-14-40 の A・B は良好。4 枚中 3 枚良好で、青い画面が続くなら denoise 0.7 か画面内容固定の文を検討。
+- **再起動**: 14:09:33→14:11:53（141 秒。1 回目の起動が 30 秒で LISTEN せず再試行、21:27 の 135 秒と同症状、原因未特定）。denoise 0.8 は 14:12 の撮影から有効。
