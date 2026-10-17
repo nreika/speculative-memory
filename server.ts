@@ -80,6 +80,7 @@ import { getCostTracker } from './server/usage/costTracker';
 import { buildPublicUrl, resolveNotifyHost, resolvePublicBaseUrl } from './server/network/notifyTarget';
 import { registerPresenceRoutes } from './server/presence/routes';
 import { registerHealthRoutes } from './server/health/routes';
+import { getComfyWatchdog } from './server/generation/comfyWatchdog';
 import { obstructedSince, withObstructionNote } from './server/events/obstruction';
 import { CaptureEventStore, type CaptureEvent as CaptureEventRow } from './server/events/captureEvents';
 import { registerEventRoutes } from './server/events/routes';
@@ -93,6 +94,8 @@ import { GEMINI_IMAGE_MODEL, GEMINI_VLM_MODEL, backendLabel, resolveBackends } f
 
 interface CaptureEvent {
   type: 'capture.saved';
+  /** ComfyUI hang alert (comfyWatchdog): set while consecutive timeouts are being handled, else absent. */
+  alert?: { level: string; message: string; since: string } | null;
   /** ~200-char Japanese summary of the room so far (same text on all three images). */
   historySummary?: string;
   /** Operator extras that were not applied: { gen_b: 'ignored: frame empty' } (shown by TD). */
@@ -775,12 +778,17 @@ async function startServer() {
   app.use(cors());
   app.use(express.json({ limit: '50mb' }));
   registerPresenceRoutes(app);
-  registerHealthRoutes(app);
+  // ComfyUI hang recovery (comfyWatchdog.ts): alert state -> /api/health, /logs banner, comfy.alert UDP, capture.saved.alert.
+  const comfyWatchdog = getComfyWatchdog();
+  comfyWatchdog.onChange = (st) => sendToTouchDesigner({ type: 'comfy.alert', alert: st.alert, autoRestarts: st.autoRestarts, lastTimeoutAt: st.lastTimeoutAt }, 'comfy.alert');
+  registerHealthRoutes(app, { watchdogStatus: () => comfyWatchdog.status() });
   // Per-capture structured log + display-log + /logs viewer (server/events).
   const captureEvents = new CaptureEventStore(
     path.join(process.cwd(), 'logs', 'capture-events.jsonl'),
     path.join(process.cwd(), 'logs', 'display-log.jsonl'),
-    costTracker.logPath
+    costTracker.logPath,
+    () => new Date(),
+    () => comfyWatchdog.status().alert
   );
   registerEventRoutes(app, captureEvents, { archiveRoot: archiveRootDir() });
   // Continuous local QA (Qwen, free) between captures + the versioned rulebook with its automatic improvement.
@@ -1367,6 +1375,8 @@ async function startServer() {
     // A new capture always wins: anything still in flight (TD pressed the
     // manual capture during a generation) is cancelled here, and its own
     // /api/generate request answers 409 { cancelled: true }.
+    // ComfyUI being restarted after a hang (comfyWatchdog): do not start a capture until it answers again.
+    await comfyWatchdog.whenReady();
     const stateBefore = cm.stateOf(captureId);
     if (stateBefore !== 'unknown' && stateBefore !== 'active') {
       return sendCancelled(res, captureId, cm);
@@ -1701,7 +1711,7 @@ async function startServer() {
         const sceneKey = `gen_${String.fromCharCode(97 + index)}`;
         const label = `Gen_${String.fromCharCode(97 + index)}`;
 
-        const imageTrace: { editInstruction?: string | null; negativePrompt?: string | null; seed?: number | null; referenceImage?: string } = {};
+        const imageTrace: { editInstruction?: string | null; negativePrompt?: string | null; seed?: number | null; denoise?: number | null; referenceImage?: string } = {};
         const imageStartedAt = Date.now();
         setStage(`scene${String.fromCharCode(65 + index)}`);
         const dataUrl = await generateImage({
@@ -1714,6 +1724,8 @@ async function startServer() {
           faceImageDataUrl: referencePersonImage,
           faceCrop: referenceCrop ?? undefined,
           behindView: drawFromBehind ? { clothes: recentLook?.clothes, hair: recentLook?.hair, position: recentLook?.position } : undefined,
+          obstructed: described.obstructed === true,
+          obstructedBy: described.obstructedBy || undefined,
           referencePerson: !!referencePersonImage,
           referenceImages: referencePersonImage ? undefined : refImages,
           foregroundObject: scenario.foreground_object,
@@ -1754,6 +1766,7 @@ async function startServer() {
             referenceCrop: drawFromBehind ? referenceCrop : null,
             negativePrompt: imageTrace.negativePrompt ?? null,
             seed: imageTrace.seed ?? null,
+            denoise: imageTrace.denoise ?? null,
             elapsedMs: Date.now() - imageStartedAt,
             imageBackend: backends.image,
             imageModel: imageModelUsed,
@@ -1771,6 +1784,7 @@ async function startServer() {
 
         const payload: CaptureEvent = {
           type: 'capture.saved',
+          ...(comfyWatchdog.status().alert ? { alert: comfyWatchdog.status().alert } : {}),
           captureId,
           sceneKey,
           sceneIndex: index,

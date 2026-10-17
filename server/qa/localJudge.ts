@@ -29,6 +29,11 @@ export const DEFECT_TYPES = [
   // G-14 / G-15 (user-approved 2026-10-16)
   'lost_belongings',
   'new_face',
+  // G-16 / G-07 supplement (user-approved 2026-10-17)
+  'new_text_or_clock',
+  'obstruction_removed',
+  // G-07 supplement 2 (2026-10-17): something behind the obstruction is drawn in front of it / too sharp
+  'depth_order_broken',
   'other',
 ] as const;
 export type DefectType = (typeof DEFECT_TYPES)[number];
@@ -73,6 +78,9 @@ export function normalizeDefectType(raw: unknown): DefectType {
   if (/missing|disappear|vanish|removed|lost/.test(t)) return 'missing_object';
   if (/float|levitat|hover/.test(t)) return 'floating';
   if (/placement|implausible|physic|gravity|\bhang/.test(t)) return 'implausible_placement';
+  if (/new_?text|text_or_clock|garbled|clock|digit/.test(t)) return 'new_text_or_clock';
+  if (/depth_?order|in_front_of_(the_)?(mesh|chair)|pasted/.test(t)) return 'depth_order_broken';
+  if (/obstruction|removed_?obstruct|backrest_?removed/.test(t)) return 'obstruction_removed';
   if (/lost_?belong|belongings|held_?item|dropped_?item/.test(t)) return 'lost_belongings';
   if (/new_?face|face_?turn|turned_?around|frontal_?face|face_?drawn/.test(t)) return 'new_face';
   if (/grid|screen_?door|moire/.test(t)) return 'grid';
@@ -169,6 +177,8 @@ function askedByInstruction(item: string, instruction: string): boolean {
   return nouns(item).some((n) => inst.has(n));
 }
 
+const TEXT_ITEM = /\b(clock|digits?|numbers?|text|writing|timestamp|time display|ui|interface|characters?|letters?)\b/i;
+const OBSTRUCTION_ITEM = /\b(backrest|chair back|headrest|obstruct\w*|foreground chair)\b/i;
 const HELD_ITEM = /\b(microphone|mic|phone|smartphone|mug|cup|bottle|tablet|badge|umbrella|folder|clipboard|held|holding|carried)\b/i;
 
 export interface PairEvidence {
@@ -192,13 +202,15 @@ export function classifyEvidence(ev: PairEvidence, instruction: string): QaDefec
   const missingInImage = [...(ev.a?.removed ?? []), ...(ev.b?.added ?? [])];
   for (const item of addedInImage) {
     if (askedByInstruction(item, instruction)) continue;
-    if (PERSON_NOUN.test(item)) push('fabricated_person', item, `${item}: appears in the image but not in the original`);
+    if (TEXT_ITEM.test(item)) push('new_text_or_clock', item, `${item}: text, digits or a clock appear that are not in the original`);
+    else if (PERSON_NOUN.test(item)) push('fabricated_person', item, `${item}: appears in the image but not in the original`);
     else push('fabricated_object', item, `${item}: appears in the image but not in the original`);
   }
   for (const item of missingInImage) {
     if (askedByInstruction(item, instruction)) continue;
-    // Things people carry or hold (G-14) are their own class.
-    if (HELD_ITEM.test(item)) push('lost_belongings', item, `${item}: held/carried in the original but missing in the image`);
+    // Things people carry or hold (G-14) are their own class; a vanished near-camera obstruction (chair back) too.
+    if (OBSTRUCTION_ITEM.test(item)) push('obstruction_removed', item, `${item}: blocked the view in the original but is gone in the image`);
+    else if (HELD_ITEM.test(item)) push('lost_belongings', item, `${item}: held/carried in the original but missing in the image`);
     else push('missing_object', item, `${item}: is in the original but missing in the image`);
   }
   for (const d of ev.single ?? []) push(d.type, d.where, d.note);

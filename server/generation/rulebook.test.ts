@@ -174,3 +174,63 @@ test('G-14 / G-15 sentences appear in the occupied template only when the active
     assert.ok(!composeEditInstruction({ predictionPrompt: 'The light dims.', presence: 0 }).includes('No new face.'));
   });
 });
+
+test('G-16 / obstructed supplement: sentences in both templates, obstruction only when flagged, negative terms only without a clock edit', () => {
+  withDir((dir) => {
+    ensureRulebookFiles(dir);
+    const v2 = buildV1();
+    v2.version = 2;
+    v2.parent = 1;
+    v2.imagePrompt.noNewTextRule = 'No new text.';
+    v2.imagePrompt.obstructedRule = 'Keep the obstruction.';
+    v2.negative.noNewText = 'clock, digits, text on screen';
+    writeRulebook(v2, dir);
+    setActive(2, {}, dir);
+    for (const presence of [0, 0.8]) {
+      const t = composeEditInstruction({ predictionPrompt: 'The light dims.', presence, distanceSec: 30 });
+      assert.ok(t.includes('No new text.'), `presence ${presence}`);
+      assert.ok(!t.includes('Keep the obstruction.'));
+      assert.ok(composeEditInstruction({ predictionPrompt: 'The light dims.', presence, distanceSec: 30, obstructed: true }).includes('Keep the obstruction.'));
+    }
+    assert.match(buildNegativePrompt(false), /, clock, digits, text on screen$/);
+    assert.doesNotMatch(buildNegativePrompt(true), /text on screen/);
+    assert.ok(!composeEditInstruction({ predictionPrompt: 'The light dims.', presence: 0 }).includes('person'));
+  });
+});
+
+test('G-07 supplement 2: obstructed-only negative terms', () => {
+  const rb = buildV1();
+  rb.negative.obstructed = 'sharp monitor in front of the mesh';
+  assert.match(negativePrompt(false, false, false, rb, true), /, sharp monitor in front of the mesh$/);
+  assert.doesNotMatch(negativePrompt(false, false, false, rb, false), /sharp monitor/);
+  assert.doesNotMatch(buildNegativePrompt(false, false, false, false), /in front of the mesh/);
+});
+
+test('G-07 supplement 3: obstruction lead sentence is first, obstructed only, names the obstruction', () => {
+  withDir((dir) => {
+    ensureRulebookFiles(dir);
+    const v2 = buildV1();
+    v2.version = 2;
+    v2.parent = 1;
+    v2.imagePrompt.obstructedLeadRule = 'The {by} is the frontmost layer; seen through {through} stays dim, hidden by {pattern}.';
+    writeRulebook(v2, dir);
+    setActive(2, {}, dir);
+    for (const presence of [0, 0.8]) {
+      const mesh = composeEditInstruction({ predictionPrompt: 'The light dims.', presence, distanceSec: 30, obstructed: true, obstructedBy: 'mesh chair backrest' });
+      assert.ok(mesh.startsWith('The mesh chair backrest is the frontmost layer; seen through the mesh stays dim, hidden by the mesh pattern.\n\n'), `presence ${presence}`);
+      const other = composeEditInstruction({ predictionPrompt: 'The light dims.', presence, distanceSec: 30, obstructed: true, obstructedBy: 'curtain' });
+      assert.ok(other.startsWith('The curtain is the frontmost layer; seen through it stays dim, hidden by its pattern.'));
+      const unknown = composeEditInstruction({ predictionPrompt: 'The light dims.', presence, distanceSec: 30, obstructed: true });
+      assert.ok(unknown.startsWith('The near-camera obstruction is the frontmost layer'));
+      assert.ok(!composeEditInstruction({ predictionPrompt: 'The light dims.', presence, distanceSec: 30 }).includes('frontmost layer'));
+    }
+  });
+});
+
+test('obstructed denoise: default 0.6, env override, off for 1 / invalid', async () => {
+  const { obstructedDenoise } = await import('./orchestrator');
+  assert.equal(obstructedDenoise({}), 0.6);
+  assert.equal(obstructedDenoise({ COMFYUI_OBSTRUCTED_DENOISE: '0.5' }), 0.5);
+  assert.equal(obstructedDenoise({ COMFYUI_OBSTRUCTED_DENOISE: '1' }), null);
+  assert.equal(obstructedDenoise({ COMFYUI_OBSTRUCTED_DENOISE: 'x' }), null);
+});

@@ -86,6 +86,7 @@ AGENTS.md の第0章とユーザーの運用指示から。
 - `.env.local` を編集すると自動で再起動がかかる（vite）。撮影の合間にだけ編集する。
 - ノートの Ollama に、撮影中に手動スクリプトを当てない。2026-10-16 20:50、手動プローブで describe が 297 秒止まった。
 - テスト撮影は短く、間隔を空けてまとめる（テスト中は TD のタイマー撮影が「生成中」扱いで記録のみになる）。
+- ComfyUI がハングしたら（連続タイムアウト）: サーバーが自動で `scripts/restart-comfyui.ps1` を実行する（`COMFYUI_FAIL_RESTART_AFTER`、既定 2 回。`COMFYUI_AUTO_RESTART=false` で無効）。/logs に赤バナー、`GET /api/health` の `comfyQueue`（待ちが増え続けたらハング）・`autoRestarts`・`comfyAlert`。手動で復旧するときは同じスクリプトを実行（75 秒以内に /queue が応答すれば成功、終了コード 0）。/interrupt と /queue clear ではハングしたジョブは消えない。
 - ログ: `logs/server.log`、`logs/server.err.log`、`logs/capture-events.jsonl`、`logs/scene-history.jsonl`、`logs/history-summary.json`、`logs/qa-local.jsonl`、`logs/rulebook-changes.jsonl`。
 - 2026-10-16 15:08〜15:19 に、再起動で起動プロセスが無言で落ちて約 10 分止まった事故あり。再起動のたびに停止・復帰時刻と停止秒数を報告する。
 
@@ -131,3 +132,9 @@ $t = @(Get-ChildItem -Path 'server' -Filter '*.test.ts' -File -Recurse | ForEach
 - 型チェックの既知エラーの有無は、実行して確認すること（上記）。
 - テスト対象はモジュールごとに増えている（`server/qa`、`server/history`、`server/mobile` など）。COMMIT-HANDOVER.md の一覧は古い可能性があるので、上のように `server` 以下の `*.test.ts` をまとめて渡す。
 - ComfyUI は Comfy Desktop から起動（ポート 8000）。Node サーバーは `scripts/start-server-current.ps1`、停止は `scripts/stop-server.ps1`、通常の再起動は `scripts/safe-restart.ps1`。
+
+## 10. 2026-10-17 の追記
+
+- 05:31〜12:38 ComfyUI ハング(ジョブ 1 件がカーネル内で停止、キュー 71 件滞留)。復旧手順は `scripts/restart-comfyui.ps1`。連続タイムアウト 2 回で自動再起動、`/api/health` の comfyQueue / autoRestarts / comfyAlert、UDP `alert`(TD は赤帯表示)。
+- ルールブック v9〜v11: G-16(画面に新しい文字・数字・時計・UI を描かない)、G-07 補足(obstructed 時は遮蔽物を含む構図維持、奥の物を手前に出さない、先頭文 obstructedLeadRule)。obstructed 撮影だけ `COMFYUI_OBSTRUCTED_DENOISE`(既定 0.6)。実験は `speculative-memory_data/experiments/obstruct-ab`。
+- ノートだけにある設定(Ollama 監視タスク、TD の最新 .toe は integrated-msi.28)は `docs/LAPTOP-HANDOFF.md` 末尾の追記と、ノートの `Documents\SpeculativeMemory-msi\LAPTOP-HANDOVER-CODEX.md` を参照。

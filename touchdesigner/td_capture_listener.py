@@ -78,9 +78,9 @@ SHOW_PARTIAL_ON_FAILURE = False
 # 268x26 (the scene text panels start at x=280, see td_scene_text.py). (The top-left corner is taken by the Mode selector.)
 COST_SETTINGS_COMP_PATH = '/project1'
 COST_DISPLAY_NAME = 'cost_display'
-COST_DISPLAY_GEOMETRY = {'x': 8, 'y': 70, 'w': 268, 'h': 26}
+COST_DISPLAY_GEOMETRY = {'x': 8, 'y': 91, 'w': 268, 'h': 16}   # row above it: overlay buttons (td_display_overlay)
 COST_DISPLAY_FONT = 'Yu Gothic UI'
-COST_DISPLAY_FONT_SIZE = 14
+COST_DISPLAY_FONT_SIZE = 12
 USAGE_API_PATH = '/api/usage'
 
 # Scene description panels (NOW / PAST / FUTURE A / FUTURE B), see td_scene_text.py.
@@ -403,15 +403,7 @@ def _start_ready_fade():
 
 
 def _show_display_windows():
-    """Call td_display_integration.show() if that DAT exists.
-
-    Despite this function's name it does NOT open window1..4: show() sets
-    fade_state to 1 and schedules fade_out() (fade_state=0) after hold_time
-    (holdsec, default 10 s). With Fademode=legacy (brightness2 = fade_state)
-    that means "10 s visible, then black"; with Fademode=fade_state the
-    fade-in path cancels the auto fade-out. Name kept for parity with the
-    laptop build (integrated-msi.9+).
-    """
+    """td_display_integration.show() opens window1..4 (display_a/b/c/now) if the DAT exists."""
     display = _td_op('/project1/td_display_integration')
     if display is None:
         return
@@ -427,7 +419,7 @@ def _trigger_ready_fade_if_needed():
 
     capture_id = BATCH_STATE['captureId']
     _request_display_sync(capture_id)       # DATs first (never raises)
-    _show_display_windows()                 # td_display_integration.show(): fade_state=1 + 10 s auto fade-out (both fade modes)
+    _show_display_windows()                 # open the 4 output windows (both fade modes)
     if _fade_mode() == 'fade_state':
         if _trigger_display_fade_in(capture_id):
             BATCH_STATE['fadeTriggered'] = True
@@ -1124,6 +1116,24 @@ def _update_scene_text(payload):
         _debug('scene text not updated: {}'.format(exc))
 
 
+def _handle_alert(payload, msg_type):
+    """Server 'alert' field (ComfyUI timeouts, auto-restart …) -> red strip via td_scene_text.set_alert.
+    Shown while datagrams carry an alert; cleared by an empty alert or by a generation.completed
+    without one. No field on other datagrams -> nothing changes. Never raises."""
+    try:
+        if 'alert' in payload:
+            alert = payload.get('alert')
+        elif msg_type == 'generation.completed':
+            alert = None
+        else:
+            return
+        box = op(SCENE_TEXT_SCRIPT_PATH)
+        if box is not None and hasattr(box.module, 'set_alert'):
+            box.module.set_alert(alert)
+    except Exception as exc:
+        _debug('alert not shown: {}'.format(exc))
+
+
 def onReceive(dat, rowIndex, message, bytes, peer):
     try:
         payload = json.loads(message)
@@ -1136,6 +1146,7 @@ def onReceive(dat, rowIndex, message, bytes, peer):
         return
 
     msg_type = str(payload.get('type', ''))
+    _handle_alert(payload, msg_type)
     if msg_type == 'usage.updated':
         _handle_usage(payload)
         return

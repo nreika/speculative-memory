@@ -14,6 +14,7 @@
  */
 
 import { createHash } from "node:crypto";
+import { getComfyWatchdog } from "./comfyWatchdog";
 import { DEFAULT_NEGATIVE_PROMPT } from "./ruleTexts";
 import { hairNegativeTerms, negativePrompt as rulebookNegativePrompt, qualitySuffix as rulebookQualitySuffix } from "./rulebook";
 
@@ -105,8 +106,8 @@ export const hairNegative = hairNegativeTerms;
 export const buildQualitySuffix = (clockEdit: boolean, allowNewPerson = false, longSpan = false): string =>
   rulebookQualitySuffix(clockEdit, allowNewPerson, longSpan);
 
-export const buildNegativePrompt = (clockEdit: boolean, noPerson = false, behindView: boolean | { hair?: string } = false): string =>
-  rulebookNegativePrompt(clockEdit, noPerson, behindView);
+export const buildNegativePrompt = (clockEdit: boolean, noPerson = false, behindView: boolean | { hair?: string } = false, obstructed = false): string =>
+  rulebookNegativePrompt(clockEdit, noPerson, behindView, undefined, obstructed);
 
 const DATA_URL_PATTERN = /^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/;
 
@@ -160,6 +161,8 @@ export interface QwenEditParams {
   seed?: number;
   steps?: number;
   cfg?: number;
+  /** KSampler denoise of the first pass (default 1.0 = production). Lower keeps more of the input latent (experiments only). */
+  denoise?: number;
   filenamePrefix?: string;
   /**
    * Cancels this generation. While it still waits in the serialise queue it is
@@ -181,6 +184,7 @@ function buildWorkflow(opts: {
   seed: number;
   steps: number;
   cfg: number;
+  denoise?: number;
   filenamePrefix: string;
   hires: boolean;
 }) {
@@ -242,7 +246,7 @@ function buildWorkflow(opts: {
         cfg: opts.cfg,
         sampler_name: DEFAULTS.sampler,
         scheduler: DEFAULTS.scheduler,
-        denoise: 1.0,
+        denoise: opts.denoise ?? 1.0,
       },
     },
   };
@@ -520,6 +524,7 @@ export async function generateQwenEdit(
       seed: params.seed ?? Math.floor(Math.random() * 2 ** 31),
       steps: params.steps ?? DEFAULTS.steps,
       cfg: params.cfg ?? DEFAULTS.cfg,
+      denoise: params.denoise,
       filenamePrefix: params.filenamePrefix ?? "SpecMem/gen",
       hires: DEFAULTS.hires,
     });
@@ -532,6 +537,7 @@ export async function generateQwenEdit(
       if (signal?.aborted) throw abortReason(signal);
       const { filename, subfolder } = await waitForImage(promptId, signal);
       const buffer = await fetchImage(filename, subfolder, signal);
+      getComfyWatchdog().noteSuccess();
       return { dataUrl: `data:image/png;base64,${buffer.toString("base64")}`, buffer };
     } catch (error) {
       if (signal?.aborted) {
@@ -539,6 +545,12 @@ export async function generateQwenEdit(
         // ComfyUI has actually let go of this prompt.
         await cancelPrompt(promptId);
         throw abortReason(signal);
+      }
+      if (String((error as Error)?.message).startsWith("comfyClient: timed out")) {
+        // Hung job: take our prompt out of ComfyUI's queue (pending -> delete, running -> interrupt), then count the
+        // timeout; consecutive ones trigger the ComfyUI restart (comfyWatchdog.ts).
+        await cancelPrompt(promptId).catch(() => undefined);
+        getComfyWatchdog().noteTimeout();
       }
       throw error;
     }

@@ -63,6 +63,12 @@
 - エンジン用の文: `Do not add any object that is not in the photo; every object stays exactly where it is. Objects rest on surfaces in physically plausible positions (laptops and cups on desks, bags on the floor or a chair seat); nothing hangs on a chair back or floats in the air; gravity and support stay realistic.`
 - 負のプロンプト: `floating object, object hanging on chair back, levitating laptop, extra chair, additional bag, added furniture`
 
+- 補足（2026-10-17）: カメラが手前の物（椅子の背もたれ等）で遮られていると判定された（describe の obstructed=true）撮影では、遮蔽物を含む元の構図を維持し、遮蔽物を取り除いた裏の部屋や明るい別の部屋を新しく描かない。根拠: Gen_b_2026-10-17_05-29-43（元は暗い会場で背もたれが画面の 7 割を塞ぐのに、B は椅子を消して明るい部屋を新規に描いた）。反映先: 画像プロンプト（`obstructedRule`、obstructed のときだけ）、QA 分類 `obstruction_removed`。エンジン用の文: `A large object right in front of the camera (such as a chair backrest) blocks much of the view in the input: keep that object and the whole composition exactly as in the input; do not remove it and do not draw the room behind it or a new, brighter room.`
+
+- 補足 2（2026-10-17、遮蔽時の前後関係）: 遮蔽物の奥にある物は、遮蔽物より手前に出したり、輪郭をくっきりさせたりしない。入力で透けて見える程度（ぼやけ・暗さ・メッシュ越しの質感）をそのまま保つ。根拠: Gen_b_2026-10-17_12-49-13（td-…-541 の B。元は椅子の背もたれのメッシュの奥にモニターが黒い四角としてぼんやり透けているだけなのに、生成ではモニター 2 台がメッシュの手前にくっきり貼り付いた）。反映先: 画像プロンプト（`obstructedRule` の後半、obstructed のときだけ）、負のプロンプト（`negative.obstructed` = sharp monitor in front of the mesh, objects in front of the chair back, objects pasted on top of the obstruction。obstructed のときだけ）、QA 分類 `depth_order_broken`。エンジン用の文: `Things behind the obstruction stay behind it: do not bring them in front of the obstruction or make their outlines sharper; keep them exactly as hazy, dark or mesh-filtered as they appear in the input.`
+
+- 補足 3（2026-10-17、遮蔽物を最前面と明示。実験で確認）: 遮蔽と判定された撮影では、画像プロンプトの**先頭**に「遮蔽物が画像全体の最前面で、それ越しに見える物はぼやけて暗いまま」の文を置く（遮蔽物の名前は describe の obstructedBy、不明なら near-camera obstruction）。根拠: scripts/obstruct-ab.ts（元 record_2026-10-17_12-54-52、B 条件、seed 固定）。現行 v10 はモニター 2 台がメッシュの手前に出る、この文を先頭に置くと奥に収まる（所要 28.7 秒、速度コストなし）、denoise 0.6 も収まるが不採用。Lightning（cfg 1.0）では負のプロンプトが無効なので、画像プロンプト側で対処する。反映先: 画像プロンプト（`obstructedLeadRule`、有人・無人の両テンプレートの先頭、obstructed のときだけ）。エンジン用の文（メッシュ以外は through it / its pattern）: `The mesh chair backrest is the frontmost layer of the whole image; everything seen through the mesh stays dim, blurred and partially hidden by the mesh pattern, exactly as in the input.`
+
 ## G-08 無人時の変化は環境的なものに限る
 - 日付: 2026-10-16（G-07 の派生。「ジャケットが引き出される」など人手前提の物の動きが無人で描かれた件）
 - 意味: 無人のシナリオは光・影、カーテンの揺れ、画面表示、点灯/消灯、窓外の明るさなどに限り、人の手が要る移動・出し入れ・開閉・回転は書かない（椅子の回転も禁止）。
@@ -112,6 +118,14 @@
 - 反映先: 画像プロンプト（`noNewFaceRule`）、負のプロンプト（newly drawn face, face turned to the camera）、VLM 指示、QA 分類 `new_face`。
 - エンジン用の文: `Do not draw a face that is not visible in the input: a person seen from behind or in profile stays turned away and does not turn to show the face; never create a new frontal face.`
 
+## G-16 画面・表示物に新しい文字・数字・時計・UI を描かない
+- 日付: 2026-10-17
+- 原文（ユーザー、親セッション経由）: 「B Futureが明らかに違うし、文字化けした時計をたくさん出すのやめて」
+- 根拠の撮影: Gen_b_2026-10-17_05-29-43（元 record_2026-10-17_05-28-24）。ノート PC 4 台の画面に「12:35」風の文字化けした時計が描かれた。
+- 意味: 元に無い文字・数字・時計・UI を足さない。元の画面の内容は維持するか、暗いままにする。数字をずらしてよいのは、元画像に実際に写っている時計・数字札だけ（既存の時計ずらし clockEdit と同じ条件）。
+- 反映先: 画像プロンプト（`noNewTextRule`、有人・無人の両テンプレート）、負のプロンプト（`negative.noNewText` = clock, digits, text on screen, garbled text, numbers。時計ずらしがあるときは入れない）、QA 分類 `new_text_or_clock`。
+- エンジン用の文: `Do not add any new text, numbers, clock or user interface to any screen, sign or surface that is not in the input; every screen keeps exactly the content it has in the input, or stays dark if it is dark. The only digits that may change are on a clock or number sign that is already visible in the input.`
+
 ---
 
 ## 運用上の判断（プロンプトの文言ではないが、ガイドラインとして蓄積）
@@ -125,6 +139,9 @@
 - 2026-10-16: G-11・G-12 を追加、G-03 に補足（直近人物を出す場合も extras は無効）。
 - 2026-10-16: G-13（髪型・髪の長さ・髪の色は変えない）を追加。
 - 2026-10-16: 候補 C-01・C-02 を採用し G-14（持ち物を維持）・G-15（見えていない顔を新しく描かない）に昇格。
+- 2026-10-17: G-16（画面・表示物に新しい文字・数字・時計・UI を描かない）を追加、G-07 に補足（遮蔽時は遮蔽物と構図を維持）。
+- 2026-10-17: G-07 補足 2（遮蔽物の奥の物を手前に出さない・輪郭をくっきりさせない）を追加。
+- 2026-10-17: G-07 補足 3（遮蔽時は遮蔽物を最前面と明示する文を画像プロンプトの先頭に置く）を追加。
 
 ---
 

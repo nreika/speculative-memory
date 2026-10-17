@@ -5,9 +5,18 @@ export interface HealthResult {
   comfyui: boolean;
   ollama: boolean;
   time: string;
+  /** ComfyUI queue sizes (null when /queue does not answer). A growing `pending` with nothing finishing = hung job. */
+  comfyQueue?: { running: number; pending: number } | null;
+  /** From the ComfyUI watchdog (server/generation/comfyWatchdog.ts); added fresh to every answer, not cached. */
+  lastTimeoutAt?: string | null;
+  autoRestarts?: number;
+  consecutiveTimeouts?: number;
+  comfyAlert?: { level: string; message: string; since: string } | null;
 }
 
 export interface HealthOptions {
+  /** Live watchdog state merged into the answer. */
+  watchdogStatus?: () => { lastTimeoutAt: string | null; autoRestarts: number; consecutiveTimeouts: number; alert: { level: string; message: string; since: string } | null };
   fetchImpl?: typeof fetch;
   now?: () => number;
   comfyUrl?: () => string;
@@ -53,11 +62,25 @@ export function createHealthChecker(opts: HealthOptions = {}): () => Promise<Hea
     if (cached && now() - cached.at < cacheMs) return cached.value;
     if (inflight) return inflight;
     inflight = (async () => {
+      const queueProbe = (async (): Promise<{ running: number; pending: number } | null> => {
+        const ctrl = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+        try {
+          const res = await fetchImpl(`${comfyUrl()}/queue`, { signal: ctrl.signal });
+          if (!res.ok) return null;
+          const q = (await res.json()) as { queue_running?: unknown[]; queue_pending?: unknown[] };
+          return { running: q.queue_running?.length ?? 0, pending: q.queue_pending?.length ?? 0 };
+        } catch {
+          return null;
+        } finally {
+          clearTimeout(timer);
+        }
+      })();
       const [comfyui, ollama] = await Promise.all([
         probe(fetchImpl, `${comfyUrl()}/system_stats`, timeoutMs),
         probe(fetchImpl, `${ollamaUrl()}/api/tags`, timeoutMs),
       ]);
-      const value: HealthResult = { ok: true, comfyui, ollama, time: new Date(now()).toISOString() };
+      const value: HealthResult = { ok: true, comfyui, ollama, time: new Date(now()).toISOString(), comfyQueue: await queueProbe };
       cached = { at: now(), value };
       return value;
     })().finally(() => {
@@ -71,10 +94,14 @@ export function createHealthChecker(opts: HealthOptions = {}): () => Promise<Hea
 export function registerHealthRoutes(app: Express, opts: HealthOptions = {}): void {
   const check = createHealthChecker(opts);
   app.get('/api/health', async (_req, res) => {
+    const wd = opts.watchdogStatus?.();
+    const extra = wd
+      ? { lastTimeoutAt: wd.lastTimeoutAt, autoRestarts: wd.autoRestarts, consecutiveTimeouts: wd.consecutiveTimeouts, comfyAlert: wd.alert }
+      : {};
     try {
-      res.json(await check());
+      res.json({ ...(await check()), ...extra });
     } catch {
-      res.json({ ok: true, comfyui: false, ollama: false, time: new Date().toISOString() });
+      res.json({ ok: true, comfyui: false, ollama: false, time: new Date().toISOString(), comfyQueue: null, ...extra });
     }
   });
 }

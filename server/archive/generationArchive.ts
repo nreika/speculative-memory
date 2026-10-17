@@ -58,6 +58,8 @@ export interface ArchiveScene {
   referenceCrop?: { x: number; y: number; width: number; height: number } | null;
   negativePrompt: string | null;
   seed: number | null;
+  /** First-pass denoise when lowered (obstructed captures); null = production default 1.0. */
+  denoise?: number | null;
   elapsedMs: number;
   /** Actual image backend / model of this scene; referenceImage: recent-person reference photo 'attached' | 'none'. */
   imageBackend?: string;

@@ -30,7 +30,7 @@ function setup() {
   fs.mkdirSync(paths.logsDir, { recursive: true });
   process.env.RULEBOOK_DIR = paths.rulebookDir;
   ensureRulebookFiles(paths.rulebookDir);
-  let clock = Date.parse('2026-10-17T00:00:00.000Z');
+  let clock = Date.parse('2030-01-01T00:00:00.000Z'); // after the real appliedAt written by ensureRulebookFiles
   const now = () => new Date(clock);
   const tick = (min = 1) => {
     clock += min * 60_000;

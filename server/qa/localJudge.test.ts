@@ -215,3 +215,15 @@ test('G-14 / G-15 classes: held items that vanish are lost_belongings, free text
   assert.equal(normalizeDefectType('new face drawn'), 'new_face');
   assert.equal(normalizeDefectType('lost belongings'), 'lost_belongings');
 });
+
+test('G-16 / obstruction classes: new text or clock, vanished obstruction', () => {
+  const t = classifyEvidence({ a: { added: ['clock text on the laptop screens'], removed: ['black chair backrest in the foreground'] }, b: null, single: [] }, 'The light dims slightly.');
+  assert.deepEqual(t.map((x) => x.type).sort(), ['new_text_or_clock', 'obstruction_removed']);
+  assert.equal(normalizeDefectType('garbled clock'), 'new_text_or_clock');
+  assert.equal(normalizeDefectType('obstruction removed'), 'obstruction_removed');
+});
+
+test('depth_order_broken class', () => {
+  assert.equal(normalizeDefectType('depth order broken'), 'depth_order_broken');
+  assert.equal(normalizeDefectType('monitors pasted in front of the mesh'), 'depth_order_broken');
+});

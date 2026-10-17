@@ -18,13 +18,13 @@ test('both up, cached for 5 s then refreshed', async () => {
   const check = createHealthChecker({ fetchImpl: mk(calls), now: () => t, comfyUrl: () => 'http://c', ollamaUrl: () => 'http://o' });
   const a = await check();
   assert.deepEqual([a.ok, a.comfyui, a.ollama], [true, true, true]);
-  assert.deepEqual(calls.sort(), ['http://c/system_stats', 'http://o/api/tags']);
+  assert.deepEqual(calls.sort(), ['http://c/queue', 'http://c/system_stats', 'http://o/api/tags']);
   t += 4900;
   await check();
-  assert.equal(calls.length, 2);
+  assert.equal(calls.length, 3);
   t += 200;
   await check();
-  assert.equal(calls.length, 4);
+  assert.equal(calls.length, 6);
 });
 
 test('errors give false flags, ok stays true', async () => {

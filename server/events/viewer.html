@@ -14,6 +14,7 @@
   body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.5 "Yu Gothic UI", "Meiryo", system-ui, sans-serif; }
   header { display: flex; flex-wrap: wrap; align-items: center; gap: 16px; padding: 10px 16px; background: var(--panel); border-bottom: 1px solid var(--line); position: sticky; top: 0; z-index: 5; }
   h1 { font-size: 16px; margin: 0 8px 0 0; }
+  #banner { display: none; background: #b3261e; color: #fff; font-weight: 700; padding: 10px 16px; position: sticky; top: 0; z-index: 6; }
   .stat { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
   .dot { width: 11px; height: 11px; border-radius: 50%; background: var(--gray); display: inline-block; }
   .dot.ok { background: var(--ok); } .dot.ng { background: var(--ng); }
@@ -59,6 +60,7 @@
 </style>
 </head>
 <body>
+<div id="banner"></div>
 <header>
   <h1>Speculative Memory ログ</h1>
   <div class="stat"><span class="dot" id="d-server"></span>サーバー</div>
@@ -125,7 +127,15 @@
   // ---------- header ----------
   function setDot(id, v) { var d = $(id); d.className = 'dot' + (v === true ? ' ok' : v === false ? ' ng' : ''); }
   function refreshHeader() {
-    get('/api/health').then(function (h) { setDot('d-server', !!h.ok); setDot('d-comfy', !!h.comfyui); setDot('d-ollama', !!h.ollama); })
+    get('/api/health').then(function (h) {
+      setDot('d-server', !!h.ok); setDot('d-comfy', !!h.comfyui); setDot('d-ollama', !!h.ollama);
+      var q = h.comfyQueue, msgs = [];
+      $('d-comfy').parentNode.title = q ? 'キュー 実行 ' + q.running + ' / 待ち ' + q.pending : 'キューに接続できません';
+      if (h.comfyAlert) msgs.push('⚠ ' + h.comfyAlert.message + '(' + hm(h.comfyAlert.since) + ' から)');
+      if (q && q.pending >= 3) msgs.push('⚠ ComfyUI のキューに ' + q.pending + ' 件滞留しています');
+      if (h.autoRestarts) msgs.push('自動再起動 ' + h.autoRestarts + ' 回(今回の起動以降)');
+      var b = $('banner'); b.textContent = msgs.join('   '); b.style.display = msgs.length && (h.comfyAlert || (q && q.pending >= 3)) ? 'block' : 'none';
+    })
       .catch(function () { setDot('d-server', false); setDot('d-comfy', null); setDot('d-ollama', null); });
     return get('/api/events/summary').then(function (s) {
       $('s-ok').textContent = s.completed;
@@ -214,6 +224,7 @@
     var box = el('div', 'badges');
     function add(text, cls, title) { var b = el('span', 'b' + (cls ? ' ' + cls : ''), text); if (title) b.title = title; box.appendChild(b); }
     if (e.test) add('テスト', 'warn');
+    if (e.comfyAlert) add('ComfyUI 警告', 'ng', e.comfyAlert.message);
     if (e.result === 'failed') add('失敗: ' + stageName(e.errorStage), 'ng', e.errorMessage || '');
     else if (e.result === 'cancelled') add('キャンセル', '', e.errorMessage || '');
     else if (e.result === 'running') add('実行中', 'warn');

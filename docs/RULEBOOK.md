@@ -78,3 +78,12 @@ npx tsx scripts/qa-improve.ts --apply-proposal <ファイル>  # ユーザーが
 - 候補 C-01・C-02 を固定ルール G-14（持ち物を維持）・G-15（見えていない顔を新しく描かない）に昇格（`rulebook/USER_GUIDELINES.md`）。規則文は `imagePrompt.holdingsRule` / `noNewFaceRule`（有人テンプレートの髪の文の直後。無人テンプレートには入らない）。v3 = v2 + この 2 文 + 負のプロンプト 2 件 + 計画への 1 文。`scripts/rulebook-add-g14-g15.ts` で作成・切替済み。自動改善の検証・ロールバック対象外。
 - QA 分類に `lost_belongings`（持っていた物の消失。マイク・スマホ・カップ等）と `new_face` を追加。`lost_belongings` は差分検査の「消えた物」から判定、`new_face` は名前だけの予約（4B は未検出）。
 - テストは `NODE_TEST_CONTEXT` のとき実ファイルを読まず組み込みの v1 を使う（自動改善で有効版が変わってもテストが壊れない）。
+
+## 8. G-16 と G-07 補足（ユーザー指示、2026-10-17）
+- G-16（画面・表示物に新しい文字・数字・時計・UI を描かない）: `imagePrompt.noNewTextRule`（有人・無人の両テンプレート、物理ルールの後ろ）、`negative.noNewText`（clock, digits, text on screen, garbled text, numbers。時計ずらし clockEdit が効くときは入れない＝元画像に時計が写っている場合だけ数字をずらす既存条件と整合）。
+- G-07 補足（遮蔽時は遮蔽物と構図を維持）: `imagePrompt.obstructedRule`。describe が obstructed=true と判定した撮影だけ、`composeEditInstruction` / `generateImage` の `obstructed` 引数（server.ts が `described.obstructed` を渡す）で入る。
+- QA 分類に `new_text_or_clock`、`obstruction_removed` を追加（差分検査の「増えた/消えた物」の語から判定）。v9 = v8 + 上記。`scripts/rulebook-add-g16.ts`。
+
+## 9. 遮蔽時の追加対策（2026-10-17）
+- G-07 補足 3: 遮蔽と判定された撮影は、画像プロンプトの先頭に「遮蔽物が最前面」の文（`obstructedLeadRule`、v11）。
+- 遮蔽時だけ KSampler の denoise を下げる: 環境変数 `COMFYUI_OBSTRUCTED_DENOISE`（既定 0.6、1 または不正値で無効）。通常の撮影は 1.0 のまま。使った値は prompts.json の各シーンの `denoise`（使わなければ null）に残る。実験 `scripts/obstruct-ab.ts`（出力は `speculative-memory_data/experiments/obstruct-ab/`）。

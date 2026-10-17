@@ -36,3 +36,15 @@
 - imagePrompt.extraConstraints に追加: Only modify existing objects; never add unseen items, even implied by context.
 - 検証: 次の 30 撮影で v7 より不良率が +5 ポイント以上悪ければ自動で戻す
 
+## v9 — 2026-10-17T03:43:35.091Z（ユーザー承認）
+- 元: v8。G-16（画面・表示物に新しい文字・数字・時計・UI を描かない: imagePrompt.noNewTextRule、negative.noNewText は時計ずらしのないときだけ）と G-07 補足（遮蔽時は遮蔽物と構図を維持: imagePrompt.obstructedRule、遮蔽と判定された撮影だけ）を追加。
+- 自動改善の検証・ロールバック対象外（ユーザー判断のため）。
+
+## v10 — 2026-10-17T03:52:21.733Z（ユーザー承認）
+- 元: v9。G-07 補足 2（遮蔽物の奥の物を手前に出さない・輪郭をくっきりさせない）: imagePrompt.obstructedRule に 1 文、negative.obstructed（遮蔽と判定された撮影だけ）を追加。根拠: Gen_b_2026-10-17_12-49-13（-541 B）。
+- 自動改善の検証・ロールバック対象外（ユーザー判断のため）。
+
+## v11 — 2026-10-17T04:10:39.288Z（ユーザー承認）
+- 元: v10。G-07 補足 3: 遮蔽と判定された撮影では、画像プロンプトの先頭に「遮蔽物（obstructedBy）が画像の最前面で、透けて見える物はぼやけて暗いまま」の文を置く（imagePrompt.obstructedLeadRule）。実験 scripts/obstruct-ab.ts（同 seed・同プロンプト）で、現行はモニターがメッシュの手前に出る・先頭に置くと奥に収まる・denoise 0.6 も収まる（不採用）。
+- 自動改善の検証・ロールバック対象外（ユーザー判断のため）。
+

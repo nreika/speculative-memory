@@ -28,7 +28,7 @@ import { guardOnce, occupancySourceOf, sanitizeEmptyRoomPrediction } from "./sce
 import type { SceneExtras } from "./sceneExtras";
 import { planScenariosLocal, vlmConfig, vlmReachable, type PlanTrace, type PlannerLlm } from "./vlmClient";
 import { GEMINI_VLM_MODEL, defaultBackends, type StepBackend } from "./backends";
-import { foregroundRule, getRulebook, personFidelityText, physicsBlock, toneImageRule } from "./rulebook";
+import { foregroundRule, getRulebook, obstructedLead, personFidelityText, physicsBlock, screenAndFrameText, toneImageRule } from "./rulebook";
 import { abandonOnAbort } from "../captureManager";
 import {
   DEFAULT_SCENE_PARAMS,
@@ -299,6 +299,10 @@ export function composeEditInstruction(args: {
   foregroundObject?: string;
   /** A recently seen person is drawn in an empty frame: from behind, same clothes and hair. */
   behindView?: { clothes?: string; hair?: string; position?: string };
+  /** The describe step judged the lens blocked by a near object (chair back...): keep it and the composition (G-07 supplement). */
+  obstructed?: boolean;
+  /** What blocks the lens (describe step), e.g. "mesh chair backrest". */
+  obstructedBy?: string;
 }): string {
   const clockEdit = !!args.clock && shouldEditClock(args.clock.visible, args.mode);
   const clockInstruction =
@@ -315,6 +319,7 @@ export function composeEditInstruction(args: {
   if (presence <= 0 && !args.referencePerson) {
     const er = ip.emptyRoom;
     return (
+      obstructedLead(rb, args.obstructed, args.obstructedBy) +
       `${er.head}${sanitizeEmptyRoomPrediction(args.predictionPrompt)}. ` +
       `${er.scope} ` +
       `${er.keep} ` +
@@ -325,11 +330,13 @@ export function composeEditInstruction(args: {
       "\n\n" +
       foregroundScaleRule(args.foregroundObject) +
       "\n\n" + physicsBlock(rb) +
+      screenAndFrameText(rb, args.obstructed) +
       (args.tone !== undefined ? "\n\n" + toneImageRule(args.tone, true, rb) : "") +
       `\n\n${er.tail}`
     );
   }
   return (
+    obstructedLead(rb, args.obstructed, args.obstructedBy) +
     (args.behindView ? behindViewSentence(args.behindView) + "\n\n" : "") +
     buildFutureImagePrompt(args.predictionPrompt, args.options, clockEdit, presence, spanSec) +
     clockInstruction +
@@ -345,6 +352,7 @@ export function composeEditInstruction(args: {
     (args.tone !== undefined ? "\n\n" + toneImageRule(args.tone, false, rb) : "") +
     "\n\n" + ip.hairRule +
     personFidelityText(rb) +
+    screenAndFrameText(rb, args.obstructed) +
     "\n\n" + ip.disembodiedRule +
     "\n\n" +
     buildQualitySuffix(clockEdit, presenceAllowsNewPerson(presence), Math.abs(spanSec) >= LONG_SPAN_IMAGE_SEC)
@@ -360,10 +368,21 @@ The result must be free of: ${avoid}.` : editInstruction;
 }
 
 /** Filled by generateImage when passed as `trace`: the final positive/negative prompt and seed. */
+/**
+ * Obstructed captures (a near object blocks the lens) use a lower denoise so the composition stays closer to the input:
+ * env COMFYUI_OBSTRUCTED_DENOISE (default 0.6; 1 or invalid = off). Experiment 2026-10-17 (scripts/obstruct-ab.ts).
+ */
+export function obstructedDenoise(env: NodeJS.ProcessEnv = process.env): number | null {
+  const v = Number(env.COMFYUI_OBSTRUCTED_DENOISE ?? "0.6");
+  return Number.isFinite(v) && v >= 0.2 && v < 1 ? v : null;
+}
+
 export interface ImageTrace {
   editInstruction?: string | null;
   negativePrompt?: string | null;
   seed?: number | null;
+  /** First-pass KSampler denoise actually used (null = the production default 1.0). Lowered for obstructed captures only. */
+  denoise?: number | null;
   /** Gemini path: whether the recent-person reference photo was attached ("attached" | "none"). */
   referenceImage?: string;
 }
@@ -391,6 +410,9 @@ export async function generateImage(args: {
   foregroundObject?: string;
   /** Draw the recent person from behind (see BEHIND_VIEW_RULE); the details come from the people description. */
   behindView?: { clothes?: string; hair?: string; position?: string };
+  /** See composeEditInstruction. */
+  obstructed?: boolean;
+  obstructedBy?: string;
   /** Rough rectangle of that person inside faceImageDataUrl (pixels). */
   faceCrop?: { x: number; y: number; width: number; height: number };
   /** `faceImageDataUrl` is a recently seen person (not a face crop): tell the edit to reuse that person only. */
@@ -422,12 +444,15 @@ export async function generateImage(args: {
       referenceFrames: refFrames.length > 0,
       foregroundObject: args.foregroundObject,
       behindView: args.behindView,
+      obstructed: args.obstructed,
+      obstructedBy: args.obstructedBy,
     });
 
   // Empty room (presence 0): also push person words into the negative prompt (inert at cfg 1, active above).
-  const negativePrompt = buildNegativePrompt(clockEdit, (args.presence ?? SERVER_SCENE_DEFAULTS.presence) <= 0, args.behindView ? { hair: args.behindView.hair } : false);
+  const negativePrompt = buildNegativePrompt(clockEdit, (args.presence ?? SERVER_SCENE_DEFAULTS.presence) <= 0, args.behindView ? { hair: args.behindView.hair } : false, args.obstructed === true);
   const seed = args.seed ?? Math.floor(Math.random() * 2 ** 31);
-  if (args.trace) Object.assign(args.trace, { editInstruction, negativePrompt, seed });
+  const denoise = args.obstructed === true ? obstructedDenoise() : null;
+  if (args.trace) Object.assign(args.trace, { editInstruction, negativePrompt, seed, denoise: (args.imageBackend ?? DEFAULT_STEP_BACKENDS.image) === "gemini" ? null : denoise });
 
   if ((args.imageBackend ?? DEFAULT_STEP_BACKENDS.image) === "gemini") {
     // Same instruction as the ComfyUI path (empty-room template, foreground scale rule, quality suffix);
@@ -450,6 +475,7 @@ export async function generateImage(args: {
     faceCrop: args.faceCrop,
     referenceImages: refFrames,
     seed,
+    denoise: denoise ?? undefined,
     filenamePrefix: args.filenamePrefix,
     signal: args.signal,
   });

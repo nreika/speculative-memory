@@ -34,13 +34,19 @@ export interface Rulebook {
     holdingsRule?: string;
     /** G-15: no new face is drawn for a person whose face is not visible in the input (absent in v1/v2 files). */
     noNewFaceRule?: string;
+    /** G-16: no new text, numbers, clocks or UI on screens/surfaces (absent in older files = no sentence). */
+    noNewTextRule?: string;
+    /** G-07 supplement: when the camera is obstructed, keep the obstruction and the composition (absent in older files). */
+    obstructedRule?: string;
+    /** G-07 supplement 3: first sentence of the prompt when obstructed; placeholders {by}, {through}, {pattern} (absent in older files). */
+    obstructedLeadRule?: string;
     /** Extra sentences after the physics rule (both templates; must contain no person words). Automatic improvements go here. */
     extraConstraints: string[];
   };
   /** Optional (older versions lack it: the built-in text is used). Four tone bands each, see ruleTexts.ts. */
   toneImage?: { people: string[]; emptyRoom: string[] };
   quality: { base: string; entering: string; clock: string; longSpan: string };
-  negative: { base: string; clock: string; noPerson: string; behindView: string; /** Terms added by the improver. */ added: string[] };
+  negative: { base: string; clock: string; noPerson: string; behindView: string; /** Terms added by the improver. */ added: string[]; /** G-16 terms, used only when no clock edit applies. */ noNewText?: string; /** G-07 supplement terms, used only when the camera is obstructed. */ obstructed?: string };
   guard: {
     guardRetries: number;
     timeBudgetMs: number;
@@ -147,6 +153,11 @@ export function validateRulebook(rb: any): string[] {
   need(isStrArr(ip.extraConstraints), 'imagePrompt.extraConstraints');
   need(ip.holdingsRule === undefined || isStr(ip.holdingsRule), 'imagePrompt.holdingsRule');
   need(ip.noNewFaceRule === undefined || isStr(ip.noNewFaceRule), 'imagePrompt.noNewFaceRule');
+  need(ip.noNewTextRule === undefined || isStr(ip.noNewTextRule), 'imagePrompt.noNewTextRule');
+  need(ip.obstructedRule === undefined || isStr(ip.obstructedRule), 'imagePrompt.obstructedRule');
+  need(ip.obstructedLeadRule === undefined || isStr(ip.obstructedLeadRule), 'imagePrompt.obstructedLeadRule');
+  need(rb.negative?.noNewText === undefined || isStr(rb.negative.noNewText), 'negative.noNewText');
+  need(rb.negative?.obstructed === undefined || isStr(rb.negative.obstructed), 'negative.obstructed');
   need(rb.toneImage === undefined || (isStrArr(rb.toneImage?.people) && isStrArr(rb.toneImage?.emptyRoom)), 'toneImage');
   for (const k of ['base', 'entering', 'clock', 'longSpan']) need(isStr(rb.quality?.[k]), `quality.${k}`);
   for (const k of ['base', 'clock', 'noPerson', 'behindView']) need(isStr(rb.negative?.[k]), `negative.${k}`);
@@ -260,6 +271,24 @@ export function personFidelityText(rb: Rulebook = getRulebook()): string {
   return [rb.imagePrompt.holdingsRule, rb.imagePrompt.noNewFaceRule].filter((s): s is string => !!s).map((s) => `\n\n${s}`).join('');
 }
 
+/**
+ * G-07 supplement 3: the obstruction is the frontmost layer. Placed FIRST in the prompt (experiment 2026-10-17: at the top it
+ * kept the monitors behind the mesh; the same rule later in the prompt did not). `by` = the describe step's obstructedBy.
+ */
+export function obstructedLead(rb: Rulebook = getRulebook(), obstructed = false, by?: string): string {
+  const tpl = rb.imagePrompt.obstructedLeadRule;
+  if (!obstructed || !tpl) return '';
+  const what = String(by ?? '').replace(/[^A-Za-z0-9 -]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 60) || 'near-camera obstruction';
+  const mesh = /mesh/i.test(what);
+  return tpl.replace('{by}', what).replace('{through}', mesh ? 'the mesh' : 'it').replace('{pattern}', mesh ? 'the mesh pattern' : 'its pattern') + '\n\n';
+}
+
+/** G-16 (no new text/clock/UI) and the G-07 supplement (obstructed camera: keep the obstruction); '' when the version has none. */
+export function screenAndFrameText(rb: Rulebook = getRulebook(), obstructed = false): string {
+  const parts = [rb.imagePrompt.noNewTextRule, obstructed ? rb.imagePrompt.obstructedRule : undefined].filter((s): s is string => !!s);
+  return parts.map((s) => `\n\n${s}`).join('');
+}
+
 /** "Physical plausibility" block: the physics rule plus automatic extra constraints. */
 export function physicsBlock(rb: Rulebook = getRulebook()): string {
   const extra = extraConstraintsText(rb);
@@ -294,11 +323,15 @@ export function negativePrompt(
   clockEdit: boolean,
   noPerson: boolean,
   behindView: boolean | { hair?: string },
-  rb: Rulebook = getRulebook()
+  rb: Rulebook = getRulebook(),
+  obstructed = false
 ): string {
   const n = rb.negative;
   const base = clockEdit ? `${n.base}, ${n.clock}` : n.base;
-  const withAdded = n.added.length ? `${base}, ${n.added.join(', ')}` : base;
+  const withAdded0 = n.added.length ? `${base}, ${n.added.join(', ')}` : base;
+  // G-16 terms (clock, digits, text...) would fight a real clock edit, so they apply only when no clock is being edited.
+  const withText = n.noNewText && !clockEdit ? `${withAdded0}, ${n.noNewText}` : withAdded0;
+  const withAdded = n.obstructed && obstructed ? `${withText}, ${n.obstructed}` : withText;
   const withPerson = noPerson ? `${withAdded}, ${n.noPerson}` : withAdded;
   if (!behindView) return withPerson;
   const hair = typeof behindView === 'object' ? hairNegativeTerms(behindView.hair) : '';

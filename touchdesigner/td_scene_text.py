@@ -593,6 +593,51 @@ def set_obstructed(flag):
     t.par.display = bool(flag)
 
 
+# Server alert (UDP field 'alert', e.g. ComfyUI timeouts / auto-restart): a red strip over the
+# output-image row, just under the test banner. '' / None hides it.
+ALERT_NAME = 'alert_banner'
+ALERT_GEOMETRY = (280, 376, 996, 20)              # ui_root coordinates
+
+
+def alert_text(alert):
+    """str or {'message'|'text'|'title': …, 'level': …} -> one display line ('' = none)."""
+    if isinstance(alert, dict):
+        if alert.get('active') is False or alert.get('cleared'):
+            return ''
+        alert = alert.get('message') or alert.get('text') or alert.get('title') or ''
+    text = str(alert or '').strip()
+    return u'⚠ ' + ' '.join(text.split()) if text else ''
+
+
+def set_alert(alert):
+    root = op(ROOT_PATH)
+    if root is None:
+        return
+    text = alert_text(alert)
+    t = root.op(ALERT_NAME)
+    if t is None:
+        if not text:
+            return
+        t = root.create(textCOMP, ALERT_NAME)
+        t.nodeX, t.nodeY = 2400, -1850
+    x, y, w, h = ALERT_GEOMETRY
+    t.par.hmode = t.par.vmode = 'fixed'
+    t.par.x, t.par.y, t.par.w, t.par.h = x, y, w, h
+    t.par.font = FONT
+    t.par.fontsize = 13
+    t.par.fontcolorr = t.par.fontcolorg = t.par.fontcolorb = 1.0
+    t.par.bgcolorr, t.par.bgcolorg, t.par.bgcolorb = 0.85, 0.15, 0.1
+    t.par.bgalpha = 0.92
+    t.par.alignx = 'center'
+    t.par.aligny = 'center'
+    t.par.editmode = 'locked'
+    t.par.enable = False
+    t.par.layer = 21
+    if t.par.text.eval() != text:
+        t.par.text = text
+    t.par.display = bool(text)
+
+
 BACKEND_WORD = {'local': u'ローカル', 'gemini': u'Gemini'}
 
 

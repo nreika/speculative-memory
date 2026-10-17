@@ -58,6 +58,8 @@ export interface CaptureEvent {
   archiveDir?: string | null;
   images?: { now?: string | null; a?: string | null; b?: string | null; c?: string | null };
   displays?: DisplayEntry[];
+  /** ComfyUI hang alert that was active when this capture ended. */
+  comfyAlert?: { level: string; message: string; since: string };
   /** Perform-panel presence / tone of this capture (0..1) and the presence actually used (0 when the room was empty). */
   presence?: number | null;
   tone?: number | null;
@@ -115,7 +117,9 @@ export class CaptureEventStore {
     readonly filePath: string,
     readonly displayLogPath: string = path.join(path.dirname(filePath), 'display-log.jsonl'),
     private readonly usageLogPath: string = path.join(path.dirname(filePath), 'usage.jsonl'),
-    private readonly now: () => Date = () => new Date()
+    private readonly now: () => Date = () => new Date(),
+    /** Active ComfyUI hang alert (comfyWatchdog), stamped on final rows and display-log lines. */
+    private readonly getAlert: () => { level: string; message: string; since: string } | null = () => null
   ) {}
 
   private append(file: string, row: unknown): boolean {
@@ -148,12 +152,14 @@ export class CaptureEventStore {
       endedAt,
       totalMs: event.totalMs ?? Math.max(0, Date.parse(endedAt) - Date.parse(event.startedAt)),
       cost: costForCapture(this.usageLogPath, event.captureId),
+      ...(this.getAlert() ? { comfyAlert: this.getAlert() } : {}),
     });
   }
 
   /** Raw display-log line (kept even when the captureId has no event) + a displayAdd row for the capture. */
   addDisplay(captureId: string, entry: DisplayEntry): void {
-    this.append(this.displayLogPath, { captureId, ...entry, receivedAt: this.now().toISOString() });
+    const alert = this.getAlert();
+    this.append(this.displayLogPath, { captureId, ...entry, receivedAt: this.now().toISOString(), ...(alert ? { alert } : {}) });
     this.append(this.filePath, { captureId, displayAdd: entry });
   }
 
