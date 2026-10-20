@@ -1650,6 +1650,7 @@ const m=/^data:image\/[a-z]+;base64,(.+)$/i.exec(imageDataUrl);const small=m?'da
     captureEvents.write(evt);
     console.log(`generate: capture ${captureId} controls ${describeSceneParams(sceneParams)}`);
     sceneNotes.start(captureId);
+    for(const [i,key] of (['gen_a','gen_b','gen_c'] as const).entries())if(i>=count)sceneNotes.add(captureId,key,`生成しなかった: MAIN の Images が ${count} のため（${count===1?'A だけ':'A と B だけ'}を生成）`,'info');
     const signal = requestSignal(res, captureId, capture.signal, cm);
     const ensureActive = () => {
       if (!cm.isActive(captureId)) {

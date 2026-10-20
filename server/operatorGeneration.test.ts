@@ -5,11 +5,11 @@ import {deflateSync} from 'node:zlib';
 import {buildOperatorGenerationBody,createOperatorGeneration,type OperatorGenerationFrame,type OperatorGenerationSettings,type OperatorGenerationOptions} from './operatorGeneration';
 const bytes=Buffer.from('pinned-original-test-bytes'),sha=createHash('sha256').update(bytes).digest('hex');
 const frame=()=>({schema:1,image:'data:image/jpeg;base64,'+bytes.toString('base64'),sha256:sha,suggestedCaptureId:'test-TSC-001-F005-new',sourceParams:{test:true,source:'test',recordHistory:false,testSceneId:'TSC-001',testFrameId:'TSC-001-F005',testRunId:'0123456789abcdef0123456789abcdef',testLoop:1,testSourceStartedAt:'2026-10-16T00:00:00Z'},sourceFrame:{id:'TSC-001-F005',sha256:sha,width:1280,height:720,originalStartedAt:'2026-10-16T00:00:00Z'}} satisfies OperatorGenerationFrame);
-const settings=():OperatorGenerationSettings=>({scenes:{a:{distanceSec:15,continuous:'continue A',oneShot:'once A'},b:{distanceSec:30,continuous:'stand',oneShot:''},c:{distanceSec:-110,continuous:'cheer',oneShot:'once C'}},presence:.7,tone:.4,vlmBackend:'local',imageBackend:'local',imageCount:1,notify:true,test:false,source:'browser'});
+const settings=():OperatorGenerationSettings=>({scenes:{a:{distanceSec:15,continuous:'continue A',oneShot:'once A'},b:{distanceSec:30,continuous:'stand',oneShot:''},c:{distanceSec:-110,continuous:'cheer',oneShot:'once C'}},presence:.7,tone:.4,vlmBackend:'local',imageBackend:'local',imageCount:3,notify:true,test:false,source:'browser'});
 const cmd={requestId:'command-1',source:'manual' as const};
 const deferred=<T>()=>{let resolve!:(v:T)=>void;const promise=new Promise<T>(r=>resolve=r);return {promise,resolve};};
 function setup(extra:Partial<OperatorGenerationOptions>={}){let fetched=0,invoked=0,consumed=0;const bodies:any[]=[];const api=createOperatorGeneration({isBusy:()=>false,authorize:()=>{},readSettings:settings,fetchFrame:async()=>{fetched++;return frame();},invokeGenerate:async(body,accepted)=>{invoked++;bodies.push(body);await accepted();return {status:200,body:{captureId:body.captureId,count:3}};},consumeOneShot:()=>{consumed++;},now:()=>1792318000000,...extra});return {api,bodies,get fetched(){return fetched;},get invoked(){return invoked;},get consumed(){return consumed;}};}
-test('whitelist flatten preserves replay scope and all scene instructions while enforcing three images and silent output',()=>{
+test('whitelist flatten preserves replay scope and all scene instructions with the MAIN image count (3) and silent output',()=>{
  const body=buildOperatorGenerationBody(frame(),settings(),{prompts:{a:'scenario A',c:'scenario C'},scenarioControl:{version:1}},'2026-10-18T00:00:00Z');
  assert.equal(body.imageCount,3);assert.equal(body.test,true);assert.equal(body.source,'test');assert.equal(body.recordHistory,false);assert.equal(body.notify,false);assert.equal(body.notifyToSender,false);assert.equal(body.captureId,frame().suggestedCaptureId);assert.equal(body.testRunId,frame().sourceParams.testRunId);assert.equal(body.testLoop,1);
  assert.deepEqual(body.sceneDistancesSec,[15,30,-110]);assert.equal(body.presence,.7);assert.equal(body.tone,.4);assert.deepEqual(body.sceneExtras,{gen_a:'continue A / once A / scenario A',gen_b:'stand',gen_c:'cheer / once C / scenario C'});assert.deepEqual(body.scenarioControl,{version:1});assert.equal(body.sceneTime,'2026-10-18T00:00:00Z');assert.ok(Object.isFrozen(body));assert.ok(Object.isFrozen(body.sceneExtras));
@@ -125,4 +125,8 @@ test('per-scene presence/tone: the body carries scenePresence/sceneTone maps (gl
  const body:any=buildOperatorGenerationBody(frame(),s,undefined,'2026-10-18T00:00:00Z');
  assert.equal(body.presence,.7);assert.equal(body.tone,.4);
  assert.deepEqual(body.scenePresence,{gen_a:.7,gen_b:.9,gen_c:.7});assert.deepEqual(body.sceneTone,{gen_a:.4,gen_b:.4,gen_c:.1});
+});
+
+test('MAIN Images 1-3 picks how many scenes are generated; anything else falls back to 3',()=>{
+ for(const [count,expected] of [[1,1],[2,2],[3,3],[0,3],[7,3],[undefined,3]] as const){const s=settings();(s as any).imageCount=count;assert.equal(buildOperatorGenerationBody(frame(),s,undefined,'2026-10-18T00:00:00Z').imageCount,expected);}
 });

@@ -153,9 +153,8 @@ $('gui-fullscreen').onclick=async()=>{
 document.addEventListener('fullscreenchange',()=>{$('gui-fullscreen').textContent=document.fullscreenElement?'Exit full screen · Esc':'Full screen';});
 $('cone-result').onclick=()=>{coneMode='result';renderCone();};
 $('cone-settings').onclick=()=>{coneMode='settings';renderCone();};
-const mappingLink=document.createElement('a');mappingLink.href='/control/mapping/';mappingLink.target='_blank';mappingLink.rel='noopener';mappingLink.className='mapping-link';mappingLink.textContent='Output mapping ↗';
-document.querySelector('.outputs-panel').append(mappingLink);
-for(let i=1;i<=10;i++)$('image-count').add(new Option(String(i),String(i)));
+// Output mapping lives only in the top-right Mapping link (2026-10-21).
+for(const [value,label] of [[1,'1 · A'],[2,'2 · A B'],[3,'3 · A B C']])$('image-count').add(new Option(label,String(value)));
 for(let i=1;i<=4;i++){
   const card=document.createElement('div');card.className='output-card';
   card.innerHTML=`<a href="/control/output/${i}" target="_blank" rel="noopener">Output ${i}<span aria-hidden="true">↗</span></a><label>Source<select id="route-${i}" aria-label="Output ${i} source"></select></label>`;
@@ -562,15 +561,21 @@ function renderCone(){
   // capture stays where that capture put it (never "time unknown") and is marked instead.
   const visibleCone=displayedScenes?.now?.content?{now:displayedScenes.now,a:displayedScenes.a,b:displayedScenes.b,c:displayedScenes.c}:coneScenes;
   let source=visibleCone?.now?.content;
-  if(generating&&source&&latest.capture.captureId&&source.captureId===latest.capture.captureId&&coneLastNow)source=coneLastNow;
-  else if(!generating&&source)coneLastNow=source;
+  // While a capture runs, its own fresh NOW waits until results arrive; any NOW from an earlier capture (including
+  // one from a newly selected input) is shown at once. (2026-10-21: updating only when idle kept a stale live-camera
+  // SOURCE forever under continuous generation.)
+  const runningNow=generating&&source&&latest.capture.captureId&&source.captureId===latest.capture.captureId;
+  if(runningNow&&coneLastNow&&coneLastNow.scope===source.scope)source=coneLastNow;
+  else if(source&&!runningNow)coneLastNow=source;
   const offsets={},stale={};
   const reference=generating&&latest.capture.captureId?latest.capture.captureId:source?.captureId;
   for(const scene of scenes){
     const content=visibleCone?.[scene]?.content;
     const distance=content?.distanceSecSigned;
-    offsets[scene]=coneMode==='settings'?Number(field('scenes.'+scene+'.distanceSec').value):typeof distance==='number'&&Number.isFinite(distance)?distance:null;
-    stale[scene]=content&&reference&&content.captureId!==reference?(generating?'pending':'previous'):null;
+    // No image yet for this scene (e.g. right after an input switch): place it at its configured distance and mark it waiting.
+    const configured=Number(field('scenes.'+scene+'.distanceSec').value);
+    offsets[scene]=coneMode==='settings'||!content?(Number.isFinite(configured)?configured:null):typeof distance==='number'&&Number.isFinite(distance)?distance:null;
+    stale[scene]=!content&&coneMode==='result'?'empty':content&&reference&&content.captureId!==reference?(generating?'pending':'previous'):null;
   }
   const geometry=coneGeometry(offsets);
   $('cone-result').setAttribute('aria-pressed',coneMode==='result');
@@ -599,7 +604,7 @@ function renderCone(){
     if(coneMode==='result'&&row){
       try{svg.append(svgNode('image',{href:localImagePath(row.imageUrl),x:x-39,y:y-21,width:78,height:42,preserveAspectRatio:'xMidYMid meet',opacity:state==='previous'?'.6':'1'}));}catch{}
     }else svg.append(svgNode('text',{x,y:y+5,fill:color,'text-anchor':'middle','font-size':17},point.scene.toUpperCase()));
-    const mark=state==='pending'?' · previous':state==='previous'?' · '+skipLabel(point.scene):'';
+    const mark=state==='empty'?' · waiting for an image':state==='pending'?' · previous':state==='previous'?' · '+skipLabel(point.scene):'';
     svg.append(svgNode('text',{x,y:y+35,fill:color,'text-anchor':'middle','font-size':11},point.scene.toUpperCase()+'  '+point.label+mark));
   }
   svg.append(svgNode('rect',{x:458,y:57,width:84,height:50,rx:2,fill:'#101518',stroke:'#b9c4c7'}));

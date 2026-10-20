@@ -47,6 +47,11 @@ export function browserOutputCurrent(rows:CaptureEvent[],nowMs:number,options:Td
   const fadeBatch=completedBrowserFadeBatch(rows.find(row=>row.captureId===snapshot.content?.captureId));
   result[key]={...snapshot,...(fadeBatch?{fadeBatch}:{}),revision:createHash('sha256').update(JSON.stringify({revision:snapshot.revision,status:snapshot.displayStatus,fadeBatch})).digest('hex').slice(0,20)};
  }
+ // 2026-10-21: after an input switch (live camera <-> recorded set) a skipped scene kept showing the other input's image.
+ // A/B/C must come from the same input as NOW (live, or the same recorded set); otherwise the scene is not shown.
+ const family=(scope:unknown)=>{const s=String(scope??'');return s.startsWith('test:')?s.split(':').slice(0,2).join(':'):s.startsWith('live')?'live':s;};
+ const nowFamily=result.now?.content?family(result.now.content.scope):null;
+ if(nowFamily)for(const key of ['a','b','c']as const){const c=result[key]?.content;if(c&&family(c.scope)!==nowFamily)delete result[key];}
  return result;
 }
 export const browserOutputCurrentSnapshots=browserOutputCurrent;

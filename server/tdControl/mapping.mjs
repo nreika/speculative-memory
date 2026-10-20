@@ -1,11 +1,10 @@
 import {localImagePath} from './timeline.mjs';
 const API='/api/browser-outputs';
 const $=id=>document.getElementById(id);
-const sources={now:'Current source',a:'Latest A',b:'Latest B',c:'Latest C','td-1':'Follow output 1 (scenario)','td-2':'Follow output 2 (scenario)','td-3':'Follow output 3 (scenario)','td-4':'Follow output 4 (scenario)','actual-past':'Recorded past','generated-history':'Generated history',fixed:'Fixed image'};
+const sources={now:'Current source',a:'Latest A',b:'Latest B',c:'Latest C','actual-past':'Recorded past','generated-history':'Generated history',fixed:'Fixed image'};
 const fadeModes={original:'TD · black',crossfade:'Crossfade',none:'None'};
 const directChannels=[
- ['current-now','NOW','/display/current-now'],['current-a','A','/display/current-a'],['current-b','B','/display/current-b'],['current-c','C','/display/current-c'],
- ...[1,2,3,4].map(n=>['control-output-'+n,'Output '+n,'/control/output/'+n])
+ ['current-now','NOW','/display/current-now'],['current-a','A','/display/current-a'],['current-b','B','/display/current-b'],['current-c','C','/display/current-c']
 ];
 let outputs=[],revision=null,dirty=false,busy=false,selected=null,cursor=null,library=[];
 // Every edit is saved automatically (no Apply step). saving: a save request is in flight;

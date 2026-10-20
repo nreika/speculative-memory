@@ -18,7 +18,7 @@ async function fixture(){
   res.setHeader('Set-Cookie','internal=1');
   if(req.url==='/api/displays/current-now')return res.setHeader('Content-Type','application/json'),res.end(snap('/captures/Gen_a_1.png',false));
   if(req.url==='/api/displays/blurred')return res.setHeader('Content-Type','application/json'),res.end(snap('/captures/Gen_b_2.jpg',true));
-  if(req.url==='/api/td-control/outputs/1')return res.setHeader('Content-Type','application/json'),res.end(snap('/captures/browser-output-assets/u/x.webp',false));
+  if(req.url==='/api/browser-outputs/screen-2')return res.setHeader('Content-Type','application/json'),res.end(snap('/captures/browser-output-assets/u/x.webp',false));
   if(req.url?.startsWith('/captures/'))return res.setHeader('Content-Type','image/png'),res.end('ORIGINAL');
   res.setHeader('Content-Type','text/html');res.end('<html>'+req.url+'</html>');
  });
@@ -50,7 +50,7 @@ test('public gate: unauthenticated access, login and cookie flags',async()=>{
   assert.equal((await f.req('/display/current-now',{headers:{cookie}})).status,200);
   const api=await f.req('/api/displays/current-now',{headers:{cookie}});assert.equal(api.status,200);assert.equal(api.headers.get('set-cookie'),null);
   const last=f.seen.at(-1)!;assert.match(last.host!,/^localhost:\d+$/);assert.equal(last.cookie,undefined);
-  for(const p of ['/display-assets/screen.css','/display-assets/screen.mjs','/display/face-blur.mjs','/control/output/1','/control/screen/screen-3','/control/player.css','/control/output.mjs','/api/td-control/outputs/1','/api/browser-outputs/screen-2'])assert.equal((await f.req(p,{headers:{cookie}})).status,200,p);
+  for(const p of ['/display-assets/screen.css','/display-assets/screen.mjs','/display/face-blur.mjs','/control/screen/screen-3','/control/player.css','/control/output.mjs','/api/browser-outputs/screen-2'])assert.equal((await f.req(p,{headers:{cookie}})).status,200,p);
   // Tampered and expired cookies.
   assert.equal((await f.req('/api/displays/current-now',{headers:{cookie:cookie.slice(0,-2)+'xx'}})).status,401);
   f.advance(13*3600*1000);assert.equal((await f.req('/api/displays/current-now',{headers:{cookie}})).status,401);
@@ -75,10 +75,11 @@ test('public gate: images only when referenced by a snapshot served in the last 
   const cookie=f.cookieOf(await f.login());
   assert.equal((await f.req('/captures/Gen_a_1.png',{headers:{cookie}})).status,404,'not yet in a served snapshot');
   await f.req('/api/displays/current-now',{headers:{cookie}});
+  for(const p of ['/control/output/1','/api/td-control/outputs/1'])assert.notEqual((await f.req(p,{headers:{cookie}})).status,200,p);
   const img=await f.req('/captures/Gen_a_1.png',{headers:{cookie}});assert.equal(img.status,200);assert.equal(await img.text(),'ORIGINAL');
   assert.equal((await f.req('/captures/Gen_a_1.png')).status,401,'still needs the cookie');
   assert.equal((await f.req('/captures/Gen_a_2.png',{headers:{cookie}})).status,404,'guessing another frame fails');
-  await f.req('/api/td-control/outputs/1',{headers:{cookie}});
+  await f.req('/api/browser-outputs/screen-2',{headers:{cookie}});
   assert.equal((await f.req('/captures/browser-output-assets/u/x.webp',{headers:{cookie}})).status,200);
   // Face blur on: blurred copy, cached, original never returned.
   await f.req('/api/displays/blurred',{headers:{cookie}});

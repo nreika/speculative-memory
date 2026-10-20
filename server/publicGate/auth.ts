@@ -35,8 +35,8 @@ export function createCookieSigner(secret:string,now:()=>number=Date.now){
  };
 }
 
-export function cookieHeader(name:string,value:string,path:string,maxAgeSec:number){
- return `${name}=${value}; Path=${path}; Max-Age=${maxAgeSec}; HttpOnly; Secure; SameSite=Strict`;
+export function cookieHeader(name:string,value:string,path:string,maxAgeSec:number,sameSite:'Strict'|'Lax'='Strict'){
+ return `${name}=${value}; Path=${path}; Max-Age=${maxAgeSec}; HttpOnly; Secure; SameSite=${sameSite}`;
 }
 export function readCookie(header:unknown,name:string):string|undefined{
  if(typeof header!=='string'||header.length>8192)return undefined;

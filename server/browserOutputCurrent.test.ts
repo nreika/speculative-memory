@@ -28,7 +28,7 @@ test('latest published live/test switches without relabeling source or replacing
  const c=browserOutputCurrent([oldTest,live,nextTest],3000);assert.equal(c.a?.content?.captureId,nextTest.captureId);assert.equal(c.a?.content?.provenance,'generated');assert.equal(c.a?.content?.targetAtMs,999999);assert.equal(c.now?.content?.recordedAtMs,100);assert.equal(c.a?.clock.scope,nextTest.browserFollow!.scope);
 });
 test('all requires complete four batch while each follows saved scenes and retains prior others',()=>{
- const previous=event('old',0,true),next:CaptureEvent={...event('partial',1),result:'running'};next.browserBatch=next.browserBatch!.slice(0,2);
+ const previous=event('old',0),next:CaptureEvent={...event('partial',1),result:'running'};next.browserBatch=next.browserBatch!.slice(0,2);
  const all=browserOutputCurrent([previous,next],3000,{updateMode:'all'});for(const value of Object.values(all))assert.equal(value?.content?.captureId,previous.captureId);
  const each=browserOutputCurrent([previous,next],3000,{updateMode:'each'});assert.equal(each.now?.content?.captureId,next.captureId);assert.equal(each.a?.content?.captureId,next.captureId);assert.equal(each.b?.content?.captureId,previous.captureId);assert.equal(each.b?.displayStatus?.state,'generating');
  next.result='failed';assert.equal(browserOutputCurrent([previous,next],3000,{updateMode:'each'}).b?.displayStatus?.state,'failed');
@@ -64,4 +64,12 @@ test('G-24 all three scenes skipped: NOW (and /display/current-now) still publis
   for(const key of ['a','b','c']as const){assert.equal(c[key]?.content?.captureId,old.captureId);assert.notEqual(c[key]?.displayStatus?.state,'failed');}
   assert.equal(currentBrowserSnapshot('current-now',[old,next],5000,{updateMode:mode})?.content?.captureId,next.captureId);
  }
+});
+
+test('2026-10-21: after an input switch, A/B/C from the other input are not shown next to the new NOW',()=>{
+ const live=event('live-old',0),replay:CaptureEvent={...event('replay-new',1,true)};replay.browserBatch=replay.browserBatch!.slice(0,3);
+ const selected=browserOutputCurrent([live,replay],3000,{updateMode:'each'});
+ assert.equal(selected.now?.content?.captureId,replay.captureId);
+ assert.equal(selected.a?.content?.captureId,replay.captureId);
+ assert.equal(selected.c,undefined);
 });

@@ -107,7 +107,8 @@ export function buildOperatorGenerationBody(frame:OperatorGenerationFrame,settin
  if(!iso(sceneTime))return fail(400,'INVALID_SCENE_TIME','Scene time requires an explicit timezone');
  const extras=sceneInstructions(settings,scenario),scenePersonReferences=operatorScenePersonReferences(settings);
  // Explicit whitelist: neither settings nor arbitrary source fields may override acquisition identity.
- return frozenCopy({image:frame.image,captureId:frame.suggestedCaptureId,imageCount:3,sceneTime,
+ // MAIN "Images" (2026-10-21): 1 = A only, 2 = A and B, 3 = A, B and C.
+ return frozenCopy({image:frame.image,captureId:frame.suggestedCaptureId,imageCount:Number.isInteger(settings.imageCount)&&settings.imageCount!>=1&&settings.imageCount!<=3?settings.imageCount:3,sceneTime,
   ...acquisition,notify:false,notifyToSender:false,
   sceneDistancesSec:scenes.map(k=>settings.scenes[k].distanceSec),presence:settings.presence,tone:settings.tone,
   // Per-scene effective presence / tone (a scene without an override sends the global value); server.ts falls back to the global presence/tone for a missing key.

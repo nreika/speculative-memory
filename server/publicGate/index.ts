@@ -23,9 +23,9 @@ export interface PublicGateOptions{
 }
 
 const here=path.dirname(fileURLToPath(import.meta.url));
-const PAGE=[/^\/display\/[A-Za-z0-9][A-Za-z0-9_-]{0,63}\/?$/,/^\/control\/output\/[1-4]\/?$/,/^\/control\/screen\/screen-[1-9][0-9]{0,2}\/?$/];
+const PAGE=[/^\/display\/[A-Za-z0-9][A-Za-z0-9_-]{0,63}\/?$/,/^\/control\/screen\/screen-[1-9][0-9]{0,2}\/?$/];
 const ASSETS=new Set(['/display/face-blur.mjs',...['screen.css','screen.mjs','timeline.mjs','face-blur.mjs'].map(f=>'/display-assets/'+f),...['player.css','output.mjs','timeline.mjs','face-blur.mjs'].map(f=>'/control/'+f)]);
-const API=[/^\/api\/displays\/[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/,/^\/api\/td-control\/outputs\/[1-4]$/,/^\/api\/browser-outputs\/screen-[1-9][0-9]{0,2}$/];
+const API=[/^\/api\/displays\/[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/,/^\/api\/browser-outputs\/screen-[1-9][0-9]{0,2}$/];
 const IMAGE=[/^\/captures\/[A-Za-z0-9][A-Za-z0-9_.-]{0,239}\.(?:png|jpe?g|webp)$/i,/^\/captures\/browser-output-assets\/[A-Za-z0-9][A-Za-z0-9/_.-]{0,400}\.(?:png|jpe?g|webp)$/i];
 export const isGatePage=(p:string)=>PAGE.some(r=>r.test(p));
 export const isGateImage=(p:string)=>IMAGE.some(r=>r.test(p))&&!p.includes('/browser-output-thumbnails/')&&!p.split('/').some(s=>s==='.'||s==='..');
@@ -175,7 +175,9 @@ export function createPublicGateApp(options:PublicGateOptions){
     if([...params.keys()].length!==1||params.getAll('token').length!==1)return deny(res,400);
     const ip=clientIp(req);if(limiter.blocked(ip))return deny(res,429,'Too many attempts');
     if(!safeEqualString(params.get('token'),captureToken)){limiter.fail(ip);log(`[public-gate] capture token rejected ip=${ip}`);return deny(res,404);}
-    res.setHeader('Set-Cookie',cookieHeader(CAPTURE_COOKIE,signer.issue('capture'),'/capture',SESSION_MS/1000));
+    // Lax (2026-10-21): links opened from a chat app or QR code are cross-site navigations; with Strict the browser
+    // dropped the cookie on the redirect and the phone saw 401. Frame POSTs stay same-origin only (Lax is not sent cross-site on POST).
+    res.setHeader('Set-Cookie',cookieHeader(CAPTURE_COOKIE,signer.issue('capture'),'/capture',SESSION_MS/1000,'Lax'));
     return res.redirect(303,'/capture/');
    }
    if(query)return deny(res,400);
