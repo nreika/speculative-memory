@@ -24,13 +24,14 @@ test('no tone given -> no tone sentence (old behaviour)', () => {
   assert.doesNotMatch(composeEditInstruction({ predictionPrompt: 'x', presence: 0 }), /Amount of change:/);
 });
 
-test('empty room: tone changes only the light and the sentence has no person words', () => {
+test('empty room: every tone preserves lighting and has no person words', () => {
   for (const tone of [0, 0.3, 0.6, 1]) {
     const text = composeEditInstruction({ predictionPrompt: 'The light on the curtain dims slightly.', presence: 0, tone });
     assert.ok(text.includes(toneImageRule(tone, true)));
-    assert.match(text, /light/);
+    assert.match(text, /lighting pixel-identical/);
+    assert.doesNotMatch(text, /Change only the lighting|brightness jumps|becomes warmer|brighter or dimmer/);
   }
-  for (const t of TONE_IMAGE_RULES_EMPTY) assert.doesNotMatch(t, /b(person|people|figure|silhouette|hands?|arms?|nobody|no one|man|woman)b/i);
+  for (const t of TONE_IMAGE_RULES_EMPTY) assert.doesNotMatch(t, /\b(person|people|figure|silhouette|hands?|arms?|nobody|no one|man|woman)\b/i);
 });
 
 test('people tone sentences avoid big arm gestures (G-11)', () => {

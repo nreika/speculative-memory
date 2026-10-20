@@ -41,6 +41,129 @@
 - **現在タイマーは停止中（Capturemode = manual）。ユーザーの指示があるまで timer / chain にしない。**
 
 ## 0.5 いまの状態（2026-10-06 03時。下の「06時すぎの追記」が最新）
+- **2026-10-20 14:5x サーバー全体が遅い（静的画像 4〜12 秒、History のサムネイルが真っ黒）**: inspector でプロファイルしたところ、非アイドル時間のほぼ全てが Vite(chokidar) の lstat/picomatch。`captures/`（24,043 ファイル・21 GB）と logs/ を監視していて、撮影ごとの新規ファイルでクロールが走り event loop を塞いでいた。修正: `server.ts` の createViteServer に `server.watch.ignored`（captures/logs/.local/rulebook/scripts/docs/touchdesigner/tools）。再起動 11 で反映。注意: 以前の「.env.local 変更で vite が自動再起動する」は誤り（middleware モードでは node は再起動しない）。
+- **2026-10-19 22:4x ライブカメラへ切り替えると 504 / 「Input bridge returned inconsistent data」**: ブリッジ（native_input.py）は live-camera 時に replay を null ではなく {active:false,setId:null,cycle:false,pendingSet:null} で返すが、`operatorInput.ts` validateState が test-replay 用の厳密検証を適用して拒否 → select が 504、サーバーは replay のまま、生成停止（昼の食い違いも同原因）。修正: live-camera かつ idle な replay オブジェクトは null に正規化して受理（テスト追加）。同時に生成中の input.select を queue する修正（pendingInput、完了直後に適用、Control に Queued… 表示）も同梱。
+- **2026-10-19 scenario.play 504（SCN-SETTINGS-002）**: オペレーターの `generation.pause` は仕様どおりシナリオ時計も止める（state=paused）。従来はその後の `scenario.play` が「最初から再開始」で、`play()` の素の Error（'Scenario is updating' 等、statusCode なし）が delegate から出ると operatorState が 504「Command outcome is unconfirmed」に変換していた。
+- 修正: `nativeOperator.ts` が generation.pause で止めた印（pausedByHold）を持ち、その状態の `scenario.play` は同じ run を再開して submissionHold=false に戻す（generation.resume 相当、elapsed 保持、再開始しない）。`operatorState.ts` の delegate 戻り値に `submissionHold` を追加。`operatorScenario.ts` の play() の 'Scenario is updating' / 'Load a scenario first' は 409 に。`generation.resume` はシナリオ稼働中は従来どおり 409（再開は scenario.play）。
+- テスト: `nativeOperator.test.ts` に 1 件追加（play→generation.pause→scenario.play→running・同一 runId・hold=false）。tsc クリーン、operator 系テスト通過。サーバー未再起動 → 次の再起動で反映。
+- **2026-10-19 18:2x 退行と修正**: 再起動 4 直後、無人回が全件 failed（Person identity check failed after 1 attempts）。原因は missing_belongings 検査が describe の小物（blue water bottle）まで対象にし、4B が確認できず毎回不採用。修正: `combinedInspection.ts` の `belongingsList` を `BELONGING_WORDS`（bag/backpack/tote/handbag/suitcase/jacket/coat/hoodie/parka/cardigan/sweater/blazer/umbrella/helmet/scarf、paper bag 等は除外）に限定。水筒・カップ・ノート PC・紙類は検査対象外。再起動 5 で反映。
+- **2026-10-19 18:5x 不採用でキャプチャ全体を落とさない**（L003 18:31–18:48、無人回 11 件中 8 件 failed。検査は正しく、missing_belongings=青いリュック消失が主、framing_drift 1 件）。従来は `server.ts` のシーンループで `maxAttempts: isTurboEngine(engine)||…?1:2` → 後ろ姿/無人シーン（turbo）は 1 回で、1 回の不採用が `Person identity check failed after 1 attempts` で capture ごと失敗し、後続シーン未生成・オペレーターループが再失敗して停滞していた。
+- 新フロー: 無人キャプチャ・人物なしシーン・後ろ姿シーンは 2 回（有人シーンは従来通り qwen2511=2 / turbo=1、テストの automaticImageRetries=false は 1）。2 回目の補正文は `peopleIntegrity.ts` の `targetedCorrection(verdict)` が defect/reason から作る: missing_belongings →「The blue backpack must remain fully visible exactly where it is in the input; the person stands beside it, not in front of it.」（無人なら do not move, cover or remove it）、framing_drift →「Keep the exact framing, scale and rotation of the input; do not zoom, shift or tilt the camera.」、extra_hand →「Each person has exactly two hands and two arms; …」、人数/同一性 → 従来の identity 文（期待 0 人なら No person may appear）。
+- 最後まで不採用（ok:false）なら `generateUniquePeople({onExhausted:'skip'})` が skip 結果を返し、そのシーンは G-24 と同じ扱い: capture.saved/browserBatch/QA なし、以降の datagram の expectedImageCount を 1 減らす、prompts.json scenes[] に skipped+skipReason `rejected:<defect>`、capture-events skippedScenes に追加、表示は前回画像のまま。ログ `[integrity] scene gen_x skipped after 2 rejections: <defect>`。キャプチャは completed で終わる。
+- 例外（検査不能 ok:null・生成エラー）は従来通り capture failed。不採用画像は従来通り rejected/<captureId>/ に保存。テスト: `peopleIntegrity.test.ts` に 3 件追加（補正文・2 回不採用で skip・有人経路不変）。tsc クリーン、TS スイート 940/942（既知 2 件）。サーバー未再起動 → 次の再起動で反映。
+- **決定（2026-10-19 夕、ユーザー「じゃあそれでいく」）: Control 本体・Mapping・History は公開 URL（Funnel）に出さない。**操作は tailnet 内からのみ（自分の端末は Tailscale アプリで同アカウント、他の人には管理画面 Machines → emergent-2 → Share で機器共有）。公開ゲート（3443、Funnel 有効中）は閲覧ページと /capture/ のみ。操作用ロールの実装は行わない。
+- **2026-10-19 Input 切替のキュー化**: chain 中は前の capture 完了から約1秒で次が始まるため input.select がほぼ常に 409（Wait until generation finishes…）になり、Control からライブカメラに切り替えられなかった。
+- 修正: `nativeOperator.ts` で busy 中の input.select は 409 でなく受理してキュー（pendingInput {setId, requestId, requestedAt}、新しい要求が古いものを置換）。メッセージ "Input change queued: <setId> (applied after the current generation)"。スケジューラ tick の冒頭（capture 完了直後・chain が次を投げる前）で適用し、ログ "[input] queued select applied: <setId> → <kind>"。失敗は state.errors に記録してキューを破棄。input-selection.json は select 成功時のみ保存。idle 時は従来どおり即時。
+- state スナップショットに `pendingInput`（なければ null）を追加（operatorState.ts）。Control の INPUT は pendingInput がある間 Switch ボタンが "Queued…"、詳細欄に "Queued… <setId> · applied after the current generation"。scenario.play の busy 409 はそのまま（文言のみ "pause generation first" に変更）。
+- テスト: nativeOperator.test.ts に 4 件（busy→キュー→完了後・次 capture 前に適用 / 置換 / 失敗記録 / idle 即時）。反映は次回サーバー再起動から。
+
+### 2026-10-19 追記: 背面人物（立ち）の具体的な空き位置と missing_belongings 検査（サーバー未再起動）
+- 症状: 無人＋直近人物の背面描画で「立ち」のとき、青いリュックと黒い上着が掛かった椅子の位置に人物が立ち、持ち物が消える／大半が隠れる（TSC-003 F004 …1792399936150 A、…1792400000251 C）。座りの描画（B など）は持ち物が残る。
+- 修正1（behindViewPlacement.ts）: 立ち・歩き（座りでない）動作のときだけ、従来の汎用保護文の後に1文追加: 「Free spot for the standing person: standing to the LEFT/RIGHT of the chair, in front of the empty part of the desk, not overlapping the chair; the chair with <持ち物> stays fully visible to the right/left of the person」＋「空いている椅子（何も載っていない）があればそこに座ってよい、持ち物の載った椅子の上・前・代わりには立たない／座らない」。左右は guard.scene の位置語（"chair at the right" 等）→ 直近人物の headBox（0-1000）→ position 語の順で決め、空きの多い側（物が右なら左）。手がかりなし（F004 は scene に持ち物も位置も無く position=center）は "on its side farther from the centre of the image"。server.ts は scene と headBox を behindView に渡す。
+- 修正2（combinedInspection.ts、呼び出し回数は1回のまま）: scene が単数形で挙げる持ち物（inspectionBelongings、最大4件、動作文や人物の holding/worn にある物は除外）があれば、schema に必須 objectsVisible {名前: boolean} と指示「出力画像でほぼ同じ場所に見えるか、人に隠れた／消えた = false」を追加。false が1つでも ok:false・defect missing_belongings（両検査経路）。observationFacts.belongings {checked, visible, missing} に記録。リストなし＝質問なし・判定なし、回答欠落は不明扱い（不合格にしない）。
+- QA: localJudge の DEFECT_TYPES に missing_belongings。server.ts の却下行と qaService の参照キャスト再検査は inspectionDefectType で実際の defect（framing_drift / extra_hand / missing_belongings）を記録（以前は再検査が常に fabricated_person）。
+- テスト: server/generation/behindViewFreeSpot.test.ts（5件）、belongingsInspection.test.ts（2件）、qaService.test.ts に1件。tsc クリーン、全 935 件中 933 合格（既知の2件のみ失敗）。反映にはサーバー再起動が必要。
+- 追補（持ち物の出どころ）: guard.scene は持ち物を書かないことがある（F004 は scene にリュックも上着も無し）ため、毎撮影（無人含む）走る describe 呼び出し（peopleDescribe.ts）に必須 belongings [{name, on, position: left|center|right}]（最大6、人の有無に関係なく、鞄・上着・椅子/机/床の置き物）を追加し、guard.belongings として prompts.json に保存。parseSceneBelongings は欠落→[]。num_predict 512→768（切れ防止）。DESCRIBE_SCHEMA が変わるので参照人物観測のキャッシュキーも変わる（再観測されるだけ）。
+- 利用: 空き位置の文は scene に名前・位置が無いとき guard.belongings の名前と position を使う（F004 で describe が blue backpack / black jacket on chair, left を返せば「standing to the RIGHT of the chair, in front of the empty part of the desk, …; the chair with the blue backpack and the black jacket stays fully visible to the left of the person」）。objectsVisible の対象は guard.belongings → scene の単数物の順で名詞重複を除き最大6。テスト追加（behindViewFreeSpot.test.ts 計9件）、tsc クリーン、939 件中 937 合格（既知2件）。
+
+### 2026-10-19 追記: framing_drift（CPU 構図チェック）と背面人物の置き場所（サーバー側の変更あり・要再起動）
+- 不具合1: TSC-003 F006 の C（Gen_c_2026-10-19_17-28-38）がズーム・ずれのまま公開された。pre-publish 検査（combinedInspection.ts）に scripts/frame-align.py（ORB + RANSAC estimateAffinePartial2D + Canny edge IoU、640px、CPU のみ）を hand-count と同じく1画像1サブプロセスで VLM と並列に追加（server/frameAlign.ts）。比較元は常に NOW（背面人物シーンでも inspectAndCaption の第7引数 frameSource=NOW）。
+- 判定: inliers≥60 なら |scale−1|>6%・|dx|または|dy|>4%・|回転|>2° で defect framing_drift（ok:false、従来どおり再試行／integrity.jsonl・qa-local.jsonl に記録）。inliers<60 のときは edgeIou<0.35 のみで不合格。スクリプト・python が無い／エラーなら判定に影響しない（VLM のみ）。
+- 実測: 17-28-38 C は dy −18.6%・回転 −1.0°・edgeIou 0.54 → 不合格。同じループの合格29枚は scale 0.992–1.001、|dx| ≤0.64%、|dy| ≤0.17%、|回転| ≤0.04°、edgeIou ≥0.77 → 全合格。当日全体90枚のサンプルでは別に8枚（00-02-08 A、07-17-01 A、10-20-06 A/B、14-09-13 A/B/C、16-07-25 A）が同様のずれで不合格になる（目視でずれを確認）。
+- 記録: observationFacts.framing {status, scale, dx, dy, rotationDeg, inliers, inlierRatio, edgeIou, edgeIouAligned, drift?, ms}。scripts/inspect-images.ts --cpu-only は手の数と構図の両方を出す（frameVerdict）。QA の defect 種別に framing_drift を追加。
+- 不具合2（G-14）: 背面人物（behindViewSentence）が椅子の上に描かれ、掛けてあったリュックと上着が消えた。配置文を追加: 既存の家具・物の「横」に立つ／座る、物の上・中・代わりには置かない、入力の物（鞄・上着・椅子や机の上の物）はすべてその場に見えたまま残す、元の位置が物で埋まっていれば最も近い空いた床（例: 椅子の横）に置いて物に触れない。物の名前は guard.scene から抽出（server/generation/behindViewPlacement.ts の sceneBelongings、無ければ一般語）。ネガティブにも person replacing an object / missing backpack などを追加。
+
+### 2026-10-19 追記: 起動時の入力再同期（サーバー側の変更あり・要再起動）
+- 再起動後にサーバーの表示（TSC-003 など）とラップトップのブリッジ（live-camera）が食い違い、約30分生成が止まった件の対策。
+- 最後に成功した input.select を operator ディレクトリの input-selection.json に保存。起動時に、保存があればその setId をそのまま1回だけ input.select し、「[input] resync: <setId> → <kind>」をログに出す。保存がなければ何も送らない（camera を勝手に選ばない）。remote-device は再送しない。
+- 再同期後、または60秒ごとの確認でブリッジの状態が保存値と食い違うと、state.errors に「Input bridge mismatch after resync」を記録（自動の再選択は起動時の1回のみ）。次回の再起動から有効。
+
+### 2026-10-19 追記: シナリオCSV の FORMAT ERROR / WARNING（サーバー側の変更あり・要再起動）
+- 読み込み時（Load CSV・Import・起動時の既定CSV）に全行をチェックし、最初の1件で止めずに全問題を {row（ヘッダー=1 の CSV 行番号、0=ファイル全体）, column?, message, severity} で返す。実装は scripts/operator-scenario/scenario_csv.py の collect()（parse()/load() は従来どおり最初のエラーで ValueError）。parse_plan.py は成功 exit 0 {ok:true,plan,formatWarnings}、エラー exit 2 {ok:false,formatErrors,formatWarnings}。
+- エラー（読み込まない）: ヘッダー（重複・未知・必須欠落）、列数、CSV 構文、未知の action、target/value の形式と範囲（output_*・mode・interval_sec・distance・presence・tone・empty_person・person_refs(_once) の UUID・pause/resume・scene_mode など）、seconds の範囲、メタ行（scenario/instructions/loop）は 0 秒に各1回、end は1回まで、end より後の cue、画像列は image 行のみ、画像ファイルの存在・フォルダ内・.png・サイズ。警告（読み込む）: 使われていない任意列、同じ note の重複、seconds の逆順、end 行なし。
+- Node: server/operatorScenario.ts の checkOperatorPlan() が ScenarioFormatError（HTTP 400、body に formatErrors/formatWarnings）を投げ、直前の正常なプランはそのまま残る。結果は scenario.formatErrors / formatWarnings / formatCheckedAt / formatFile として state に残り、エラーなしで読み込むまで消えない。既定CSVが壊れていても起動は止まらない（プラン無し＋FORMAT ERROR 表示）。
+- コントロールパネル（index.html のシナリオ欄・control.mjs）: エラーは赤い「FORMAT ERROR · N」、警告のみは黄色い「WARNING · N」。その下に「row N [列]: 内容」を最大20件＋「…他 X 件」。CRCRLF の CSV も表計算ソフトと同じ行番号になるよう正規化。
+- テスト: Python test_format_check.py（9）を追加し 26件 OK、nativeOperator.test.ts に1件追加。tsc クリーン、TS 全体は既知の2件以外の失敗なし（SSE heartbeat テストは並列時のみ1回失敗し、単体では通過）。既存の CSV 54件は全てエラーなしで通過。
+
+### 2026-10-19 追記: 公開ゲート（Funnel 用 127.0.0.1:3443）＋外部デバイス・ライブカメラ（コードのみ。秘密未生成・未公開）
+- 設計 docs/PUBLIC-OUTPUT-AND-REMOTE-CAMERA-DESIGN-2026-10-19.md の実装。server/publicGate/（index.ts 第2 Express・許可リスト・ループバック転送 Host=localhost:3000、auth.ts scrypt＋HMAC cookie 12h＋失敗5回/10分/IP・全体50回/10分、login.html、capture.html/.mjs）、server/remoteCamera.ts。server.ts は listen 直前の 1 行（動的 import、失敗しても起動に影響なし）。
+- 秘密が無ければ完全に無効（ログ 1 行「public gate disabled (no secrets)」、リスナーなし）。PUBLIC_GATE_ENABLED=false でも無効。ポートは PUBLIC_GATE_PORT（既定 3443）。:3000 は絶対に Funnel しない。
+- 秘密の生成: `npx tsx scripts/ensure-public-secrets.ts`（.env.local に PUBLIC_OUTPUT_PASSWORD / PUBLIC_COOKIE_SECRET / PUBLIC_CAPTURE_TOKEN を無い時だけ追記、出力は ok のみ。.env.local の変更で vite が自動再起動するので撮影の合間に）。パスワードの置き場所は `.env.local` のみ。表示は本人の端末で `scripts/show-public-password.ps1`。
+- ユーザー手順: 再起動後 http://127.0.0.1:3443/login でパスワード確認 → 表示を確認できたら本人が `tailscale funnel --bg 3443`（停止 `tailscale funnel --bg off`、だめなら `tailscale funnel reset`）。
+- 公開されるのは /display/<id>・/control/output/1-4・/control/screen/screen-N とその JS/CSS・snapshot API 3 種・直近 30 分に配信した snapshot が参照した画像だけ。GET/HEAD のみ、クエリ・%・..・\ は 400、それ以外は 404/405。
+- **ブラウザの顔ぼかしは匿名化ではない**。ゲートは faceBlur がオンの出力が参照した画像だけ、サーバー側でぼかしたコピー（scripts/face-blur-render.py、cv2、楕円 rx=0.5w ry=0.56h、元画像は不変、キャッシュ）を返す。顔検出が unavailable/error のときは原画像を出さず 503。faceBlur オフの出力は原画像。
+- リモートカメラ: スマホで `https://<funnel>/capture/?token=<PUBLIC_CAPTURE_TOKEN>`（cookie 発行後 /capture/ へ）→ 開始 → 1280x720 JPEG を 5/10/20 s ごと（既定 CAPTURE_INTERVAL_SEC=10）に送信、メモリに最新 1 枚だけ。Control の INPUT で「Remote device (phone)」を選んだときだけ NOW に使う（sourceScope camera:remote、captureId remote-<ms>-<sha8>）。30 s（REMOTE_STALE_SEC）超は撮影拒否「remote camera stale」（Control と /api/health の remoteCamera）。
+- 注意（テストループとの関係）: remote-device はライブ扱いで会場履歴・記録フレーム・人物ルールの presence に入る。選んだまま放置しない。選択は保存されず、サーバー再起動で laptop 側の選択に戻る。動作確認は /api/generate に test:true を付けた別経路で。
+- テスト: server/publicGate/publicGate.test.ts（6）、server/remoteCamera.test.ts（2）。tsc クリーン、全 992 件中 既知の 2 件以外の失敗なし。サーバーは再起動していない・何も公開していない。
+
+### 2026-10-19 追記: Fixed scenes / Routing slots に Label・Text の切替（サーバー側のみ・サーバー未再起動）
+- 保存: POST /api/browser-outputs に任意の `channelCaptions:{<key>:{labels,subtitles}}`（key は current-now/a/b/c・control-output-1..4 の8つ、値は boolean、部分指定は既存値にマージ）。省略・旧保存データは全部 true。未知キー/非 boolean は 400 "Invalid channel captions"。GET と revision に含む（再起動後の初回は revision が変わるので画面は Reload）。
+- 表示: /display/current-* の view.labels/subtitles = TD routing の view（既定 true）AND channelCaptions。/control/output/N = コントロールパネルの labels/subtitles 設定 AND channelCaptions。screen-N の扱いは不変。
+- シナリオCSV: `output_labels` / `output_subtitles` の target に current-now・current-a/b/c・control-output-1..4 も可（例 `12,output_labels,current-a,false` / `20,output_subtitles,control-output-2,true`）。他の output_* でこれらを指定するとエラー。Preview は一時上書きのみ（保存しない）、Live は保存し Stop で元に戻す（output_* と同じ。自然終了では戻さない点も同じ）。
+- UI（Downloads の pr-ui-cap-mapping.*）はユーザーが配置。配置後にサーバー再起動が必要。テスト: browserOutputs / operatorScenarioOutputs / nativeOperator に追加、Python test_output_mapping に3件。
+
+### 2026-10-19 追記: G-24/G-25 無人シーンの人物確率・物の変化ゲート・skip（サーバー未再起動）
+- 新規 server/generation/emptyRoomDecision.ts。場面ごとの再現可能な乱数 r = sha256(`${captureId}:${sceneKey}`) 先頭32bit/2^32。無人フレームで直近10分の人物（live 履歴 / テストスコープ testRecentPerson）がいれば r < emptyRoomPersonChance の場面だけ後ろ姿で描く。その場面の sceneExtras（Continuous / One shot / シナリオ prompt）が人物に触れていれば確率に関係なく描く。直近人物なし→描かない（G-01）。
+- 物の変化（emptyRoomObjectChange / プランナーの物の変化）は、最後の有人フレームが EMPTY_ROOM_ACTIVITY_MIN（既定3分）以内 かつ r2 = sha256(`…:object`) < EMPTY_ROOM_OBJECT_CHANCE（既定0.3）のときだけ。どちらも env のみ（スライダーなし）。画像要素・scene_mode・人物参照のある場面は skip しない。
+- 人物も物の変化もない場面は skip（reason: no_recent_activity / no_movable_object / chance）。vlmClient finishWith が scenario.skipped を付け、server.ts のループが continue。capture.saved はその場面だけ送らず、expectedImageCount = 実生成数、payload に skippedScenes。prompts.json scenes[] に {skipped:true, skipReason}、emptyRoom（chance/roll/personDrawn/reason）、README に skip 行。capture-events に skippedScenes / emptyRoom。QA は生成分のみ。latest-prediction は skip 場面の前回文を保持。
+- ブラウザ出力（browserOutputCurrent / tdBrowserFollow / browserFade）: skip 場面を除いた batch を complete と判定。skip 画面は前回の画像・字幕・前回 fadeBatch のまま（黒フェードなし、失敗表示なし）、NOW と他の画面は通常更新。screen.mjs / output.mjs は変更不要。
+- 設定 emptyRoomPersonChance（0..1、既定0.3）: operatorState settings.apply（revision 更新、旧保存 state は 0.3 で補完）、sceneParams で clamp、/api/generate body で上書き可、operatorGeneration が body に載せる。Control の WORLD PARAMETER にスライダー「EMPTY-ROOM PERSON」。シナリオ CSV action empty_person（例 `0,empty_person,,0.5`。preview skip / Stop・end で復帰 / 競合ルールは presence と同じ）。examples/SCN-SETTINGS-001.csv に1行追加。
+- ノートPC側（未変更・要対応）: td_scene_text.on_capture_payload は新 captureId で clear() するため skip 場面の字幕が消える → payload.skippedScenes の場面は clear しない。td_capture_listener の fade_state 'refade' は全画面を黒に落とす → skip 場面の窓を残すなら窓ごとのフェードが必要。全場面 skip の回は capture.saved が無く TD の NOW も更新されない。
+- テスト: emptyRoomDecision.test.ts（10）、browserOutputCurrent / operatorState / operatorScenarioSettings / generationArchive / sceneParams に追加、Python test_settings_actions に empty_person。tsc クリーン、TS 883 件中 既知の 2 件以外失敗なし。サーバーは再起動していない。
+
+### 2026-10-19 追記: テスト再生で G-01/G-02（最近の人物を後ろ姿で）が一度も効いていなかった件（サーバー未再起動）
+- 発見: 直近の無人 40 バッチすべてで 1.1〜4.9 分前に在室フレームがあったのに prompts.vlm.guard.recentPersonAllowed=false。展示はテストループ（captureId test-…、historyScope test:TSC-001:<run>:L<loop>）で回っており、server.ts は isTest のとき useHistory=false → historyAll=[] → latestPerson が常に null だった。logs/scene-history.jsonl の最終行は 2026-10-18T02:22:39（td-…-1、無人）で、テスト撮影は書き込まない（仕様どおり）。
+- 修正: 新規 server/history/testRecentPerson.ts。テストスコープ（kind test）のときだけ、同じループの ScopedTestHistory（キャッシュ済み原観察、detectorPerson=true かつ people あり、再生時刻 replayedAt が RECENT_PERSON_WINDOW_MIN=10 分以内、現フレーム除外）から recentPerson を作る。参照画像は同ループで受け取った在室フレームの元画像（TestPersonFrames、スコープ12×4枚のメモリのみ）。展示 jsonl は読み書きしない。ループをまたぐ持ち越しはなし（スコープ分離のまま）。
+- 以降は既存経路のまま: allowPerson → vlmClient finishWith（allowPerson=true なら emptyRoomObjectChange は出ない＝最近の人物が優先、無ければ物の変化）→ drawFromBehind/behindView（服・髪・位置）→ referenceCrop → generateTurboProduction の faceImage/faceCrop。
+- 13:23:07 JST の「behind」一致は rulebook の例文（"the desk behind him"）で、behindView は false だった（誤検出）。テスト server/history/testRecentPerson.test.ts（4件）。tsc クリーン、既知の 2 件以外の失敗なし。
+
+### 2026-10-19 追記: 3本目の手（extra_hand）対策（サーバー未再起動・ルールブック変更なし）
+- 発見: v19 後の B 画像 Gen_b_2026-10-19_14-06-42（F010）/ 14-05-26（F009）に3本目の手。プロンプトが「片手を軽く上げる」と同時に「black tablet in both hands, with the original hand grip」「in the same hand」を指示し、両手が塞がったまま手を要求していた。
+- 修正1（文面）: server/generation/handConflict.ts を新設。動作が手を要する（raise/wave/place/point/touch…）かつ持ち物が両手・腕組み・抱え持ちのとき、fidelity（actionWithBelongings / identityConstraints）、compactPeople、sceneExtras の Hand use、sceneReferenceCast、orchestrator の holdingsRule から「both hands / original hand grip / same hand」を外し「The black tablet is now held against the body with one arm only; the other hand rises lightly. Exactly two hands; no extra hand or arm.」に置換。片手持ちで反対の手が使える場合は従来文のまま。
+- 修正2（公開前検査）: combinedInspection の既存1回の呼び出しに人物ごとの hands（整数）をプロンプトと JSON schema に追加。3以上で ok:false・reason "extra_hand: …"・defect "extra_hand"（人数不一致と同じ不採用経路、qa-local.jsonl の defect type も extra_hand）。2以下・欠落は通過。モデル呼び出しは増やしていない。
+- 回帰素材: scripts/qa-known-cases.cmd に 2026-10-19_03-41-22:B / 14-04-33:B / 14-05-47:B を追加（extra_hand）。テスト server/generation/handConflict.test.ts（5件）。
+
+### 2026-10-19 追記: extra_hand 検査の見逃し修正（v2）と「腕をほどく」動作文（サーバー未再起動）
+- 原因: 検査は1回の呼び出しで出力画像のみ（人数1のとき。2人以上は原画+出力）を 1280x720 のまま送る（コード側の縮小なし、Ollama qwen3-vl:4b-instruct 側の内部リサイズのみ）。hands は schema の最後で、長い手の指示文の後に置かれ、タブレットを抱える2本の手を1本に数えていた。
+- 修正（呼び出し回数は1回のまま）: combinedInspection の schema 先頭に raisedHands / objectHands / otherHands → handPositions（手ごとの位置の文字列）→ hands の順で必須化し、HAND COUNT 指示を手の指示文の前へ。判定は observedHandCount: handPositions が1件以上あればその件数（3件以上で extra_hand、hands=2 でも却下）、空なら hands。observationFacts に handPositions/領域数を保存。
+- 回帰（qwen3-vl、12回）: 14-05-47_B_new 却下(3) / Gen_b_14-06-42 却下(3) / B_new_s1 通過(2) / Gen_b_14-05-26 は通過(2)＝まだ見逃し（胸の手をバッグ持ちと解釈）。B_old / B_old_s1 は最終文面で未計測（予算切れ）。4b モデルは文面の小変更で件数が大きく揺れる。
+- 生成側: handConflict.armsChangeAction。両腕で抱える/腕組み＋raise/wave のとき動作文そのものを「uncrosses the arms, keeps the <物> against the body with one arm, and raises the other hand …; exactly two hands.」に（両手持ちは「takes one hand off the <物>, …」）。orchestrator.composeEditInstruction と sceneReferenceCast で適用し、Main change 行も同じ文。テスト handConflict.test.ts（8件）。
+
+### 2026-10-19 追記: 後ろ向き固定文の誤適用を修正（サーバー未再起動・ルールブック v19 は未有効化）
+- 発見: 2026-10-19_12-18-47 シーン C の A/B（ブロック①〜③を順に足す）で、①所持品・②人数/手までは動作（机に手を置く）が残り、③で消えた。原因は compactPeople の「Their back remains toward the camera, with their face hidden.」。元フレームは顔が見える（横/正面）のに describe が facing を away と誤報し、この文が人物を直立・後ろ向きに固定していた。
+- 修正1: この固定文は behindView（G-02 最近の人物を後ろ姿で描く経路）のときだけ出す。composeEditInstruction が args.behindView を compactPeopleInstruction の第4引数へ渡す。通常の在室シーンで away の場合は弱い文「Do not reveal more of the face than is visible in the input.」に置換（G-15 は noNewFaceRule のまま）。
+- 修正2: peopleDescribe の facing を toward | side | away | unknown に明示（DESCRIBE_PROMPT と JSON schema の enum、parsePeople で旧自由文を正規化）。unknown のときは compactPeople で facing 文を一切出さない（服装・位置は残す）。ブロック①②は変更なし。
+- 顔検出（faceRegionStatus）は表示用ブラウザ経路にしかなく生成時に使えないため、判定は behindView のみ。新しいモデル/AI 呼び出しは追加していない。
+- テスト追加: compactPeople（away+behindView→固定文 / away のみ→弱い文 / unknown→facing 文なし）、parsePeople の facing 正規化。tsc クリーン、既知の 2 件以外の失敗なし。サーバーは再起動していない。ルールブック v19 も未有効化。
+
+### 2026-10-19 追記: 「動作が出ない件」指示文の修正（サーバー未再起動・ルールブック v19 は未有効化）
+
+- 原因: 動作指示が指示文の段階で消えていた。①辞書の部分一致で「椅子に座ったまま机を見る」が毎回 "sits down" になり「机を見る」が消えた ②手がふさがっていると机に手を置く動作文そのものが削除された ③両手がふさがっている時の挙手が「握りを保て」と矛盾 ④「横顔は横顔のまま」の固定で視線・頭の動きも禁止 ⑤「物を足さない」ほぼ同文 5 文が動作文を埋もれさせた。
+- コード（server/generation/sceneExtras.ts, vlmClient.ts, orchestrator.ts, compactPeople.ts, fidelity.ts, sceneReferenceCast.ts, 新規 mainChange.ts）:
+  - 辞書は語句全体の完全一致のみ。まま/ながら/ずに等の修飾や辞書外は意味を保つ翻訳（translateActionPhrase、姿勢ヒント付き、num_predict 64）をそのまま使用。"stays seated ... and looks ..." を「変化なし」と誤って捨てる判定も修正。立っている人の「座ったまま」は "sits on the chair and looks at the desk" に合わせる。
+  - 手がふさがっていても動作文は残し、"Hand use: ...; exactly two hands. Never add an extra hand or arm." で手の使い方を指定（物を持ったまま置く/先に机に置く、挙手は物ごと上がる）。
+  - 人物ありの指示文の末尾に 1 回だけ "Main change that must be clearly visible: <動作文>"。
+  - 日本語の表示文の作り方は変更なし（辞書ヒット時だけ使っていた短縮形は、完全一致以外では元の指示文のまま）。
+- ルールブック v19（scripts/rulebook-add-motion-v19.ts で作成、active は v18 のまま）: 頭・視線は動作に必要な範囲で動いてよいが見えていない顔は出さない（G-15 維持、横顔固定を削除）、持ち物は同じ手で一緒に動く（G-14 維持）、物の文を 1 文に統合。有効化: `node_modules\.bin\tsx.cmd scripts\rulebook-add-motion-v19.ts --activate-existing`（ホットリロードされるので再起動と同時に行う）。
+- 検査（combinedInspection / sceneReferenceCast の判定）は変更なし。差分: docs/motion-prompt-diff-2026-10-19.md。A/B 用: scripts/motion-ab.ts（未実行）。
+- サーバーは再起動していない。コード変更は次回再起動から有効。
+
+### 2026-10-19 追記: オペレーターシナリオCSVでコントロールパネル設定を変更（サーバー未再起動）
+
+- 新しいCSVアクション（列は seconds,action,target,value のまま。画像列は空必須）:
+  - `mode` value=manual|timer|chain（target空） / `interval_sec` 5..3600 秒（target空）
+  - `distance` target=A|B|C, value=-3600..3600 秒 / `presence`・`tone` 0..1（target空）
+  - `person_refs` / `person_refs_once` target=A|B|C, value=UUIDを `|` で連結（空=クリア, 最大15件, 重複不可）。continuous / oneShot の PersonReferenceIds をそのシーンだけ置き換える
+  - `pause` / `resume`（target・value空）= generation.pause / generation.resume と同じ処理（submissionHold）。シナリオ時計は止めない
+  - cast / allowedInventory は追加していない（生成ごとに導出されるため）
+- 不正値はCSV読込時に拒否（scenario_csv.py / scenario_engine.py、Node側でも validateScenarioSettingsChange で再確認）。
+- 実行時は必ず既存の settings.apply / generation.pause / generation.resume を通る（受領票・検証・settingsRevision そのまま）。シナリオ発のときだけ「シナリオ所有中は scenes/mode を拒否」のガードを通す（`state.scenarioAction`、HTTPからは偽装不可）。person_refs は settings.apply の件数・合計上限に加え、実行時に参照メタデータの存在も確認。
+- プレビュー再生では何も変更しない。`scenario.settingsCues` に `status:'skipped', skipped:'preview', change:'scenes.a.distanceSec=10'` 等で記録、`skippedSettings` / `lastSettingsSkipped` も出る。コントロール画面のプレビュー表示に「Settings not applied (preview): …」を追記。
+- ライブ再生で行が失敗（検証エラー等）しても、その行だけ `status:'failed', error` と `lastSettingsError`（`row-0005 (presence=0.5): 理由`）に記録してシナリオは続行。
+- 復元ルール: 終了時と Stop 時に、このシナリオが変えた項目だけをシナリオ開始時の値へ戻す（settings.apply 経由）。開始後に同じ項目が手動で変わっていたら（シナリオが書いた値と現在値の比較）上書きせず `lastSettingsError`（`Restore on stop: … not restored`）に記録、Stop は 409 を返す（lastOutputError と同じ扱い）。hold（pause/resume）も同じルールで開始時の状態へ戻す。
+- 例: `scripts/operator-scenario/examples/SCN-SETTINGS-001.csv`（0s distance A 10 / 4s presence 0.5 / 8s tone 0.3 / 12s pause / 16s resume / 20s end、generate行なし）。
+- 主な変更: server/operatorScenarioSettings.ts（新規）, operatorScenario.ts, operatorState.ts, nativeOperator.ts, server.ts（checkPersonReferences 配線）, tdControl/control.mjs, scenario_csv.py, scenario_engine.py。テスト: test_settings_actions.py, operatorScenarioSettings.test.ts ほか。
+- **本番サーバーは再起動していない。** 反映には再起動が必要（ユーザー判断）。
 - **2026-10-17 13時: 遮蔽時の前後関係(ルールブック v10→v11、denoise 0.6)**: v10 の「奥の物を手前に出さない」文だけでは画像が直らず(Lightning cfg 1.0 では負のプロンプトは無効)。A/B(`speculative-memory_data/experiments/obstruct-ab`): (a) v10 再現 NG、(c) 先頭文「The mesh chair backrest is the frontmost layer… everything seen through the mesh stays dim, blurred…」OK、(d) denoise 0.6 OK、(b) 非 Lightning は時間内に未検証。v11 = (c) を `imagePrompt.obstructedLeadRule`(`rulebook.ts` の `obstructedLead()`、`{by}` に obstructedBy)として obstructed 撮影の画像プロンプト先頭に置く(13:13:32 反映)。それでも 13:13:37 の B に文字つき小画面が手前に浮いたため、obstructed 撮影だけ `COMFYUI_OBSTRUCTED_DENOISE`(既定 0.6、1 で無効、prompts.json の各シーン `denoise`)を併用(13:20 ごろ反映)。以後の遮蔽撮影 3 件の B は浮く物・新文字なし。A の 1 件に虹色の光条(未対応)。通常撮影は denoise 1.0 のまま。
 - **2026-10-17 昼: ComfyUI ハング 7 時間と復旧、自動復旧、G-16、alert 表示**: 05:31 から ComfyUI のジョブ 1 件がハング(GPU 29%、VRAM 21GB)。サーバーは 300 秒でタイムアウトするが ComfyUI のキューに残るため 71 件滞留。/interrupt と /queue clear は効かず、python 停止→同じ引数で再起動(cwd `C:/Users/nmrei/AppData/Local/Comfy-Desktop/ComfyUI-Installs/ComfyUI`、`scripts/restart-comfyui.ps1`)で 12:38 復旧。サーバー側: タイムアウト時にそのジョブを削除、連続 2 回(COMFYUI_FAIL_RESTART_AFTER)で自動再起動、/api/health に comfyQueue/lastTimeoutAt/autoRestarts/comfyAlert、1 回目から /logs 赤バナーと UDP `alert`。ルールブック v9: G-16(画面に新しい文字・数字・時計・UI を描かない、負のプロンプトに clock/digits/text on screen)と G-07 補足(obstructed 時は遮蔽物を含む構図を維持、裏の部屋を描かない)。**TD 側**(ノート、`td_scene_text.py` / `td_capture_listener.py`、リポジトリ反映済み): どの datagram でも `alert`(文字列または {message|text|title, level, active, cleared})があれば画像の行の上(ui_root 280,376,996x20)に赤帯「⚠ <message>」、active:false/cleared/空、または alert の無い generation.completed で消す。cost_display は y91/h16・12pt に変更(オーバーレイのボタンを隠さない)。次の課題: 遮蔽時に背もたれの奥の物(モニター)が手前にくっきり描かれる(-541 B)。
 - **非表示コンソール（2026-10-17）**: `scripts/safe-restart.ps1` と `scripts/restart-comfyui.ps1`（comfyWatchdog の自動再起動を含む）は Win32_ProcessStartup の ShowWindow=0 で起動するため、サーバーと ComfyUI は窓の無いコンソールで動く。止めるときは `scripts/stop-server.ps1` か taskkill（窓を閉じる操作は不要）。既に開いている古い窓は次の再起動で置き換わる。
@@ -165,6 +288,25 @@
 - 改良ループの cron は解除済み（撮影停止中のため）。再開時にユーザーと相談して作り直す
 - **画面上部の Manual / Auto ボタンと「間隔（秒）」スライダーは本物の操作（10-06）**: 実際の `Capturemode` / `Captureinterval` と連動する。Auto は1回押すと確認メッセージだけ出し（10秒以内にもう一度押すと timer 開始）、timer/chain 中は赤字「自動撮影中」が出る。TD は未保存（`touchdesigner/td_mode_chooser.py`）
 - **コミット**: ユーザーは「コミットはあした（10-06）する」と言った。未コミットの変更が大量にある（下の5章）。プッシュはユーザーが自分で行う（Git Credential Manager のログインが必要）
+
+- **CPU 手検出（10-19）**: 公開前検査で VLM の手数判定に加え、MediaPipe HandLandmarker（`scripts/hand-count.py`、`server/handCount.ts`）が出力画像の手を数える。**検出数 > 2×想定人数（1人なら3以上）で `extra_hand` 却下**。VLM（3本以上）と OR。AI/LLM 呼び出しは増えない。VLM 呼び出しと並列に走る（子プロセス1回 約1秒、検出本体 約0.3-0.4秒）
+- インストール先は顔ボックスと同じ CPU venv `C:\Users\nmrei\claude-code\runtime-face-detector`（Python 3.12、Comfy の venv ではない）: `runtime-face-detector\Scripts\python.exe -m pip install --no-deps mediapipe==1.1.1 absl-py flatbuffers certifi` と `... -m pip install matplotlib`。**`--no-deps` は必須**（素の `pip install mediapipe` は opencv-contrib-python 5.0 を入れ、顔検出の opencv-python-headless 4.11 と cv2 が衝突する）
+- モデル: `C:\Users\nmrei\GitHub\speculative-memory_data\models\hand_landmarker.task`（Google 公式 float16、7.8MB、sha256 fbc2a300…、repo 外・コミットしない）。env で上書き: `HAND_LANDMARKER_MODEL` / `HAND_DETECTOR_PYTHON`（未設定なら `FACE_DETECTOR_PYTHON`）/ `HAND_CONFIDENCE`(0.25) / `HAND_WRIST_MASK`(0.3)。**閾値は暫定**（調整に使えた画像は回帰素材 6 枚のみ。0.15 では 14-05-26 が 4 本になった。誤検出・見逃しが出たら 6 枚＋新例で再調整すること）
+- 検出は 原画＋左右反転 × 2パス（見つけた手を灰色で塗って再検出。手首に小円も塗り、時計や前腕を手と数えない）。隣接する手を palm 検出器が1つにまとめてしまう弱点への対策
+- 検出器が無い/失敗のときは1回だけ警告ログを出して VLM のみで判定。`observationFacts.cpuHands` に status/count/limit/boxes/ms を記録（rejected の integrity.jsonl にも載る）
+- 回帰: 陽性4枚（B_old / B_new / Gen_b_14-06-42 / Gen_b_14-05-26）は CPU 3本、陰性2枚（B_old_s1 / B_new_s1）は 2本。CPU だけ試すときは `tsx scripts\inspect-images.ts <gid> <A|B|C> <png...> --cpu-only`（VLM なし）。本番反映にはサーバー再起動が必要
+- **髪色と後ろ姿（G-13/G-15、10-19 夕）**: 15:20-15:23 の後ろ姿4枚が全体ピンク髪（実物は黒髪で毛先だけピンク）・B の1枚が横顔だった。`server/generation/hairPhrase.ts` が髪を「地毛色＋毛先色」に分け、`behindViewSentence` は「black hair, only the tips pink (the rest of the hair stays black; never colour the whole hair pink)」と書く（地毛色不明の "pink-tipped" は「元の暗い地毛色、毛先だけ pink」）。negative に "fully pink hair…" と "face in profile, side view of the face" を追加。DESCRIBE_PROMPT は地毛色を先に書き、毛先色だけを書かないよう指示
+- 後ろ姿文に `BEHIND_VIEW_NO_FACE_RULE`（"Seen from behind; no part of the face is visible: no profile …"）を追加。参照切り抜きは head_box があれば頭＋肩＋胴の全身（`figureCropFor`）、無ければ従来の位置三分割
+- **物体ゲート（G-24）**: 人物を描くシーン（personDrawn=true）では planner の物体変化が「…, while the bin …」で残っていた（`vlmClient.ts` の recentDraw 合成と finishWith が非人物シーンにしかゲートを掛けていなかった）。今は objectAllowed=false なら `resolveRecentPersonScene` で人物の静かな動きだけになる。人物なしのシーンは従来どおりスキップ
+- activityMinutesAgo が null だったのは 3分窓で別検索していたため。今は recentPerson と同じ出所（live: latestPerson / test: latestTestPerson）から `activityMinutesFromRecent` で分数を出す（06:22 は 5分 → no_recent_activity）
+- 06:22 入力のオフライン再現（モデル呼び出しなし、emptyRoomDecision.test.ts）: operator_mention の3シーンは人物のみ（箱・蓋の変化なし）、言及なしならロール 0.64/0.68/0.75 で3シーンともスキップ。本番反映にはサーバー再起動が必要（未実施）
+
+### 2026-10-19 追記: テスト直近人物の再起動耐性と chain の空回り防止（サーバー未再起動）
+- 症状（再起動6 18:53 以降、L004）: 無人回が3シーンとも skip（no_recent_activity / emptyRoom no_recent_person、`[history] … recent person: none`）で、chain が完了直後に次を撮るため約14秒ごとに VLM を空回り。原因はテスト用の直近人物（ScopedTestHistory＋TestPersonFrames）がメモリのみで再起動で消えること（再起動5の後は F001–F003 が有人だったので出なかった）。operator_mention の不具合ではない（G-01）。
+- 修正1（server/history/testRecentPersonStore.ts、TestRecentPersonStore）: テストスコープの有人フレーム（frameId・historyScope・replayedAt・people〈head_box/hair/clothes/position〉・元フレーム JPEG）を `speculative-memory_data\state	est-recent-person\<sha256(scope)先頭16桁>\<frameId>.json|.jpg` に保存（env TEST_RECENT_PERSON_DIR で変更可）。上限は従来通り 1スコープ4枚・12スコープ・replayedAt で10分。起動時に読み込み、期限切れは削除。書けないときはメモリのみ（ログ1回）。scene-history.jsonl（会場履歴）には触れない。
+- 修正2: それでも見つからないテスト回は、アーカイブ（直近2日分のフォルダを新しい順）から同じ historyScope・10分以内・guard.detector.person=true の最新 prompts.json を探し、_NOW.jpg＋guard.people を直近人物として使う（`[history] recent person recovered from archive (N min ago)`、モデル呼び出しなし、見つけたものはストアにも保存）。
+- 修正3（server/nativeOperator.ts、autoCaptureDue / zeroScenesGenerated）: 完了したキャプチャの生成シーン数が0（全シーン skip）のとき、chain は完了時刻から設定 intervalSec（既定70秒）待ってから次を撮る（`[chain] all scenes skipped; waiting 70s`）。シーンが1枚でもあれば従来通り約1秒後。timer は従来通り。
+- テスト: testRecentPersonStore.test.ts（5件: 保存→新インスタンスで latestTestPerson、期限・上限での削除、ディレクトリ不可、アーカイブ復元フィクスチャ）、nativeOperator.test.ts に chain ペーシング1件。tsc クリーン、TS 全体 949 件中失敗は既知の2件のみ。反映には再起動が必要。
 
 ## 1. 何を作っているか
 

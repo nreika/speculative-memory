@@ -7,6 +7,7 @@
  * Every write swallows its own errors: the log must never stop a generation.
  */
 import fs from 'node:fs';
+import {browserOutputCurrent} from '../browserOutputCurrent';
 import path from 'node:path';
 
 export type CaptureResult = 'running' | 'completed' | 'failed' | 'cancelled';
@@ -28,6 +29,24 @@ export interface DisplayEntry {
 export interface CaptureEvent {
   captureId: string;
   source?: string;
+  /** Explicit batch accounting, written only by versioned new capture producers. */
+  batchLogVersion?: 1;
+  requestedCount?: number | null;
+  savedCount?: number | null;
+  /** Browser publication eligibility; not a remote browser decode acknowledgement. */
+  publishedCount?: number | null;
+  executionSource?: 'manual'|'timer'|'chain'|'scenario'|'unknown';
+  inputIdentity?: {kind:'test'|'live-camera'|'unknown';id:string|null;sceneId?:string;runId?:string;loop?:number;sha256?:string};
+  failureReason?: string | null;
+  browserFollow?: {updateMode?:'each'|'all';testSceneId?:string;testRunId?:string;scope:string;sourceRecordedAtMs:number|null;cameraScope?:string};
+  browserBatch?: import('../browserDisplay').BrowserDisplayContent[];
+  /**
+   * G-24: unoccupied scenes that were not generated (no recent person drawn, no object change). Browser outputs keep the
+   * previous image/caption for these keys and still treat the batch as complete; QA never sees them.
+   */
+  skippedScenes?: Array<{ sceneKey: 'gen_a' | 'gen_b' | 'gen_c'; reason: string }>;
+  /** G-25 per-scene person roll / chance / personDrawn of an unoccupied frame (compact). */
+  emptyRoom?: Array<{ sceneKey: string; chance: number; roll: number; personDrawn: boolean; reason: string; objectAllowed: boolean; skipped?: boolean; skipReason?: string }>;
   test?: boolean;
   startedAt: string;
   endedAt?: string;
@@ -72,6 +91,37 @@ export interface CaptureEvent {
   backfilled?: boolean;
 }
 
+export function captureExecutionSource(value:unknown):NonNullable<CaptureEvent['executionSource']> {
+  return ['manual','timer','chain','scenario'].includes(value as string)?value as NonNullable<CaptureEvent['executionSource']>:'unknown';
+}
+
+/** Safe input identifiers only. Never copies arbitrary request fields, tokens or image data. */
+export function captureInputIdentity(request:unknown,isTest:boolean):NonNullable<CaptureEvent['inputIdentity']> {
+  const r=request&&typeof request==='object'&&!Array.isArray(request)?request as Record<string,unknown>:{};
+  if(isTest){
+    const scene=typeof r.testSceneId==='string'&&/^TSC-[0-9]{3}$/.test(r.testSceneId)?r.testSceneId:undefined;
+    const id=scene&&typeof r.testFrameId==='string'&&new RegExp('^'+scene+'-F[0-9]{3,8}$').test(r.testFrameId)?r.testFrameId:null;
+    const run=typeof r.testRunId==='string'&&/^(?:[a-f0-9]{32}|[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12})$/i.test(r.testRunId)?r.testRunId:undefined;
+    return {kind:'test',id,...(scene?{sceneId:scene}:{}),...(run?{runId:run}:{}),...(Number.isSafeInteger(r.testLoop)&&Number(r.testLoop)>=1?{loop:Number(r.testLoop)}:{})};
+  }
+  return r.sourceScope==='camera:main'||r.sourceScope==='camera:remote'?{kind:'live-camera',id:r.sourceScope}:{kind:'unknown',id:null};
+}
+
+/** Saved output slots and published browserBatch members are deliberately different. */
+export function captureBatchCounts(event:CaptureEvent):Pick<CaptureEvent,'requestedCount'|'savedCount'|'publishedCount'> {
+  const requested=event.batchLogVersion===1&&Number.isInteger(event.requestedCount)&&Number(event.requestedCount)>=1&&Number(event.requestedCount)<=3?event.requestedCount!:null;
+  if(event.batchLogVersion!==1)return {requestedCount:null,savedCount:null,publishedCount:null};
+  const keys=['a','b','c']as const;
+  const saved=keys.filter(key=>typeof event.images?.[key]==='string'&&event.images[key]!.startsWith('/captures/'));
+  const scope=event.browserFollow?.scope,mode=event.browserFollow?.updateMode;
+  if(!scope||!['each','all'].includes(mode)||!['test','td-native','browser'].includes(event.source??''))return {requestedCount:requested,savedCount:saved.length,publishedCount:null};
+  try {
+    const snapshots=browserOutputCurrent([event],Date.parse(event.endedAt??event.startedAt)||0,{updateMode:mode});
+    const published=keys.filter(key=>snapshots[key]?.content?.captureId===event.captureId&&snapshots[key]?.content?.sceneKey==='gen_'+key).length;
+    return {requestedCount:requested,savedCount:saved.length,publishedCount:requested===null?null:published};
+  } catch {return {requestedCount:requested,savedCount:saved.length,publishedCount:null};}
+}
+
 export const STALE_RUNNING_MS = 15 * 60 * 1000;
 
 const localDay = (d: Date) =>
@@ -108,6 +158,33 @@ export interface EventQuery {
   extras?: boolean;
   people?: boolean;
   gemini?: boolean;
+}
+
+export interface EventTimelineQuery {limit?:number;cursor?:string}
+export interface EventTimelinePage {schema:1;events:Array<CaptureEvent&{timelineRunKey:string}>;nextCursor:string|null;runOrigins:Array<{key:string;startedAtMs:number}>}
+export class EventTimelineQueryError extends Error {readonly status=400;}
+const TIMELINE_CURSOR_MAX=4096;
+function timelineCursor(value:string):[number,string] {
+  if(typeof value!=='string'||!value.length||value.length>TIMELINE_CURSOR_MAX||!/^[A-Za-z0-9_-]+$/.test(value))throw new EventTimelineQueryError('Invalid timeline cursor');
+  try {
+    const bytes=Buffer.from(value,'base64url');if(bytes.toString('base64url')!==value)throw Error();
+    const v=JSON.parse(bytes.toString('utf8'));
+    if(!Array.isArray(v)||v.length!==3||v[0]!==1||!Number.isSafeInteger(v[1])||Math.abs(v[1])>8640000000000000||typeof v[2]!=='string'||!v[2].length)throw Error();
+    return [v[1],v[2]];
+  } catch {throw new EventTimelineQueryError('Invalid timeline cursor');}
+}
+function encodeTimelineCursor(ms:number,id:string):string {
+  const encoded=Buffer.from(JSON.stringify([1,ms,id]),'utf8').toString('base64url');
+  if(encoded.length>TIMELINE_CURSOR_MAX)throw new EventTimelineQueryError('Capture identity exceeds timeline cursor limit');
+  return encoded;
+}
+/** Derived only for timeline responses. Live/legacy day is Japan time, never source-capture time. */
+export function timelineRunKey(event:CaptureEvent,startMs=Date.parse(event.startedAt)):string {
+  const run=event.inputIdentity?.runId||event.browserFollow?.testRunId;
+  if(typeof run==='string'&&run)return 'test:'+run;
+  const shifted=new Date(startMs+9*60*60*1000);
+  const day=Number.isFinite(shifted.getTime())?shifted.toISOString().slice(0,10):new Intl.DateTimeFormat('sv-SE',{timeZone:'Asia/Tokyo',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date(startMs));
+  return (event.browserFollow?.scope||event.source||'legacy')+':'+day;
 }
 
 export class CaptureEventStore {
@@ -150,6 +227,8 @@ export class CaptureEventStore {
     this.write({
       ...event,
       endedAt,
+      ...captureBatchCounts(event),
+      failureReason:event.result==='failed'||event.result==='cancelled'?event.errorMessage??null:null,
       totalMs: event.totalMs ?? Math.max(0, Date.parse(endedAt) - Date.parse(event.startedAt)),
       cost: costForCapture(this.usageLogPath, event.captureId),
       ...(this.getAlert() ? { comfyAlert: this.getAlert() } : {}),
@@ -238,6 +317,21 @@ export class CaptureEventStore {
       out.push(e);
     }
     return out;
+  }
+
+  /** Query-only copy: stable descending (startedAt milliseconds, ordinal captureId) order. */
+  timeline(q:EventTimelineQuery={}):EventTimelinePage {
+    if(Object.keys(q).some(k=>!['limit','cursor'].includes(k)))throw new EventTimelineQueryError('Unsupported timeline query');
+    const limit=q.limit===undefined?200:q.limit;
+    if(!Number.isInteger(limit)||limit<1||limit>2000)throw new EventTimelineQueryError('Timeline limit must be an integer from 1 to 2000');
+    const cursor=q.cursor===undefined?undefined:timelineCursor(q.cursor);
+    const all=this.readAll().map(event=>({event,ms:Date.parse(event.startedAt)})).filter(r=>Number.isFinite(r.ms)&&typeof r.event.captureId==='string'&&r.event.captureId.length>0);
+    const ordered=all.filter(r=>!cursor||r.ms<cursor[0]||r.ms===cursor[0]&&r.event.captureId<cursor[1]).sort((a,b)=>b.ms-a.ms||(a.event.captureId<b.event.captureId?1:a.event.captureId>b.event.captureId?-1:0));
+    const page=ordered.slice(0,limit),events=page.map(r=>({...r.event,timelineRunKey:timelineRunKey(r.event,r.ms)}));
+    const keys=new Set(events.map(e=>e.timelineRunKey)),origins=new Map<string,number>();
+    for(const r of all){const key=timelineRunKey(r.event,r.ms);if(keys.has(key)&&(!origins.has(key)||r.ms<origins.get(key)!))origins.set(key,r.ms);}
+    const last=page.at(-1);
+    return {schema:1,events,nextCursor:ordered.length>limit&&last?encodeTimelineCursor(last.ms,last.event.captureId):null,runOrigins:[...origins].map(([key,startedAtMs])=>({key,startedAtMs})).sort((a,b)=>a.key<b.key?-1:a.key>b.key?1:0)};
   }
 
   summary(day?: string) {

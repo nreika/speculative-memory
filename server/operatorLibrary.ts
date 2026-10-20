@@ -1,0 +1,44 @@
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import {randomUUID} from 'node:crypto';
+import {loadOperatorPlan,checkOperatorPlan} from './operatorScenario';
+
+export function createOperatorLibrary(root:string,python:string,readOutputIds?:()=>Promise<string[]>|string[]){
+ const load=(file:string)=>loadOperatorPlan(root,file,python,readOutputIds);
+ /** Plan plus non-fatal format warnings; throws ScenarioFormatError listing every error. */
+ const check=(file:string)=>checkOperatorPlan(root,file,python,readOutputIds);
+ async function list(){
+  const rows:{file:string;name:string}[]=[];
+  async function walk(folder:string){for(const entry of await fs.readdir(folder,{withFileTypes:true})){
+   if(entry.isSymbolicLink()||entry.name.startsWith('.'))continue;
+   const target=path.join(folder,entry.name);
+   if(entry.isDirectory())await walk(target);
+   else if(entry.isFile()&&entry.name.toLowerCase().endsWith('.csv'))rows.push({file:path.relative(root,target).split(path.sep).join('/'),name:path.basename(entry.name,'.csv')});
+  }}
+  await fs.mkdir(root,{recursive:true});await walk(root);return rows.sort((a,b)=>a.file.localeCompare(b.file));
+ }
+ async function upload(payload:any){
+  const safe=(name:unknown,ext:string)=>typeof name==='string'&&/^[A-Za-z0-9][A-Za-z0-9_. -]{0,120}$/.test(name)&&name.toLowerCase().endsWith(ext)&&!name.includes('..');
+  if(!payload||!safe(payload.csv?.name,'.csv')||typeof payload.csv.text!=='string'||Buffer.byteLength(payload.csv.text)>2*1024*1024||!Array.isArray(payload.assets)||payload.assets.length>64)throw Error('Invalid scenario upload');
+  const id=randomUUID(),imports=path.join(root,'browser-imports'),folder=path.join(imports,'.'+id),final=path.join(imports,id);
+  await fs.mkdir(folder,{recursive:true});let total=0;const names=new Set<string>();
+  try{
+   await fs.writeFile(path.join(folder,payload.csv.name),payload.csv.text,{encoding:'utf8',flag:'wx'});
+   for(const asset of payload.assets){
+    if(!safe(asset?.name,'.png')||names.has(asset.name.toLowerCase())||typeof asset.base64!=='string'||asset.base64.length>12*1024*1024||!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(asset.base64))throw Error('Invalid scenario PNG upload');
+    names.add(asset.name.toLowerCase());const raw=Buffer.from(asset.base64,'base64');
+    if(raw.length>8*1024*1024||(total+=raw.length)>24*1024*1024||!raw.subarray(0,8).equals(Buffer.from([137,80,78,71,13,10,26,10])))throw Error('Scenario PNG size or format invalid');
+    await fs.writeFile(path.join(folder,asset.name),raw,{flag:'wx'});
+   }
+   // Validate paths and exact image protocol before making the import selectable.
+   const {formatWarnings}=await checkOperatorPlan(root,`browser-imports/.${id}/${payload.csv.name}`,python,readOutputIds);
+   await fs.rename(folder,final);
+   return {ok:true,file:`browser-imports/${id}/${payload.csv.name}`,formatWarnings};
+  }catch(error){
+   // Preserve a failed upload outside the selectable library for diagnosis.
+   await fs.writeFile(path.join(folder,'.failed'),String((error as Error).message),'utf8').catch(()=>{});
+   throw error;
+  }
+ }
+ return {load,check,list,upload};
+}

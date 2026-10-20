@@ -1,3 +1,4 @@
+import {sharedOllamaContextLength} from "../generation/sharedOllamaContext";
 /**
  * Automatic rulebook improvement from the continuous QA (server/qa/localJudge.ts):
  *
@@ -28,7 +29,7 @@ import {
   type Rulebook,
 } from '../generation/rulebook';
 import { mentionsPerson } from '../generation/scenarioGuard';
-import { DEFECT_TYPES, readQaRows, summarizeQa, type DefectType, type QaRow, type QaSummaryGroup } from './localJudge';
+import { DEFECT_TYPES, readQaRows, latestQaRows, summarizeQa, completedQaCaptureIds, qaMetrics, type DefectType, type QaRow, type QaSummaryGroup } from './localJudge';
 
 export interface Change {
   path: EditablePath;
@@ -131,25 +132,28 @@ export const proposalsDir = (p: ImproverPaths) => path.join(p.logsDir, 'qa-propo
 // Statistics
 // ---------------------------------------------------------------------------------------------------------------------
 
-/** Rows of real (non-test) captures judged with `version`, newest `captures` captures, optionally only after `since`. */
+/** Rows of venue and test captures judged with `version`, newest `captures` captures, optionally only after `since`. */
 export function windowRows(rows: QaRow[], version: number, opts: { since?: string | null; captures?: number; before?: string | null } = {}): QaRow[] {
-  let list = rows.filter((r) => !r.test && r.rulebookVersion === version);
+  let list = latestQaRows(rows).filter((r) => r.rulebookVersion === version);
   if (opts.since) list = list.filter((r) => r.time >= opts.since!);
   if (opts.before) list = list.filter((r) => r.time < opts.before!);
+  const complete = completedQaCaptureIds(list);
   const order: string[] = [];
-  for (const r of list) if (!order.includes(r.captureId)) order.push(r.captureId);
-  if (opts.captures && order.length > opts.captures) {
+  for (const r of list) if (complete.has(r.captureId) && !order.includes(r.captureId)) order.push(r.captureId);
+  if (opts.captures && order.length >= opts.captures) {
     const keep = new Set(order.slice(-opts.captures));
-    list = list.filter((r) => keep.has(r.captureId));
+    const firstTime = list.find(r => keep.has(r.captureId))!.time;
+    // Keep recent failed/incomplete captures as repair evidence without counting them towards the gate.
+    list = list.filter(r => keep.has(r.captureId) || (!complete.has(r.captureId) && r.time >= firstTime));
   }
   return list;
 }
 
-export const captureCount = (rows: QaRow[]): number => new Set(rows.map((r) => r.captureId)).size;
+export const captureCount = (rows: QaRow[]): number => completedQaCaptureIds(rows).size;
 
 export function statsOf(rows: QaRow[]): QaSummaryGroup {
   return (
-    summarizeQa(rows, 'none')[0] ?? { key: 'all', images: 0, judged: 0, unknown: 0, defective: 0, defectRate: null, byType: {}, avgScore: null, avgElapsedMs: null }
+    summarizeQa(rows, 'none')[0] ?? { key: 'all', ...qaMetrics([]), rejected: qaMetrics([]), completedCaptures: 0 }
   );
 }
 
@@ -513,7 +517,9 @@ export async function runCycle(opts: CycleOptions = {}): Promise<CycleResult> {
   }
 
   // 2. what to change
-  const overall = stats.defectRate ?? 0;
+  // Rejected attempts inform fixes, but never the accepted-image rollback rates above.
+  const evidence = qaMetrics(win);
+  const overall = evidence.defectRate ?? 0;
   if (overall < cfg.quietRate) {
     if (!opts.dryRun) {
       state.lastCycleAt = now().toISOString();
@@ -521,7 +527,7 @@ export async function runCycle(opts: CycleOptions = {}): Promise<CycleResult> {
     }
     return { action: 'quiet', version, detail: `defect rate ${fmtPct(overall)} < ${fmtPct(cfg.quietRate)}`, stats };
   }
-  const ranked = Object.entries(stats.byType)
+  const ranked = Object.entries(evidence.byType)
     .filter(([, v]) => v.count >= cfg.minTypeCount)
     .sort((a, b) => b[1].count - a[1].count)
     .map(([t]) => t as DefectType);
@@ -604,7 +610,7 @@ export async function runCycle(opts: CycleOptions = {}): Promise<CycleResult> {
 }
 
 function compactStats(s: QaSummaryGroup) {
-  return { images: s.images, judged: s.judged, defective: s.defective, defectRate: s.defectRate, byType: s.byType };
+  return { rejected: s.rejected, completedCaptures: s.completedCaptures, images: s.images, judged: s.judged, defective: s.defective, defectRate: s.defectRate, byType: s.byType };
 }
 
 function logChange(p: ImproverPaths, row: Record<string, unknown>): void {
@@ -731,8 +737,8 @@ export function ollamaTextLlm(): TextLlm {
         think: false,
         format: 'json',
         keep_alive: process.env.OLLAMA_KEEP_ALIVE ?? '5m',
-        // num_ctx 4096 = same as the capture's detect call (a different value reloads Ollama's runner: +5 s on the next capture)
-        options: { temperature: 0.2, num_predict: 256, num_ctx: 4096 },
+        // Use the same shared runner context as recognition/planning; output budget stays 256.
+        options: { temperature: 0.2, num_predict: 256, num_ctx: sharedOllamaContextLength() },
       }),
       signal: AbortSignal.timeout(60_000),
     });

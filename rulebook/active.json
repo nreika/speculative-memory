@@ -1,6 +1,6 @@
 {
-  "version": 13,
-  "appliedAt": "2026-10-17T04:46:54.208Z",
+  "version": 19,
+  "appliedAt": "2026-10-19T04:14:49.062Z",
   "by": "user",
-  "reason": "G-17 fix: positive wording instead of negated artifact words"
+  "reason": "motion fix 2026-10-19 (head/gaze may move without revealing a hidden face; held object moves with its hand; one object sentence)"
 }

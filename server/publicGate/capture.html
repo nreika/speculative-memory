@@ -1,0 +1,9 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="dark"><meta name="robots" content="noindex"><title>Remote Camera</title>
+<style>body{margin:0;background:#0b0d10;color:#e6e8eb;font:16px system-ui,sans-serif}main{max-width:720px;margin:0 auto;padding:16px;display:grid;gap:12px}video{width:100%;aspect-ratio:16/9;background:#000;object-fit:cover;border-radius:6px}.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}button,select{font:inherit;padding:10px 14px;border-radius:6px;border:1px solid #3a4048;background:#14181d;color:inherit}#start{background:#286078;border-color:#286078}#last{font-size:28px;font-weight:600}#state.stale,#state.error{color:#ff8a80}#state.ok{color:#8bd48b}.note{color:#9aa3ad;font-size:14px;margin:0}</style></head>
+<body><main><h1 style="font-size:18px;margin:0">Remote camera · Speculative Memory</h1>
+<video id="video" playsinline muted autoplay></video>
+<div class="row"><button id="start" type="button">Start</button><button id="stop" type="button" disabled>Stop</button><button id="flip" type="button">Switch camera</button><label>Every <select id="interval"><option value="5">5 s</option><option value="10" selected>10 s</option><option value="20">20 s</option></select></label></div>
+<div id="last">Not sending</div><div id="state">—</div>
+<p class="note">Hold the phone in landscape and keep it charging. The screen must stay on (Wake Lock is requested; if unsupported, turn off auto-lock). Frames are live venue input only while "Remote device" is selected in Control; otherwise the server just keeps the latest frame.</p>
+</main><script type="module" src="/capture/capture.mjs"></script></body></html>

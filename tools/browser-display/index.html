@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Speculative Memory — Display</title>
+  <link rel="stylesheet" href="/display-assets/screen.css">
+</head>
+<body>
+  <main id="screen" aria-label="Display output">
+    <div id="display-stage"><div id="fade-stage">
+    <img id="frame" class="frame-layer" alt="" hidden>
+    <img id="frame-next" class="frame-layer" alt="" hidden>
+    <div id="caption" hidden>
+      <div id="first-line"></div>
+      <div class="last-line"><span id="second-line"></span><span id="badge"></span></div>
+    </div>
+    </div></div>
+    <div id="waiting">Connecting…</div>
+    <div id="connection" role="status" hidden></div>
+  </main>
+  <button id="fullscreen" type="button">Full screen</button>
+  <script type="module" src="/display-assets/screen.mjs"></script>
+</body>
+</html>

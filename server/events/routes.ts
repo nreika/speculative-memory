@@ -50,6 +50,14 @@ export function registerEventRoutes(app: Express, store: CaptureEventStore, opts
     res.json(flag(q.group) ? groupFailureRuns(events) : events);
   });
 
+  app.get('/api/events/timeline', (req, res) => {
+    res.setHeader('Cache-Control','no-store');
+    const q=req.query;
+    if(Object.keys(q).some(k=>!['limit','cursor'].includes(k))||q.limit!==undefined&&(typeof q.limit!=='string'||!/^\d+$/.test(q.limit))||q.cursor!==undefined&&typeof q.cursor!=='string')return res.status(400).json({error:'Invalid timeline query'});
+    try {res.json(store.timeline({...(q.limit!==undefined?{limit:Number(q.limit)}:{}),...(q.cursor!==undefined?{cursor:q.cursor as string}:{})}));}
+    catch(error){if((error as any)?.status===400)return res.status(400).json({error:(error as Error).message});res.status(500).json({error:'Timeline unavailable'});}
+  });
+
   app.get('/api/events/:captureId', (req, res) => {
     const event = store.get(req.params.captureId);
     if (!event) return res.status(404).json({ error: 'unknown captureId' });

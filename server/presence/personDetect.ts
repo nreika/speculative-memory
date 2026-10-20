@@ -1,3 +1,4 @@
+import {sharedOllamaContextLength} from "../generation/sharedOllamaContext";
 /**
  * Lightweight "is a person in this photo?" check for the TD presence gate.
  * One image + a short instruction to the same Ollama VLM the scenario planner uses.
@@ -86,7 +87,7 @@ export async function detectPerson(image: unknown, options: DetectOptions = {}):
         think: false,
         format: 'json',
         keep_alive: keepAlive,
-        options: { temperature: 0, num_predict: 32 },
+        options: { temperature: 0, num_predict: 32, num_ctx: sharedOllamaContextLength() },
       }),
       signal: AbortSignal.timeout(timeoutMs),
     });

@@ -1,6 +1,32 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { planScenariosLocal } from './vlmClient';
+import {compactPeopleInstruction} from './compactPeople';
+
+test('server extras retain support lost by the short translation before replacing a correct raw plan',async t=>{
+ const bodies:any[]=[];
+ t.mock.method(globalThis,'fetch',async(_url:unknown,init?:RequestInit)=>{
+  const body=JSON.parse(String(init?.body));bodies.push(body);
+  if(body.images)return Response.json({response:JSON.stringify({clock_visible:false,scene_description:'A person sits at a desk with a chair and laptop.',scenarios:[{prediction_prompt:'The person stands up, placing both hands on the edge of the desk as they rise.',scenario_description:'Standing with desk support.',label:'A'}]})});
+  if(body.prompt.startsWith('Translate the COMPLETE'))return Response.json({response:JSON.stringify({action:'stands up from the desk'})});
+  return Response.json({response:'{}'});
+ });
+ const trace:any={};const people=[{position:'center',pose:'seated in a chair',clothes:'white shirt',facing:'away',holding:'',holdingFacts:[{item:'laptop',hand:'both' as const,evidence:'surface_contact' as const}]}];
+ const out=await planScenariosLocal({imageDataUrl:'data:image/jpeg;base64,dGVzdA==',prompt:'p',scenarioCount:1,maxAttempts:1,trace,people,detector:{person:true,count:1,elapsedMs:1},sceneExtras:{gen_a:'立ち上がってる / 人物が机に手をついて立ち上がろうとする。既存の人物以外は追加しない。'}});
+ assert.match(out[0].prediction_prompt,/stands up from the desk/);assert.match(out[0].prediction_prompt,/Hand use: places one existing hand on the desk; exactly two hands/);assert.match(trace.guard.extras.gen_a.english,/places one existing hand on the desk/);
+ assert.match(compactPeopleInstruction(people,1,out[0].prediction_prompt),/places one existing hand on the desk/);
+ const translations=bodies.filter(b=>b.prompt.startsWith('Translate the COMPLETE'));assert.equal(translations.length,1);assert.equal(translations[0].options.num_predict,64);assert.match(translations[0].prompt,/currently seated in a chair/);assert.equal(translations[0].images,undefined);
+ assert.equal(bodies.filter(b=>b.images).length,1,'only the existing planning image call');
+});
+test('source both-hand grip keeps the translated desk support action and says how the occupied hands do it',async t=>{
+ t.mock.method(globalThis,'fetch',async(_url:unknown,init?:RequestInit)=>{
+  const body=JSON.parse(String(init?.body));return Response.json({response:body.images?JSON.stringify({clock_visible:false,scene_description:'A person holds a cable in both hands beside a desk.',scenarios:[{prediction_prompt:'The person stands up.',scenario_description:'Stands.',label:'A'}]}):body.prompt.startsWith('Translate the COMPLETE')?JSON.stringify({action:'stands up while placing both hands on the desk'}):'{}'});
+ });
+ const out=await planScenariosLocal({imageDataUrl:'data:image/jpeg;base64,dGVzdA==',prompt:'p',scenarioCount:1,maxAttempts:1,people:[{position:'center',pose:'standing',clothes:'blue sweatshirt',facing:'away',holding:'cable in both hands'}],detector:{person:true,count:1,elapsedMs:1},sceneExtras:{gen_a:'机に両手をついて立ち上がる。既存の人物以外は追加しない。'}});
+ const p=out[0].prediction_prompt;
+ assert.match(p,/stands up while placing both hands on the desk/);assert.doesNotMatch(p,/cannot use an occupied hand/);
+ assert.match(p,/Hand use: places both existing hands on the desk; a hand that holds an object keeps holding it while resting on the desk \(or sets the object down on the desk first\); exactly two hands/);assert.match(p,/Never add an extra hand or arm/);
+});
 
 test('local image planning disables thinking so the output budget reaches scenario JSON', async (t) => {
   const requestedBodies: any[] = [];
@@ -138,4 +164,20 @@ test('occupancy: detector false + a past detector hit (allowPerson) -> recent-pe
   await planScenariosLocal({ imageDataUrl: 'data:image/jpeg;base64,dGVzdA==', prompt: 'p', scenarioCount: 3, trace, maxAttempts: 1, allowPerson: true, detector: { person: false, count: 0, elapsedMs: 5 }, sceneDistances: [30, 30, 150] });
   assert.equal(trace.guard.unoccupied, true);
   assert.equal(trace.guard.recentPersonAllowed, true);
+});
+
+test('screen-side actor is separate from hand laterality without another translation call',async t=>{
+ const bodies:any[]=[];
+ t.mock.method(globalThis,'fetch',async(_url:unknown,init?:RequestInit)=>{
+  const body=JSON.parse(String(init?.body));bodies.push(body);
+  if(body.images)return Response.json({response:JSON.stringify({clock_visible:false,scene_description:'Two people are seated at a desk.',scenarios:[{prediction_prompt:'The person in the black shirt raises one hand.',scenario_description:'Raises a hand.',label:'A'}]})});
+  if(body.prompt.startsWith('Translate the COMPLETE'))return Response.json({response:JSON.stringify({action:'left hand slightly raises, right hand rests on desk'})});
+  return Response.json({response:'{}'});
+ });
+ const trace:any={};const people=[{position:'left front',pose:'seated',clothes:'striped shirt',facing:'away',holding:''},{position:'right background',pose:'seated',clothes:'black shirt',facing:'away',holding:''}];
+ const out=await planScenariosLocal({imageDataUrl:'data:image/jpeg;base64,dGVzdA==',prompt:'p',scenarioCount:1,maxAttempts:1,trace,people,detector:{person:true,count:2,elapsedMs:1},sceneExtras:{gen_a:'画面右の人物が、片手を軽く上げる。 / 反対の手は机に置く。'}});
+ const prompt=out[0].prediction_prompt;
+ assert.match(prompt,/on the right side of the image wearing black shirt/);assert.match(prompt,/one hand/);assert.match(prompt,/the other hand/);assert.doesNotMatch(prompt,/left.hand|right.hand|wearing striped shirt/);
+ const translations=bodies.filter(b=>b.prompt.startsWith('Translate the COMPLETE'));assert.equal(translations.length,1);assert.equal(translations[0].images,undefined);assert.equal(translations[0].options.num_predict,64);
+ assert.doesNotMatch(translations[0].prompt,/Instruction: "画面右/);assert.match(translations[0].prompt,/never an anatomical hand/);
 });

@@ -1,3 +1,4 @@
+import { applyPeopleEditRegion, type PeopleEditRegion } from './peopleEditRegion';
 /**
  * Minimal ComfyUI HTTP API client for the Qwen-Image-Edit-2511 pipeline.
  *
@@ -158,6 +159,8 @@ export interface QwenEditParams {
   faceCrop?: { x: number; y: number; width: number; height: number };
   /** Extra identity references (downscaled recent frames) as data URLs; image2/image3 = [faceImage, ...referenceImages] (max 2). */
   referenceImages?: string[];
+  referenceCrops?: Array<{x:number;y:number;width:number;height:number}>;
+  editRegion?: PeopleEditRegion;
   seed?: number;
   steps?: number;
   cfg?: number;
@@ -179,6 +182,8 @@ function buildWorkflow(opts: {
   faceCrop?: { x: number; y: number; width: number; height: number };
   /** Uploaded names of extra reference frames; they take the image slots after the face (max 2 slots in all). */
   refNames?: string[];
+  referenceCrops?: Array<{x:number;y:number;width:number;height:number}>;
+  editRegion?: PeopleEditRegion;
   prompt: string;
   negativePrompt: string;
   seed: number;
@@ -197,7 +202,7 @@ function buildWorkflow(opts: {
     };
     const slots: Array<[string, number]> = [];
     if (opts.faceName) slots.push(opts.faceCrop ? ["13", 0] : ["11", 0]);
-    (opts.refNames ?? []).forEach((_, i) => slots.push([`${16 + i}`, 0]));
+    (opts.refNames ?? []).forEach((_, i) => slots.push([`${opts.referenceCrops?.[i] ? 26+i : 16+i}`, 0]));
     slots.slice(0, 2).forEach((ref, i) => {
       inputs[`image${i + 2}`] = ref;
     });
@@ -305,7 +310,13 @@ function buildWorkflow(opts: {
   }
   (opts.refNames ?? []).slice(0, opts.faceName ? 1 : 2).forEach((name, i) => {
     wf[`${16 + i}`] = { class_type: "LoadImage", inputs: { image: name } };
+    const crop=opts.referenceCrops?.[i];
+    if(crop){
+      wf[`${22+i}`]={class_type:"ImageCrop",inputs:{image:[`${16+i}`,0],...crop}};
+      wf[`${26+i}`]={class_type:"ImageScale",inputs:{image:[`${22+i}`,0],upscale_method:"lanczos",width:Math.max(64,Math.round(crop.width*768/crop.height/8)*8),height:768,crop:"disabled"}};
+    }
   });
+  if (opts.editRegion) applyPeopleEditRegion(wf, opts.editRegion);
   return wf;
 }
 
@@ -519,6 +530,8 @@ export async function generateQwenEdit(
       faceName,
       refNames,
       faceCrop: params.faceCrop,
+      referenceCrops: params.referenceCrops,
+      editRegion: params.editRegion,
       prompt: params.prompt,
       negativePrompt: params.negativePrompt ?? DEFAULT_NEGATIVE_PROMPT,
       seed: params.seed ?? Math.floor(Math.random() * 2 ** 31),

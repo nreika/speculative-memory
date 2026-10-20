@@ -70,16 +70,97 @@ function leadingSpan(description: string): string {
   return m ? m[0] : "Shortly after,";
 }
 
-/** A minimal, person-free replacement for scenario `index` (0-based). */
-export function safeScenario(sceneDescription: string, original: ScenarioResult, index: number): ScenarioResult {
+// Movable objects an empty-room scene may shift or turn (heavy furniture, screens, lights and architecture never move).
+type MovableGroup = "seat" | "container" | "bag";
+const MOVABLE_GROUPS: Array<{ group: MovableGroup; re: RegExp }> = [
+  { group: "seat", re: /^(?:chair|stool)$/i },
+  { group: "container", re: /^(?:bin|container|crate|box|basket|bucket|tray)$/i },
+  { group: "bag", re: /^(?:backpack|bag)$/i },
+];
+const MOVABLE_NOUNS = "chair|stool|bin|container|crate|box|basket|bucket|tray|backpack|bag";
+const MOVABLE_NOUN_RE = new RegExp(`((?:\\b[a-z][a-z-]*\\s+){0,3})\\b(${MOVABLE_NOUNS})(es|s)?\\b`, "gi");
+const PHRASE_STOP = new Set(["a", "an", "the", "and", "with", "of", "in", "on", "to", "its", "is", "are", "sits", "sit", "shows", "show",
+  "second", "some", "several", "various", "hold", "holds", "holding", "by", "near", "next", "from", "visible", "prominent", "partially",
+  "foreground", "background", "featuring", "light", "lights", "lit", "hanging", "filled", "behind", "left", "right", "top", "back", "one", "another"]);
+
+export interface EmptyRoomObject { phrase: string; plural: boolean; group: MovableGroup }
+
+function groupOf(noun: string): MovableGroup | null {
+  return MOVABLE_GROUPS.find((g) => g.re.test(noun))?.group ?? null;
+}
+
+/**
+ * Movable objects named in the frame description (one per group: seats, containers, bags), never the near-camera
+ * foreground object (the foreground rule pins its position; a plural of its kind means others exist and one of
+ * those may move), never parts or things on shelves / hanging from something, never words the empty-room filters cut.
+ */
+export function movableObjects(sceneDescription: string | undefined | null, foregroundObject?: string | null): EmptyRoomObject[] {
+  const fgNoun = String(foregroundObject ?? "").match(new RegExp(`\\b(${MOVABLE_NOUNS})(?:es|s)?\\b`, "i"))?.[1];
+  const fgGroup = fgNoun ? groupOf(fgNoun) : null;
+  const found = new Map<MovableGroup, EmptyRoomObject>();
+  const text = String(sceneDescription ?? "");
+  for (const m of text.matchAll(MOVABLE_NOUN_RE)) {
+    const noun = m[2].toLowerCase();
+    const group = groupOf(noun);
+    const plural = !!m[3];
+    if (!group || found.has(group) || (group === fgGroup && !plural)) continue;
+    const start = m.index ?? 0;
+    const before = text.slice(Math.max(0, start - 40), start);
+    const after = text.slice(start + m[0].length, start + m[0].length + 20);
+    // "the backrest of a chair", "shelves hold boxes", "a bag hanging from the chair": not a free-standing object.
+    if (/\b(?:of|hold|holds|holding)\s+$/i.test(before) || /\bshel(?:f|ves)\b[^.]{0,30}$/i.test(before + m[1])) continue;
+    if (/^\s*(?:hanging|hangs|slung|draped)\b/i.test(after)) continue;
+    const mods = m[1].trim().split(/\s+/).filter(Boolean);
+    if (mods.some((w) => /^(?:of|hold|holds|holding)$/i.test(w))) continue;
+    let cut = -1;
+    mods.forEach((w, i) => { if (PHRASE_STOP.has(w.toLowerCase())) cut = i; });
+    mods.splice(0, cut + 1);
+    const phrase = [...mods, noun + (plural ? (noun === "box" ? "es" : "s") : "")].join(" ").toLowerCase() +
+      (group === fgGroup ? " further from the camera" : "");
+    if (mentionsPerson(phrase) || emptyRoomBanned().test(phrase)) continue;
+    found.set(group, { phrase, plural, group });
+  }
+  return (["seat", "container", "bag"] as const).map((g) => found.get(g)).filter((x): x is EmptyRoomObject => !!x);
+}
+
+/**
+ * One small, visible state change of a movable object, scaled by the scene's time distance (signed seconds).
+ * null when the frame names no movable object that may move (the caller then skips or keeps the scene).
+ * No lighting, screen or person words: the image prompt and the display text both use it as is.
+ */
+export function emptyRoomObjectChange(
+  sceneDescription: string | undefined | null,
+  foregroundObject: string | null | undefined,
+  distanceSec: number,
+  index: number
+): string | null {
+  const objs = movableObjects(sceneDescription, foregroundObject);
+  if (objs.length === 0) return null;
+  const o = objs[index % objs.length];
+  const subject = o.plural ? `One of the ${o.phrase}` : `The ${o.phrase}`;
+  const dir = index % 2 === 0 ? "right" : "left";
+  const abs = Math.abs(Number.isFinite(distanceSec) ? distanceSec : 30);
+  const tier = abs < 60 ? 0 : abs < 300 ? 1 : 2;
+  // Seats turn, containers shift; every second round swaps the two so three scenes on one object never repeat.
+  const turn = (o.group === "seat") === (Math.floor(index / Math.max(2, objs.length)) % 2 === 0);
+  const turnText = ["a few degrees", "about fifteen degrees", "about thirty degrees"][tier];
+  const shiftText = ["a few centimetres", "about ten centimetres", "about twenty centimetres"][tier];
+  return turn
+    ? `${subject} is turned ${turnText} to the ${dir}${tier === 2 ? ` and stands ${shiftText} further to the ${dir}` : ""}.`
+    : `${subject} sits ${shiftText} further to the ${dir}${tier > 0 ? " and is turned slightly" : ""}.`;
+}
+
+/** "X remains exactly as in the input", "Keep the scene exactly as in the input": a scene that asks for no change. */
+export function isNoChangeSentence(text: string): boolean {
+  return /\bexactly as in the input\b|\bremains? (?:unchanged|the same|stationary)\b|^\s*no change\b/i.test(String(text));
+}
+
+/** A minimal, person-free replacement for scenario `index` (0-based); a movable-object change when the frame has one. */
+export function safeScenario(sceneDescription: string, original: ScenarioResult, index: number, distanceSec?: number): ScenarioResult {
   const objects = extractObjects(sceneDescription);
   const obj = objects.length ? objects[index % objects.length] : "furniture";
-  const templates = [
-    `The room stays empty; only the light on the ${obj} shifts slightly.`,
-    `The room stays empty and still; the ${obj} sits in a slightly softer shade.`,
-    `Nobody enters the room; the brightness of the ${obj} changes slightly.`,
-  ];
-  const text = templates[index % templates.length];
+  const change = emptyRoomObjectChange(sceneDescription, original.foreground_object, distanceSec ?? 30, index);
+  const text = change ?? `The ${obj} remains exactly as in the input.`;
   return {
     ...original,
     prediction_prompt: text,
@@ -130,10 +211,14 @@ export interface GuardRecord {
   /** The describe call judged the camera view blocked by a close object (chair back, hand, cloth). Recorded only; generation continues. */
   obstructed?: boolean;
   obstructedBy?: string;
+  /** Movable belongings from the describe call (name, what it rests on, horizontal third); [] when none or unknown. */
+  belongings?: import("./peopleDescribe").SceneBelonging[];
   /** English scene_description of the frame (as seen by the guard). */
   scene?: string;
   /** A person was seen within RECENT_PERSON_WINDOW_MIN, so people in scenarios were allowed. */
   recentPersonAllowed?: boolean;
+  /** G-24/G-25 per-scene empty-room decisions (person roll, object gate, skip) — emptyRoomDecision.ts. */
+  emptyRoom?: import("./emptyRoomDecision").EmptyRoomSceneDecision[];
 }
 
 /** Lower-cased, punctuation-free token string for comparing scenario texts. */
@@ -188,11 +273,15 @@ function emptyRoomBanned(): RegExp {
  * Keeps only the sentences/clauses of the prediction that are free of them; falls back to a light change.
  */
 export function sanitizeEmptyRoomPrediction(prediction: string): string {
-  const clauses = String(prediction)
+  // Object-component names are not anatomy; keep valid furniture movement without exposing human tokens.
+  const objectText = String(prediction)
+    .replace(/\barmchairs?\b/gi, match => /s$/i.test(match) ? 'upholstered chairs' : 'upholstered chair')
+    .replace(/\barmrests?\b/gi, match => /s$/i.test(match) ? 'side supports' : 'side support');
+  const clauses = objectText
     .split(/(?<=[.!?;])\s+|;\s*/)
     .map((c) => c.trim().replace(/[.;]+$/, ""))
     .filter((c) => c.length > 0 && !emptyRoomBanned().test(c));
-  return clauses.length > 0 ? clauses.join("; ") : "the light on the furniture shifts slightly";
+  return clauses.length > 0 ? clauses.join("; ") : "Keep the scene exactly as in the input";
 }
 
 export function occupancySourceOf(textOccupied: boolean, detectorPerson: boolean | null | undefined): 'detector' | 'text' | 'both' | 'none' {
@@ -209,9 +298,9 @@ export function sceneWithoutPeople(scene: string): string {
   return kept.length > 0 ? kept.join(" ") : "An empty room.";
 }
 
-export function applySafeFallback(scenarios: ScenarioResult[], bad: number[]): ScenarioResult[] {
+export function applySafeFallback(scenarios: ScenarioResult[], bad: number[], distances?: number[]): ScenarioResult[] {
   const scene = scenarios[0]?.scene_now ?? "";
-  return scenarios.map((s, i) => (bad.includes(i) ? safeScenario(scene, s, i) : s));
+  return scenarios.map((s, i) => (bad.includes(i) ? safeScenario(scene, s, i, distances?.[i]) : s));
 }
 
 /** One-shot guard (no retries): used where the model is not re-called (Gemini/hybrid). */

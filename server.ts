@@ -1,3 +1,32 @@
+import {createScenePersonReferenceAssets,registerScenePersonReferenceRoutes,type ResolvedPersonReferences} from './server/scenePersonReferenceAssets';
+import {buildSceneReferenceInputs,validateSceneReferenceRequest,sourceCastIdentityImages,type SourceCastIdentityImage} from './server/generation/sceneReferenceIntegration';
+import type {QaReferenceCastJob} from './server/qa/qaService';
+import {tdBrowserSnapshot} from './server/tdBrowserFollow';
+import {currentBrowserSnapshot} from './server/currentBrowserDisplay';
+import {createInstructionCaptionLookup} from './server/instructionCaptions';
+import {createTdDisplayTimingReader} from './server/tdDisplayTiming';
+import {registerBrowserDisplayRoutes,isBrowserDisplayImageUrl} from './server/browserDisplay';
+import {registerBrowserOutputsRoutes,browserOutputsAccess,type BrowserOutputsStore} from './server/browserOutputs';
+import {createBrowserOutputSources} from './server/browserOutputSources';
+import {createBrowserOutputAssets} from './server/browserOutputAssets';
+import {createBrowserOutputRecordings} from './server/browserOutputRecordings';
+import {createBrowserOutputThumbnails} from './server/browserOutputThumbnails';
+import {createBrowserFaceBoxes} from './server/browserFaceBoxes';
+import {createBrowserFacePresentation} from './server/browserFacePresentation';
+import {browserOutputCurrent} from './server/browserOutputCurrent';
+import {installTdBrowserControl} from './server/tdControl/node-proxy.mjs';
+import {createNativeOperator} from './server/nativeOperator';
+import {createOperatorScenarioOutputs} from './server/operatorScenarioOutputs';
+import {EventEmitter} from 'node:events';
+import {createHash} from 'node:crypto';
+import {SourceObservationIndex} from './server/history/sourceObservationIndex';
+import {updateTestHistory} from './server/history/testHistoryApi';
+import {latestTestPerson} from './server/history/testRecentPerson';
+import {TestRecentPersonStore,DEFAULT_TEST_RECENT_PERSON_DIR,mergeReplayed,recoverTestPersonFromArchive} from './server/history/testRecentPersonStore';
+import {captureHistoryContext,ScopedTestHistory,type CaptureHistoryEcho} from './server/history/historyDisplay';
+import { peopleEditRegion } from './server/generation/peopleEditRegion';
+import {parseScenarioControl,ScenarioControlValidationError,scenarioControlArchiveMetadata,type ValidatedScenarioControl,type ScenarioSceneKey} from './server/scenarioControl';
+import {prepareScenarioInputs,mergeScenarioEditRegion,scenarioElementInstruction,scenarioControlEcho,validateScenarioSceneCount,validateScenarioModes,assetOnlyEditInstruction,scenarioPeoplePolicy,scenarioNeedsFullFrame} from './server/scenarioGeneration';
 ﻿
 import './server/loadEnv';
 import express from 'express';
@@ -6,6 +35,7 @@ import path from 'path';
 import fs from 'fs';
 import cors from 'cors';
 import dgram from 'dgram';
+import { recordingFilename,recordingMetadata } from './server/recordingFiles';
 import {
   BACKEND as GENERATION_BACKEND,
   backendStatus,
@@ -13,17 +43,20 @@ import {
   generateImage,
   predictScenarios,
   readSceneParams,
+  type ImageTrace,
 } from './server/generation/orchestrator';
 import type { PlanTrace } from './server/generation/vlmClient';
-import { describePeople } from './server/generation/peopleDescribe';
-import { cropRectFor, imageSize, type CropRect } from './server/generation/referenceCrop';
+import { describePeople, DESCRIBE_PROMPT, DESCRIBE_SCHEMA } from './server/generation/peopleDescribe';
+import { cropRectFor, figureCropFor, headCropFor, imageSize, type CropRect } from './server/generation/referenceCrop';
 import { behindViewSentence } from './server/generation/orchestrator';
+import { sceneBelongings, inspectionBelongings } from './server/generation/behindViewPlacement';
 import { mentionsPerson } from './server/generation/scenarioGuard';
 import {
   buildSceneExtrasNote,
   parseSceneExtras,
   personExtrasInEmptyRoom,
 } from './server/generation/sceneExtras';
+import { DEFAULT_EMPTY_ROOM_PERSON_CHANCE, activityMinutesFromRecent, decideEmptyRoomScenes, emptyRoomActivityMin, sceneSkipPlan } from './server/generation/emptyRoomDecision';
 import { buildHistoryContextNote } from './services/promptBuilder';
 import {
   appendHistory,
@@ -76,13 +109,20 @@ import { createCaptureQa } from './server/qa/imageJudge';
 import { GenerationArchive, generationIdFromFilename, archiveRootDir } from './server/archive/generationArchive';
 import { comfyConfig } from './server/generation/comfyClient';
 import { vlmConfig } from './server/generation/vlmClient';
+import { describeGeneratedImage } from './server/generation/fidelity';
+import { generateUniquePeople } from './server/generation/peopleIntegrity';
+import { inspectAndCaption, inspectAndCaptionWithReferences, inspectionDefectType } from './server/generation/combinedInspection';
+import {inspectCountedImage} from './server/generation/countInspection';
+import { detectPeople, extraPeopleVerdict } from './server/generation/lightPeopleDetector';
+import { appendQaRow } from './server/qa/localJudge';
+import { withJapaneseSpan } from './server/generation/spanFix';
 import { getCostTracker } from './server/usage/costTracker';
 import { buildPublicUrl, resolveNotifyHost, resolvePublicBaseUrl } from './server/network/notifyTarget';
 import { registerPresenceRoutes } from './server/presence/routes';
 import { registerHealthRoutes } from './server/health/routes';
 import { getComfyWatchdog } from './server/generation/comfyWatchdog';
 import { obstructedSince, withObstructionNote } from './server/events/obstruction';
-import { CaptureEventStore, type CaptureEvent as CaptureEventRow } from './server/events/captureEvents';
+import { CaptureEventStore, captureBatchCounts, captureExecutionSource, captureInputIdentity, type CaptureEvent as CaptureEventRow } from './server/events/captureEvents';
 import { registerEventRoutes } from './server/events/routes';
 import { QaService } from './server/qa/qaService';
 import { ensureRulebookFiles, rulebookVersion } from './server/generation/rulebook';
@@ -91,8 +131,10 @@ import { MobileQueue } from './server/mobile/queue';
 import { registerMobileRoutes, type MobilePayload } from './server/mobile/routes';
 import { purgeExpiredMobile } from './server/mobile/archiveList';
 import { GEMINI_IMAGE_MODEL, GEMINI_VLM_MODEL, backendLabel, resolveBackends } from './server/generation/backends';
+import {resolveLocalImageEngine,selectSceneImageEngine,isTurboEngine,productionTurboSourceContext} from './server/generation/imageEngine';
+import {TurboCandidateGeometryError} from './server/generation/turboCandidate';
 
-interface CaptureEvent {
+interface CaptureEvent extends Partial<CaptureHistoryEcho> {
   type: 'capture.saved';
   /** ComfyUI hang alert (comfyWatchdog): set while consecutive timeouts are being handled, else absent. */
   alert?: { level: string; message: string; since: string } | null;
@@ -106,10 +148,13 @@ interface CaptureEvent {
   /** Rulebook version (rulebook/active.json) the prompts of this capture were built with. */
   rulebookVersion?: number | null;
   test?: boolean;
+  scenarioControl?: ReturnType<typeof scenarioControlEcho>;
   captureId: string;
   sceneKey: string;
   sceneIndex: number | null;
   expectedImageCount: number;
+  /** G-24: scene keys of this capture that were skipped (no datagram is sent for them; their panels keep the previous image/text). */
+  skippedScenes?: string[];
   label: string;
   filename: string;
   absolutePath: string;
@@ -234,6 +279,12 @@ interface TouchDesignerControlSession {
 }
 
 async function startServer() {
+  const testHistory=new ScopedTestHistory();
+  // Test-scope recent person survives restarts (data/state/test-recent-person; never the venue scene-history.jsonl).
+  const testPersonStore=new TestRecentPersonStore({dir:process.env.TEST_RECENT_PERSON_DIR||DEFAULT_TEST_RECENT_PERSON_DIR,windowMin:()=>recentPersonWindowMin()});
+  let testSourceIndex:SourceObservationIndex|null=null;
+  try {testSourceIndex=new SourceObservationIndex(JSON.parse(fs.readFileSync(process.env.TEST_SOURCE_OBSERVATION_INDEX||'C:/Users/nmrei/claude-code/tsc001-fix/original-source-observations.v1.json','utf8')));}
+  catch(error){console.error('[test-history] source cache unavailable; no observation is inferred:',String(error));}
   const app = express();
   const PORT = Number(process.env.PORT || '3000');
   const HMR_PORT = Number(process.env.HMR_PORT || '24679');
@@ -775,13 +826,44 @@ async function startServer() {
     }
   };
 
+  // Control routes keep their own peer/Host/Origin checks and bounded body reader.
+  // Mount before global CORS/JSON parsing; an unavailable control bridge must not stop generation.
+  const nativeOperatorMode=process.env.OPERATOR_RUNTIME==='native';
+  let nativeOperator:Awaited<ReturnType<typeof createNativeOperator>>|undefined;
+  let browserOutputs:BrowserOutputsStore|undefined;
+  let personReferenceAssets:ReturnType<typeof createScenePersonReferenceAssets>|undefined;
+  const pinnedPersonReferences=new WeakMap<object,ResolvedPersonReferences>();
+  const preflightScenePersonReferences=async(body:Readonly<Record<string,any>>,mobile=false)=>{
+    const control=parseScenarioControl(body.scenarioControl);
+    const parsed=validateSceneReferenceRequest(body.scenePersonReferences,{count:normalizeImageCount(body.imageCount),imageBackend:resolveBackends(body).image,engine:resolveLocalImageEngine(body),mobile,sceneModes:control?.sceneModes});
+    if(!Object.values(parsed).some(refs=>refs?.length))return undefined;
+    const existing=pinnedPersonReferences.get(body);if(existing)return existing;
+    if(!personReferenceAssets)throw Error('Private person reference service is unavailable');
+    const resolved=await personReferenceAssets.resolve(parsed);
+    const sourceSha=createHash('sha256').update(decodeImageDataUrl(body.image).buffer).digest('hex');
+    if(Object.values(resolved).some(refs=>refs?.some(ref=>ref.sha256===sourceSha)))throw Error('Additional reference duplicates the original source');
+    pinnedPersonReferences.set(body,resolved);return resolved;
+  };
+  let browserFaces:ReturnType<typeof createBrowserFaceBoxes>|undefined;
+  const presentBrowserFaces=createBrowserFacePresentation(url=>browserFaces?.inspect(url)??Promise.resolve({status:'unavailable',boxes:[]}));
+  if (process.env.TD_CONTROL_BRIDGE_URL && process.env.TD_CONTROL_BRIDGE_TOKEN_FILE) {
+    try { installTdBrowserControl(app,{...(nativeOperatorMode?{controlHandler:async request=>nativeOperator?nativeOperator.handle(request):{status:503,body:{ok:false,error:'Native operator is initializing'}}}:{})}); }
+    catch {
+      console.error('[td-control] Control initialization failed; generation remains available.');
+      app.use(['/control', '/api/td-control'], (_req, res) => res.status(503).json({ok:false,error:'TD browser control is unavailable'}));
+    }
+  }
   app.use(cors());
   app.use(express.json({ limit: '50mb' }));
+  app.post('/api/test/history',(req,res)=>{
+    try {const result=updateTestHistory(testSourceIndex,testHistory,req.body);res.status(result.sourceStatus==='unavailable'?503:200).json(result);}
+    catch(error){res.status(400).json({error:String((error as Error).message),historySummary:'',nowText:''});}
+  });
   registerPresenceRoutes(app);
   // ComfyUI hang recovery (comfyWatchdog.ts): alert state -> /api/health, /logs banner, comfy.alert UDP, capture.saved.alert.
   const comfyWatchdog = getComfyWatchdog();
   comfyWatchdog.onChange = (st) => sendToTouchDesigner({ type: 'comfy.alert', alert: st.alert, autoRestarts: st.autoRestarts, lastTimeoutAt: st.lastTimeoutAt }, 'comfy.alert');
-  registerHealthRoutes(app, { watchdogStatus: () => comfyWatchdog.status() });
+  registerHealthRoutes(app, { scenarioControlVersion:1, scenarioControlCapabilities:{sceneModes:['asset_only','people_and_assets'],defaultSceneMode:'legacy',assetOnlyRequiresAssets:true,assetOnlyRejectsSceneExtras:true,assetOnlySourceAlpha:'opaque_crop_only',assetOnlyOverlapsDetectedPeople:'reject',assetOnlyContentProtection:'composed_pixels_where_effective_alpha_positive',assetOnlyOutputFrame:'original_now',assetOnlyTargetsInsideModelCrop:true}, watchdogStatus: () => comfyWatchdog.status() });
   // Per-capture structured log + display-log + /logs viewer (server/events).
   const captureEvents = new CaptureEventStore(
     path.join(process.cwd(), 'logs', 'capture-events.jsonl'),
@@ -791,6 +873,95 @@ async function startServer() {
     () => comfyWatchdog.status().alert
   );
   registerEventRoutes(app, captureEvents, { archiveRoot: archiveRootDir() });
+  // Read-only screen output. Content comes from an explicit complete archive registry, never latest.json.
+  const browserSettings=process.env.BROWSER_DISPLAY_SETTINGS_FILE;
+  const browserContents=process.env.BROWSER_DISPLAY_CONTENTS_FILE;
+  const instructionLookup=createInstructionCaptionLookup(archiveRootDir(),()=>captureEvents.readAll());
+  const legacyDisplayTiming=createTdDisplayTimingReader();
+  const readDisplayTiming=Object.assign(async()=>nativeOperatorMode?(await nativeOperator?.state.readSettings())?.displayTiming??'all':legacyDisplayTiming(),{readRouting:async()=>{
+    if(!nativeOperatorMode)return legacyDisplayTiming.readRouting();
+    if(!nativeOperator)return undefined;
+    const [display,settings]=await Promise.all([nativeOperator.state.readDisplay(),nativeOperator.state.readSettings()]);
+    const sources={A:'a',B:'b',C:'c',NOW:'now'}as const;
+    return {slots:Object.fromEntries(display.layout.map((label,index)=>['td-'+(index+1),sources[label]])),view:{visible:display.visible,labels:settings.labels,subtitles:settings.subtitles,fade:settings.fade}};
+  }});
+  if(browserSettings && browserContents){
+    const viewer=path.resolve(process.cwd(),'tools/browser-display');
+    app.use('/display-assets',express.static(viewer,{index:false,dotfiles:'deny'}));
+    app.get('/display/face-blur.mjs',(_req,res)=>{res.setHeader('Cache-Control','no-store');res.sendFile(path.join(viewer,'face-blur.mjs'));});
+    app.get('/display/:screenId',(req,res)=>{
+      if(!/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(req.params.screenId))return void res.sendStatus(400);
+      res.setHeader('Cache-Control','no-store');res.sendFile(path.join(viewer,'index.html'));
+    });
+    registerBrowserDisplayRoutes(app,{settingsFile:browserSettings,contentsFile:browserContents,snapshotProvider:async(id,now)=>{
+      const rows=captureEvents.readAll(),options={instructionLookup,updateMode:await readDisplayTiming()};
+      if(/^current-(now|a|b|c)$/.test(id)){
+        const routing=await readDisplayTiming.readRouting();
+        const fadeMode=await browserOutputs?.channelFadeMode(id)??'original';
+        const fadeTiming=await browserOutputs?.channelFadeTiming(id)??{fadeDurationMs:800,blackHoldMs:120};
+        const faceBlur=await browserOutputs?.channelFaceBlur(id)??{enabled:false,strengthPx:12};
+        const captions=await browserOutputs?.channelCaptions(id)??{labels:true,subtitles:true};
+        const routed={visible:true,labels:true,subtitles:true,fade:true,...routing?.view};
+        const view={...routed,labels:routed.labels&&captions.labels,subtitles:routed.subtitles&&captions.subtitles};
+        const snapshot=currentBrowserSnapshot(id,rows,now,{...options,view:{...view,...fadeTiming,faceBlur,fadeOnImageChange:false,fadeMode:view.fade?fadeMode:'none',fade:view.fade&&fadeMode!=='none'}});
+        return snapshot?presentBrowserFaces(snapshot):snapshot;
+      }
+      return tdBrowserSnapshot(id,rows,now,options);
+    },statusProvider:(_screen,snapshot)=>{
+      const rows=captureEvents.readAll().filter(e=>e.test && e.captureId.startsWith('test-turbo-app-e2e-'));
+      const relevant=rows.filter(e=>{
+        if(!/^[A-Za-z0-9_-]+$/.test(e.captureId))return false;
+        try{const request=JSON.parse(fs.readFileSync(path.join(path.dirname(browserSettings),e.captureId,'request-without-image.json'),'utf8'));return snapshot.clock.scope==='test:turbo-app-e2e:'+request.testFrameId;}catch{return false;}
+      }).sort((a,b)=>Date.parse(b.startedAt)-Date.parse(a.startedAt));
+      const latest=relevant[0];
+      const selected=rows.find(e=>e.captureId===snapshot.content?.captureId);
+      const failed=latest?.result==='failed'||latest?.result==='cancelled';
+      return {requestedCaptureId:latest?.captureId??null,
+        // Actual decoded/displayed identity is tracked by each browser, not inferred from server selection.
+        displayedCaptureId:null,state:failed?'failed':latest?.result==='running'?'generating':latest?.result==='completed'?'completed':'idle',
+        error:failed?(latest?.errorMessage||'capture failed').slice(0,512):null,
+        userMessage:failed?'今回の画像は表示できません。前回の画像を表示中。':null,
+        lastSuccessAtMs:selected?.result==='completed'&&selected.endedAt?Date.parse(selected.endedAt):null};
+    }});
+  }
+
+  // Additional browser screens share metadata and private presentation assets; they never request generation.
+  try {
+    const privateOutputRoot=path.dirname(path.resolve(archiveRootDir()));
+    const outputAssets=createBrowserOutputAssets({directory:path.join(privateOutputRoot,'browser-output-assets'),repositoryRoot:process.cwd()});
+    personReferenceAssets=createScenePersonReferenceAssets({assets:outputAssets,directory:path.join(privateOutputRoot,'scene-person-reference-observations'),modelKey:vlmConfig.model+':'+createHash('sha256').update(JSON.stringify([DESCRIBE_PROMPT,DESCRIBE_SCHEMA])).digest('hex'),describe:async(imageDataUrl,signal)=>{const result=await describePeople(imageDataUrl,{signal});if(!result.ok)throw Error('Reference person observation unavailable');return {people:result.people};}});
+    registerScenePersonReferenceRoutes(app,{service:personReferenceAssets,allowedHosts:new Set(process.env.TD_CONTROL_ALLOWED_HOSTS?.split(',').map(host=>host.trim()).filter(Boolean)??['localhost:3000','127.0.0.1:3000'])});
+    const resolvePresentationImage=async(imageUrl:string)=>{
+      if(imageUrl.startsWith('/captures/browser-output-assets/'))return (await outputAssets.resolve(imageUrl))?.absolutePath??null;
+      if(!isBrowserDisplayImageUrl(imageUrl))return null;
+      try {
+        const candidate=path.resolve(capturesDir,decodeURIComponent(imageUrl).slice('/captures/'.length));
+        const entry=await fs.promises.lstat(candidate);if(!entry.isFile()||entry.isSymbolicLink())return null;
+        const [root,actual]=await Promise.all([fs.promises.realpath(capturesDir),fs.promises.realpath(candidate)]);
+        const relative=path.relative(root,actual);
+        return relative!==''&&relative!=='..'&&!relative.startsWith('..'+path.sep)&&!path.isAbsolute(relative)?actual:null;
+      } catch {return null;}
+    };
+    browserFaces=createBrowserFaceBoxes({resolveImage:resolvePresentationImage,allowedRoots:[capturesDir,path.join(privateOutputRoot,'browser-output-assets')],python:process.env.FACE_DETECTOR_PYTHON||path.join(process.env.USERPROFILE||'','claude-code/runtime-face-detector/Scripts/python.exe'),worker:path.resolve('scripts/browser-face-boxes.py')});
+    const outputThumbnails=createBrowserOutputThumbnails({cacheDirectory:path.join(privateOutputRoot,'browser-output-thumbnails'),resolveImage:resolvePresentationImage});
+    const outputRecordings=createBrowserOutputRecordings({recordingsFile:path.join(process.cwd(),'logs','recordings.jsonl'),publicBaseUrl:process.env.PUBLIC_BASE_URL});
+    const outputSources=createBrowserOutputSources({readEvents:()=>captureEvents.readAll(),readCurrent:async()=>{
+      const updateMode=await readDisplayTiming();
+      return browserOutputCurrent(captureEvents.readAll(),Date.now(),{updateMode,instructionLookup});
+    },readUploads:()=>outputAssets.list(),readRecords:()=>outputRecordings.readRecords(),thumbnailUrl:outputThumbnails.thumbnailUrl});
+    browserOutputs=registerBrowserOutputsRoutes(app,{configFile:path.join(privateOutputRoot,'browser-output-config.json'),loadCatalog:async()=>{
+      const [catalog,tdRouting]=await Promise.all([outputSources.loadCatalog(),readDisplayTiming.readRouting()]);
+      return {...catalog,...(tdRouting?{tdRouting}:{})};
+    },assets:outputAssets,thumbnails:outputThumbnails,presentSnapshot:presentBrowserFaces,
+      allowedHosts:process.env.TD_CONTROL_ALLOWED_HOSTS?.split(',').map(host=>host.trim()).filter(Boolean),resolveContent:async(content)=>{
+        const saved=content.captureId&&content.sceneKey?instructionLookup({captureId:content.captureId,sceneKey:content.sceneKey,imageUrl:content.imageUrl}):undefined;
+        return {...content,caption:saved?.plannedDescription??'生成指示を確認できません。'};
+      }});
+  } catch {
+    console.warn('[browser-outputs] Initialization unavailable');
+    app.use('/api/browser-outputs',(_req,res)=>res.status(503).json({ok:false,error:'Browser-output service unavailable'}));
+  }
+
   // Continuous local QA (Qwen, free) between captures + the versioned rulebook with its automatic improvement.
   ensureRulebookFiles();
   // QA_DURING_IMAGE_STAGE=true (default false): also judge while ComfyUI renders the images (stage sceneA/B/C), when the
@@ -1145,21 +1316,26 @@ async function startServer() {
   // as captures/record_<timestamp>.<ext>, the same series as the source
   // frames of generated captures. Deliberately inert: it does not touch the
   // active capture, sends no generation.* message and nothing to TD's display.
-  app.post('/api/capture/record', (req, res) => {
+  const handleRecordFrame = (req:any, res:any) => {
     const { image } = req.body || {};
     if (typeof image !== 'string' || !imageDataUrlRe.test(image)) {
       return res.status(400).json({ error: 'A base64 image data URL is required' });
     }
     try {
       const { buffer, extension } = decodeImageDataUrl(image);
-      const asset = saveImageAsset(buildSavedFilename('record', extension), buffer);
+      const filename = recordingFilename(formatTokyoTimestampForFilename(), extension);
+      const asset = buildSavedImageAsset(filename, buffer);
+      fs.writeFileSync(asset.absolutePath, buffer, { flag: 'wx' });
+      const savedAt = new Date().toISOString();
+      fs.appendFileSync(path.join(process.cwd(), 'logs', 'recordings.jsonl'), JSON.stringify({ savedAt, ...recordingMetadata(req.body), filename, url: asset.url, size: asset.size }) + '\n');
       console.log(`Saved record-only frame to: ${asset.absolutePath}`);
       res.json({ success: true, record: asset, savedAt: new Date().toISOString() });
     } catch (error: any) {
       console.error('capture/record failed:', error);
       res.status(500).json({ error: error?.message || 'record save failed' });
     }
-  });
+  };
+  app.post('/api/capture/record',handleRecordFrame);
 
   // Cancel the given capture (or whatever is active). Body: { captureId? }
   app.post('/api/capture/cancel', (req, res) => {
@@ -1323,7 +1499,7 @@ async function startServer() {
   // Lets TouchDesigner (or anything) hand over one camera frame and get the
   // whole set of speculative-memory images back, saved + broadcast exactly
   // like the browser flow. No browser needed.
-  const handleGenerate = async (req: any, res: any, lane: "venue" | "mobile" = "venue") => {
+  const handleGenerate = async (req: any, res: any, lane: "venue" | "mobile" = "venue",onAccepted?:()=>Promise<void>,beforeBegin?:()=>void) => {
     const mobileLane = lane === "mobile";
     const cm = mobileLane ? mobileCaptureManager : captureManager;
     const { image, imageCount, target, sceneTime } = req.body || {};
@@ -1332,14 +1508,30 @@ async function startServer() {
     }
 
     const count = normalizeImageCount(imageCount);
+    let scenarioControl:ValidatedScenarioControl|undefined;
+    try {scenarioControl=parseScenarioControl(req.body?.scenarioControl);validateScenarioSceneCount(scenarioControl,count);}
+    catch(error){return res.status(400).json({error:String((error as Error).message),code:'INVALID_SCENARIO_CONTROL'});}
     const captureId = normalizeCaptureId(req.body?.captureId);
     // Per-capture backends (TD Vlmbackend / Imagebackend); missing/invalid -> GENERATION_BACKEND default.
     const backends = resolveBackends(req.body);
+    let localImageEngine:ReturnType<typeof resolveLocalImageEngine>;
+    try{localImageEngine=resolveLocalImageEngine(req.body||{});}catch(error){return res.status(400).json({error:String((error as Error).message),code:'INVALID_IMAGE_ENGINE'});}
+    if(localImageEngine==='qwen21-turbo-candidate'&&(mobileLane||scenarioControl||backends.image!=='local'))return res.status(400).json({error:'Turbo candidate is venue test-only and does not yet support scenarioControl',code:'INVALID_IMAGE_ENGINE'});
+    const requestFullFrameReason=localImageEngine==='qwen21-turbo'&&(mobileLane||backends.image!=='local')?'full-frame request mode':undefined;
+    if(scenarioControl&&backends.image!=='local')return res.status(400).json({error:'scenarioControl v1 requires the local image backend'});
+    // Public HTTP requests may not use private upload IDs outside the existing control security boundary.
+    // Native operator calls are in-process and carry the unforgeable beforeBegin ownership callback.
+    if(req.body?.scenePersonReferences!==undefined&&!beforeBegin){
+      const denied=browserOutputsAccess(req,new Set(process.env.TD_CONTROL_ALLOWED_HOSTS?.split(',').map(host=>host.trim()).filter(Boolean)??['localhost:3000','127.0.0.1:3000']));
+      if(denied)return res.status(denied).json({error:'Private person reference access denied',code:'PERSON_REFERENCE_ACCESS_DENIED'});
+    }
+    let resolvedPersonReferences:ResolvedPersonReferences|undefined;
+    try{resolvedPersonReferences=await preflightScenePersonReferences(req.body,mobileLane);}catch(error){return res.status(400).json({error:String((error as Error).message),code:'INVALID_PERSON_REFERENCES'});}
     const vlmModelUsed = backends.vlm === 'gemini' ? GEMINI_VLM_MODEL : vlmConfig.model;
     const imageModelUsed =
       backends.image === 'gemini'
         ? GEMINI_IMAGE_MODEL
-        : `qwen-image-edit (${process.env.COMFYUI_GGUF === 'true' ? comfyConfig.models.ggufUnet : comfyConfig.models.unet})`;
+        : isTurboEngine(localImageEngine)?`qwen_image_2.1_turbo_int8_convrot.safetensors (8steps/cfg1/${localImageEngine==='qwen21-turbo'?'production':'test-candidate'})`:`qwen-image-edit (${process.env.COMFYUI_GGUF === 'true' ? comfyConfig.models.ggufUnet : comfyConfig.models.unet})`;
     console.log(
       `generate: backends: vlm=${backends.vlm} image=${backends.image}` +
         (backends.fellBack.length ? ` (no Gemini API key: ${backends.fellBack.join(',')} fell back to local)` : '')
@@ -1350,6 +1542,7 @@ async function startServer() {
     const sceneDistances = resolveSceneDistances(sceneParams, count);
     // TD sceneExtras { gen_a, gen_b, gen_c }: per-scene "must include" elements (<=200 chars each).
     const sceneExtras = parseSceneExtras(req.body?.sceneExtras);
+    try{validateScenarioModes(scenarioControl,sceneExtras);}catch(error){return res.status(400).json({error:String((error as Error).message),code:'INVALID_SCENARIO_CONTROL'});}
     const normalizedTarget =
       target && typeof target.x === 'number' && typeof target.y === 'number'
         ? { x: target.x, y: target.y }
@@ -1357,6 +1550,13 @@ async function startServer() {
     const source: CaptureSource = mobileLane ? 'mobile' : req.body?.source === 'browser' ? 'browser' : 'td-native';
     // Phone lane (server/mobile): own CaptureManager, never UDP to TD, no latest.json / venue history / venue summary.
     const isTest = !mobileLane && (req.body?.test === true || /test/i.test(captureId));
+    const useHistory=req.body?.recordHistory !== false && !isTest && !mobileLane;
+    const historyContext=captureHistoryContext({captureId,isTest,useLiveHistory:useHistory,request:req.body});
+    const captureDisplayTiming=req.body?.displayTiming==='each'||req.body?.displayTiming==='all'?req.body.displayTiming:await readDisplayTiming();
+    // A test must never supersede an in-flight exhibition capture or another test.
+    if (isTest && cm.snapshot().active && cm.snapshot().active?.captureId !== captureId) {
+      return res.status(409).json({ busy: true, error: 'Another capture is active; retry the test when idle.' });
+    }
     const silent = mobileLane || req.body?.notify === false;
     if (isTest) testCaptureIds.add(captureId);
     if (silent) silentCaptureIds.add(captureId);
@@ -1381,7 +1581,10 @@ async function startServer() {
     if (stateBefore !== 'unknown' && stateBefore !== 'active') {
       return sendCancelled(res, captureId, cm);
     }
+    if (isTest && cm.snapshot().active && cm.snapshot().active?.captureId !== captureId) return res.status(409).json({ busy: true });
+    if(beforeBegin)beforeBegin();
     const capture = cm.begin(captureId, { source, imageCount: count });
+    if(onAccepted)await onAccepted();
     // QA never competes with a capture: the running QA call is aborted, the rest waits until nothing generates.
     qaService.interruptForCapture(!mobileLane);
     const rbVersion = rulebookVersion();
@@ -1392,6 +1595,10 @@ async function startServer() {
       test: isTest || undefined,
       startedAt: new Date().toISOString(),
       result: 'running',
+      batchLogVersion:1,requestedCount:count,savedCount:0,publishedCount:0,
+      executionSource:captureExecutionSource(req.body?.executionSource),
+      inputIdentity:captureInputIdentity(req.body,isTest),
+      browserFollow:{testSceneId:historyContext.echo.testSceneId,testRunId:historyContext.echo.testRunId,scope:historyContext.scope.key,sourceRecordedAtMs:null,updateMode:captureDisplayTiming,...(!isTest&&source==='td-native'&&recordingMetadata({source:'live-camera',sourceScope:req.body?.sourceScope}).sourceScope?{cameraScope:recordingMetadata({source:'live-camera',sourceScope:req.body?.sourceScope}).sourceScope!}:{})},
       vlmBackend: backends.vlm,
       vlmModel: vlmModelUsed,
       imageBackend: backends.image,
@@ -1450,6 +1657,7 @@ async function startServer() {
             },
           });
           const src = decodeImageDataUrl(image);
+          if(evt.inputIdentity)evt.inputIdentity.sha256=createHash('sha256').update(src.buffer).digest('hex');
           archive.saveSource(src.buffer, src.extension);
           evt.archiveDir = archive.dir;
         }
@@ -1458,16 +1666,62 @@ async function startServer() {
         archive = null;
       }
 
+      const scenarioPrepared=scenarioControl?await prepareScenarioInputs(image,scenarioControl,signal):undefined;
+      if(scenarioControl&&scenarioPrepared){
+        if(!archive)throw new Error('Scenario input archive is required');
+        archive.setScenarioControl({...scenarioControlArchiveMetadata(scenarioControl),stage:'composed-generation-input',sourceSha256:scenarioPrepared.composition.sourceSha256,assetChecks:scenarioPrepared.assetChecks});
+      }
+
       // Scene history: recent observations (prompt context) and the "was anyone here lately" rule of the guard.
       // Test captures (body.recordHistory:false / body.test:true / captureId containing "test") neither read nor write the history.
-      const useHistory =
-        req.body?.recordHistory !== false && !isTest && !mobileLane;
+      const cachedSource=isTest?testSourceIndex?.lookupImage(decodeImageDataUrl(image).buffer,{sceneId:historyContext.echo.testSceneId,frameId:historyContext.echo.testFrameId}):undefined;
+      if(evt.browserFollow)evt.browserFollow.sourceRecordedAtMs=cachedSource?.status==='hit'&&cachedSource.record.sourceObservedAt?Date.parse(cachedSource.record.sourceObservedAt):isTest?null:Date.parse(evt.startedAt);
+      if(evt.browserFollow&&sourceImageAsset?.url){
+        const sourceRecordedAtMs=evt.browserFollow.sourceRecordedAtMs;
+        evt.browserBatch=[{id:captureId+':now',captureId,sceneKey:'now',scope:evt.browserFollow.scope,provenance:'actual',distanceSecSigned:null,imageUrl:evtImageUrl(sourceImageAsset.url)!,recordedAtMs:sourceRecordedAtMs,sourceRecordedAtMs,generatedAtMs:null,targetAtMs:null,caption:''}];
+        captureEvents.patch(captureId,{...captureBatchCounts(evt),inputIdentity:evt.inputIdentity,images:evt.images,browserFollow:evt.browserFollow,browserBatch:evt.browserBatch});
+      }
+      const replayedAt=new Date().toISOString();
+      if(cachedSource?.status==='hit')testHistory.observe(historyContext.scope,cachedSource.record,replayedAt);
+      if(cachedSource?.status==='hit'&&cachedSource.record.detectorPerson===true&&historyContext.scope.kind==='test')testPersonStore.remember(historyContext.scope.key,{...cachedSource.record,replayedAt},image);
+      archive?.setHistoryContext({...historyContext.echo,cachedObservation:cachedSource?.status==='hit'?{status:'hit',originalCaptureId:cachedSource.record.originalCaptureId,sourceImageSha256:cachedSource.record.sourceImageSha256,sourceObservedAt:cachedSource.record.sourceObservedAt}:{status:cachedSource?.status??'not-used'}});
       if (!useHistory && !mobileLane) console.log(`[history] capture ${captureId} is a test capture: history is not read or written`);
       const historyAll = useHistory ? readHistory() : [];
       const historyItems = historyEnabled()
         ? recentEntries(historyAll, { limit: historyLimit(), windowMin: historyWindowMin() })
         : [];
-      const recentPerson = latestPerson(historyAll, recentPersonWindowMin());
+      // G-01/G-02: test playback reads its own loop's replayed observations (never the exhibition jsonl).
+      // Test scope: in-memory loop history + the persisted occupied frames (restart-safe); if none, the archive of this scope.
+      const recentPerson = useHistory
+        ? latestPerson(historyAll, recentPersonWindowMin())
+        : historyContext.scope.kind === 'test'
+          ? (() => {
+              const scope = historyContext.scope;
+              const excludeFrameId = cachedSource?.status === 'hit' ? cachedSource.record.frameId : undefined;
+              const found = latestTestPerson(mergeReplayed(testHistory.snapshot(scope).observations, testPersonStore.observations(scope.key)), { windowMin: recentPersonWindowMin(), excludeFrameId });
+              if (found) return found;
+              const recovered = recoverTestPersonFromArchive({ archiveRoot: archiveRootDir(), historyScope: scope.key, windowMin: recentPersonWindowMin(), excludeDir: archive?.dir ?? null, excludeFrameId });
+              if (!recovered) return null;
+              testPersonStore.remember(scope.key, recovered.row, recovered.imageDataUrl);
+              console.log(`[history] recent person recovered from archive (${recovered.minutesAgo} min ago) ${path.basename(recovered.dir)} ${recovered.row.frameId}`);
+              return latestTestPerson([recovered.row], { windowMin: recentPersonWindowMin(), excludeFrameId });
+            })()
+          : null;
+      // G-24/G-25: per-scene empty-room decisions (applied only if the frame turns out unoccupied): person roll vs
+      // emptyRoomPersonChance, object change only after activity within EMPTY_ROOM_ACTIVITY_MIN + roll, else skip.
+      const activityWindowMin = emptyRoomActivityMin();
+      // Activity = the same source as recentPerson (live latestPerson / test latestTestPerson): minutes since that occupied frame.
+      const activityMinutesAgo = activityMinutesFromRecent(recentPerson);
+      const emptyRoomForceKeep = new Set(['gen_a', 'gen_b', 'gen_c'].filter((key) => {
+        const k = key as ScenarioSceneKey;
+        return !!scenarioControl?.sceneElements?.[k]?.length || !!scenarioControl?.sceneModes?.[k] || !!resolvedPersonReferences?.[k]?.length;
+      }));
+      const emptyRoomScenes = decideEmptyRoomScenes({
+        captureId, sceneKeys: ['gen_a', 'gen_b', 'gen_c'].slice(0, count),
+        emptyRoomPersonChance: sceneParams.emptyRoomPersonChance ?? DEFAULT_EMPTY_ROOM_PERSON_CHANCE,
+        recentPerson: !!recentPerson, extras: sceneExtras as Record<string, string | undefined>,
+        activityMinutesAgo, activityWindowMin, forceKeep: emptyRoomForceKeep,
+      });
       const formattedHistory = formatHistory(historyItems);
       const historyNote = buildHistoryContextNote({
         observations: formattedHistory.lines,
@@ -1489,6 +1743,8 @@ async function startServer() {
       const described = await describePeople(image, { signal });
       evt.detectDescribeMs = described.elapsedMs;
       const people = described.people;
+      if(resolvedPersonReferences&&!described.ok)throw Error('Original source observation is required before adding reference people');
+      const observedPersonReferences=resolvedPersonReferences?await personReferenceAssets!.observe(resolvedPersonReferences,signal):undefined;
       if (typeof described.obstructed === 'boolean') {
         evt.obstructed = described.obstructed;
         evt.obstructedBy = described.obstructedBy || undefined;
@@ -1523,6 +1779,7 @@ async function startServer() {
         trace: vlmTrace,
         signal,
         allowPerson: !!recentPerson,
+        emptyRoomScenes,
         sceneExtras,
         detector,
         people,
@@ -1540,6 +1797,8 @@ async function startServer() {
           g.obstructed = described.obstructed;
           g.obstructedBy = described.obstructedBy || undefined;
         }
+        // Belongings from the same describe call (also for empty rooms): free spot + objectsVisible (missing_belongings).
+        if (g) g.belongings = described.belongings ?? [];
         evt.guard = { synthesized: !!g?.synthesized, replaced: g?.replaced?.length ?? 0, duplicateRetried: !!g?.duplicateRetried };
         const ex: NonNullable<CaptureEventRow['extras']> = {};
         for (const [key, text] of Object.entries(sceneExtras as Record<string, string | undefined>)) {
@@ -1640,21 +1899,48 @@ async function startServer() {
       // Empty frame + a person seen lately: draw them from behind, same clothes/hair, from a cropped reference.
       const drawFromBehind = vlmTrace.guard?.unoccupied === true && !!recentPerson;
       const recentLook = recentPerson?.entry.people?.[0];
-      if (drawFromBehind) console.log(`[guard] recent person drawn from behind (${recentPerson!.minutesAgo} min ago)`);
-      if (vlmTrace.guard?.unoccupied === true && recentPerson?.entry.imageFile) {
+      // G-25: in an unoccupied frame the recent person appears only in the scenes whose roll chose it (or the operator named a person).
+      const emptyRoomDecision = (index: number) => vlmTrace.guard?.unoccupied === true ? vlmTrace.guard.emptyRoom?.[index] : undefined;
+      const sceneWithoutPerson = (index: number) => unoccupied || (drawFromBehind && emptyRoomDecision(index)?.personDrawn === false);
+      if (drawFromBehind) console.log(`[guard] recent person (${recentPerson!.minutesAgo} min ago) drawn from behind in scenes [${scenarios.map((_, i) => sceneWithoutPerson(i) ? '' : String.fromCharCode(65 + i)).filter(Boolean).join(',')}]`);
+      const testRecentFrame = !useHistory && recentPerson && historyContext.scope.kind === 'test' ? testPersonStore.frame(historyContext.scope.key, recentPerson.entry.captureId) : undefined;
+      if (vlmTrace.guard?.unoccupied === true && (recentPerson?.entry.imageFile || testRecentFrame)) {
         try {
-          const buf = fs.readFileSync(path.join(capturesDir, path.basename(recentPerson.entry.imageFile)));
-          referencePersonImage = `data:image/jpeg;base64,${buf.toString('base64')}`;
+          const buf = testRecentFrame ? decodeImageDataUrl(testRecentFrame).buffer : fs.readFileSync(path.join(capturesDir, path.basename(recentPerson!.entry.imageFile!)));
+          referencePersonImage = testRecentFrame ?? `data:image/jpeg;base64,${buf.toString('base64')}`;
           const size = imageSize(buf);
-          if (size && recentLook?.position) referenceCrop = cropRectFor(recentLook.position, size.width, size.height);
+          // G-13: head + shoulders + torso of that person (full figure), never a tip-dominated head crop.
+          if (size && (recentLook?.position || recentLook?.headBox)) referenceCrop = figureCropFor(recentLook.headBox, recentLook.position ?? '', size.width, size.height);
         } catch {
           referencePersonImage = undefined;
         }
       }
+      // Identity reference must also be attached for tests (history is deliberately disabled there).
+      // The original photo controls composition; its person crop only supplies identity/held-item detail.
+      if (!drawFromBehind && !unoccupied && (people.length > 0 || detector.count && detector.count > 0)) {
+        referencePersonImage = image;
+        const size = imageSize(decodeImageDataUrl(image).buffer);
+        if (size && people.length === 1 && people[0]?.position) referenceCrop = { ...cropRectFor(people[0].position, size.width, size.height), y: 0, height: Math.floor(size.height / 8) * 8 };
+      }
       // Frame with a person (not the recent-person-from-behind case): attach up to REF_FRAMES_MAX recent frames of other orientations.
       let refChoices: RefFrameChoice[] = [];
       let refImages: string[] = [];
-      if (refFramesEnabled() && useHistory && backends.image !== 'gemini' && vlmTrace.guard?.unoccupied !== true && !unoccupied && sceneParams.presence > 0) {
+      let referenceCrops: Array<{x:number;y:number;width:number;height:number}> | undefined;
+      const explicitRefs = Array.isArray(req.body?.identityReferences) ? req.body.identityReferences.filter((x: unknown): x is string => typeof x === 'string' && /^data:image\/(jpeg|png|webp);base64,/.test(x)).slice(0, 2) : [];
+      if (!unoccupied && !drawFromBehind && explicitRefs.length) {
+        // One portrait per original person: two portraits of one person can be copied as two people.
+        referencePersonImage = undefined;
+        referenceCrop = null;
+        refImages = explicitRefs.slice(0, Math.min(2, people.length || detector.count || 1));
+      }
+      if (!explicitRefs.length && !drawFromBehind && !unoccupied && people.length) {
+        const size=imageSize(decodeImageDataUrl(image).buffer);
+        const heads=size ? people.slice(0,2).map(p=>headCropFor(p.headBox,size.width,size.height)) : [];
+        const visibleHeads=heads.filter((h): h is NonNullable<typeof h> => !!h);
+        referencePersonImage=undefined;referenceCrop=null;
+        refImages=visibleHeads.map(()=>image);referenceCrops=visibleHeads;
+      }
+      if (!referencePersonImage && !refImages.length && refFramesEnabled() && useHistory && backends.image !== 'gemini' && vlmTrace.guard?.unoccupied !== true && !unoccupied && sceneParams.presence > 0) {
         try {
           const cur = classifyOrientation({ people, sceneDescription: observation, observation });
           const picked = selectRefFrames(historyAll, { captureId, orientation: cur }, { max: refFramesMax(), windowMin: refFramesWindowMin() });
@@ -1677,6 +1963,10 @@ async function startServer() {
       ensureActive();
       // NOW text (scene recognition of this frame); "" from an old/failed model answer.
       const nowText = nowContentText(scenarios);
+      if(evt.browserBatch?.[0]?.sceneKey==='now'){
+        evt.browserBatch[0].caption=nowText;
+        captureEvents.patch(captureId,{...captureBatchCounts(evt),inputIdentity:evt.inputIdentity,browserBatch:evt.browserBatch,images:evt.images});
+      }
       archive?.setNowText(nowText);
 
       try {
@@ -1689,7 +1979,8 @@ async function startServer() {
               label: s.label,
               predictionText: s.scenario_description,
               distanceSec: sceneDistances[index],
-            })),
+              skipped: !!s.skipped,
+            })).filter((row) => !row.skipped).map(({ skipped: _skipped, ...row }) => row),
             new Date(),
             describeSceneParams(sceneParams),
             nowText
@@ -1701,44 +1992,162 @@ async function startServer() {
       }
 
       const results: Array<{ sceneKey: string; label: string; url: string; predictionText: string }> = [];
-      const qaJobs: Array<{ sceneKey: string; imagePath: string; predictionPrompt: string }> = [];
+      const qaJobs: Array<{ sceneKey: string; imagePath: string; predictionPrompt: string; nowPath?:string; expectedPeople:number;referenceCast?:QaReferenceCastJob }> = [];
 
       const resolvedSceneTime =
         typeof sceneTime === 'string' ? sceneTime : new Date().toISOString();
 
+      let sourcePeopleDetection: Awaited<ReturnType<typeof detectPeople>> | null = scenarioPrepared?.sourceDetection??null;
+      const sourceSize = imageSize(decodeImageDataUrl(image).buffer);
+      if (!sourcePeopleDetection && !unoccupied && !drawFromBehind && backends.image === 'local') {
+        try { sourcePeopleDetection = await detectPeople(image, signal); }
+        catch (error) { signal.throwIfAborted(); console.warn('[region] source detection unavailable', String(error)); }
+      }
+      // Original identity portraits retain their own image roles before added people.
+      const castIdentityImages:SourceCastIdentityImage[]=observedPersonReferences&&Object.values(observedPersonReferences).some(refs=>refs?.length)
+        ? sourceCastIdentityImages(image,people,explicitRefs,sourceSize):[];
+      const sceneCasts=new Map(scenarios.map((scenario,index)=>{const key=('gen_'+String.fromCharCode(97+index)) as ScenarioSceneKey;return [key,buildSceneReferenceInputs({sourceImage:image,sourcePeople:people,sourceOk:described.ok,references:observedPersonReferences?.[key]??[],identityImages:castIdentityImages,predictionPrompt:scenario.prediction_prompt})];}));
+      // G-24: skipped scenes (unoccupied, neither the recent person nor an object change) are not generated. TD/browser get
+      // no capture.saved for them (their panels keep the previous image and caption); expectedImageCount = scenes generated.
+      const skipPlan = sceneSkipPlan(scenarios);
+      // A scene rejected twice by the pre-publish inspection is appended here too (reason "rejected:<defect>").
+      const skippedScenes: Array<{ sceneKey: 'gen_a' | 'gen_b' | 'gen_c'; reason: string }> = [...skipPlan.skippedScenes];
+      let generatedCount = skipPlan.generated.length;
+      if (vlmTrace.guard?.unoccupied === true && vlmTrace.guard.emptyRoom) {
+        evt.emptyRoom = vlmTrace.guard.emptyRoom.map((d) => ({ sceneKey: d.sceneKey, chance: d.emptyRoomPersonChance, roll: d.roll, personDrawn: d.personDrawn, reason: d.reason, objectAllowed: d.objectAllowed, ...(d.skipped !== undefined ? { skipped: d.skipped } : {}), ...(d.skipReason ? { skipReason: d.skipReason } : {}) }));
+        archive?.setEmptyRoom(vlmTrace.guard.emptyRoom);
+      }
+      if (skippedScenes.length) {
+        evt.skippedScenes = skippedScenes;
+        console.log(`[empty-room] ${captureId}: skipped ${skippedScenes.map((s) => `${s.sceneKey}(${s.reason})`).join(', ')}; generating ${generatedCount} scene(s)`);
+      }
+      if (evt.emptyRoom || skippedScenes.length) captureEvents.patch(captureId, { ...(evt.emptyRoom ? { emptyRoom: evt.emptyRoom } : {}), ...(skippedScenes.length ? { skippedScenes } : {}) });
       for (let index = 0; index < scenarios.length; index += 1) {
-        const scenario = scenarios[index];
         const sceneKey = `gen_${String.fromCharCode(97 + index)}`;
+        if (scenarios[index].skipped) {
+          archive?.addSkippedScene(index, { sceneKey, distanceSec: sceneDistances[index], reason: scenarios[index].skipped!, emptyRoom: emptyRoomDecision(index) });
+          continue;
+        }
+        const sceneMode=scenarioControl?.sceneModes?.[sceneKey as ScenarioSceneKey];
+        const assetOnly=sceneMode==='asset_only';
+        const scenario=assetOnly?{...scenarios[index],prediction_prompt:'Preserve original people and place the supplied image element only in its configured target area.',scenario_description:'指定位置に画像要素を合成する。'}:scenarios[index];
+        if(assetOnly)scenarios[index]=scenario;
         const label = `Gen_${String.fromCharCode(97 + index)}`;
 
-        const imageTrace: { editInstruction?: string | null; negativePrompt?: string | null; seed?: number | null; denoise?: number | null; referenceImage?: string } = {};
+        const imageTrace: ImageTrace = {};
         const imageStartedAt = Date.now();
         setStage(`scene${String.fromCharCode(65 + index)}`);
-        const dataUrl = await generateImage({
-          originalImageDataUrl: image,
-          predictionPrompt: scenario.prediction_prompt,
-          seed: undefined,
+        const sceneCast=sceneCasts.get(sceneKey as ScenarioSceneKey);
+        const sceneUnoccupied=sceneWithoutPerson(index);
+        const legacyPeople=scenarioPeoplePolicy(sceneMode,people.length||detector.count||0,sceneUnoccupied,drawFromBehind&&!sceneUnoccupied);
+        const sceneDrawFromBehind=sceneCast?false:legacyPeople.drawFromBehind;
+        const expectedPeople=sceneCast?sceneCast.cast.expectedSceneTotal:legacyPeople.expectedPeople;
+        const sceneReference=sceneCast?undefined:(assetOnly||!unoccupied)&&sceneUnoccupied?undefined:referencePersonImage;
+        const sceneRefs=sceneCast?sceneCast.referenceImages:(assetOnly||!unoccupied)&&sceneUnoccupied?[]:refImages;
+        const sceneReferenceCrops=sceneCast?sceneCast.referenceCrops:referenceCrops;
+        const sceneInput=scenarioPrepared?.composition.scenes[sceneKey as ScenarioSceneKey];
+        let sceneInputPath:string|undefined;
+        if(sceneInput){
+          const decoded=decodeImageDataUrl(sceneInput.imageDataUrl);
+          sceneInputPath=archive?.saveScenarioInput(index,decoded.buffer,decoded.extension,{imageSha256:sceneInput.imageSha256,targets:sceneInput.targets,protectedCoreMaskSha256:sceneInput.protectedCoreMaskSha256,protectedCorePixels:sceneInput.protectedCorePixels});
+          if(sceneInput.protectedCoreMaskDataUrl)archive?.saveScenarioCoreMask(index,decodeImageDataUrl(sceneInput.protectedCoreMaskDataUrl).buffer);
+          if(!sceneInputPath)throw new Error('Scenario input could not be archived');
+        }
+        const personRegion = peopleEditRegion(sourcePeopleDetection, expectedPeople, sourceSize, scenario.prediction_prompt, people.map(p => p.headBox));
+        if(assetOnly&&expectedPeople>0&&!personRegion?.sourceEvidence)throw new ScenarioControlValidationError('image','asset_only cannot safely protect incompletely detected source people');
+        const editRegion = scenarioPrepared?mergeScenarioEditRegion(personRegion,sceneInput?.editRectangles??[],scenarioPrepared.composition,expectedPeople,sceneMode):personRegion;
+        const selection=selectSceneImageEngine(localImageEngine,[people,peopleEditRegion(sourcePeopleDetection,expectedPeople,sourceSize,'',people.map(p=>p.headBox)),sourceSize,scenario.prediction_prompt],(sceneCast?'explicit reference cast requires full-frame synthesis':requestFullFrameReason)??(scenarioNeedsFullFrame(sceneMode,sceneInput)||sceneDrawFromBehind||expectedPeople!==people.length?'full-frame scene image mode/count':undefined));
+        const turboContext=selection.context;
+        let countSourceActors=turboContext?.sourceActors;
+        if(!countSourceActors&&!sceneCast&&selection.engine==='qwen21-turbo'&&!assetOnly&&!sceneDrawFromBehind&&expectedPeople===1&&people.length===1){
+          try{countSourceActors=productionTurboSourceContext(people,personRegion,sourceSize,scenario.prediction_prompt).sourceActors;}catch{}
+        }
+        const sceneImageModel=backends.image==='gemini'?GEMINI_IMAGE_MODEL:isTurboEngine(selection.engine)?imageModelUsed:`qwen-image-edit (${process.env.COMFYUI_GGUF==='true'?comfyConfig.models.ggufUnet:comfyConfig.models.unet})`;
+
+        const generated = await generateUniquePeople({
+          generate: async (attempt, correction) => generateImage({
+          originalImageDataUrl: sceneInput?.imageDataUrl??image,
+          scenarioElementInstruction:scenarioElementInstruction(scenarioControl,sceneKey as ScenarioSceneKey),
+          assetOnlyInstruction:assetOnly?assetOnlyEditInstruction():undefined,
+          assetOnlyFrame:assetOnly?{rawImageDataUrl:image,protectedCoreMaskDataUrl:sceneInput?.protectedCoreMaskDataUrl??'',rectangles:sceneInput?.editRectangles??[]}:undefined,
+          predictionPrompt: scenario.prediction_prompt + (correction ? " " + correction : ""),
+          seed: attempt === 0 && isTest && Number.isSafeInteger(req.body?.seeds?.[index]) && req.body.seeds[index] >= 0 ? req.body.seeds[index] : undefined,
           filenamePrefix: `SpecMem/${sceneKey}`,
           captureId,
           trace: imageTrace,
-          faceImageDataUrl: referencePersonImage,
+          faceImageDataUrl: sceneReference,
           faceCrop: referenceCrop ?? undefined,
-          behindView: drawFromBehind ? { clothes: recentLook?.clothes, hair: recentLook?.hair, position: recentLook?.position } : undefined,
+          behindView: sceneDrawFromBehind ? { clothes: recentLook?.clothes, hair: recentLook?.hair, position: recentLook?.position, headBox: recentLook?.headBox, belongings: vlmTrace.guard?.belongings, scene: vlmTrace.guard?.scene ?? scenarios[0]?.scene_now, objects: sceneBelongings(vlmTrace.guard?.scene ?? scenarios[0]?.scene_now) } : undefined,
           obstructed: described.obstructed === true,
           obstructedBy: described.obstructedBy || undefined,
-          referencePerson: !!referencePersonImage,
-          referenceImages: referencePersonImage ? undefined : refImages,
+          referencePerson: sceneDrawFromBehind && !!sceneReference,
+          people,
+          personCount: expectedPeople,
+          compactPeople: true,
+          referenceImages: sceneDrawFromBehind ? undefined : sceneRefs,
+          referenceCrops:sceneReferenceCrops,
+          referenceCast:sceneCast?{sourcePeople:people,references:sceneCast.references,sourceIdentityImages:sceneCast.sourceIdentityImages}:undefined,
+          editRegion,
           foregroundObject: scenario.foreground_object,
-          presence: unoccupied ? 0 : sceneParams.presence,
+          presence: sceneUnoccupied ? 0 : sceneParams.presence,
           tone: sceneParams.tone,
           distanceSec: sceneDistances[index],
           // Each scene's own signed offset decides the direction and the clock digits.
           clock: clockForSignedDistance(sceneDistances[index], resolvedSceneTime, scenario.clock_visible === true),
           signal,
           imageBackend: backends.image,
+          localImageEngine:selection.engine,turboContext,
+          }),
+          inspect: async candidate => {
+            // missing_belongings: objects the source scene lists on its furniture must stay visible (same inspection call).
+            const belongings = inspectionBelongings(vlmTrace.guard?.scene ?? scenarios[0]?.scene_now, { action: scenario.prediction_prompt, people, belongings: vlmTrace.guard?.belongings });
+            const detection = await detectPeople(candidate, signal);
+            return inspectCountedImage({detection,expectedPeople,sourceActors:countSourceActors,
+              allowPartOverlap:!sceneCast&&selection.engine==='qwen21-turbo'&&!assetOnly&&!sceneDrawFromBehind&&expectedPeople===1&&people.length===1,
+              inspect:()=>sceneCast?inspectAndCaptionWithReferences(image,candidate,people,sceneCast.references,sceneDistances[index],signal,sceneCast.sourceIdentityImages,belongings):inspectAndCaption(sceneDrawFromBehind && sceneReference ? sceneReference : image, candidate, expectedPeople, sceneDistances[index], people, signal, image, belongings)});
+          },
+          rejected: (candidate, verdict, attempt) => {
+            const rejectedDir = path.join(archiveRootDir(), 'rejected', captureId.replace(/[^a-zA-Z0-9_-]/g, '_'));
+            fs.mkdirSync(rejectedDir, { recursive: true });
+            const rejectedFile = `${sceneKey}-attempt${attempt}-${Date.now()}.png`;
+            fs.writeFileSync(path.join(rejectedDir, rejectedFile), decodeImageDataUrl(candidate).buffer);
+            fs.appendFileSync(path.join(rejectedDir, 'integrity.jsonl'), JSON.stringify({ time: new Date().toISOString(), sceneKey, attempt, verdict, seed: imageTrace.seed, prompt: imageTrace.editInstruction }) + '\n');
+            appendQaRow(path.join(process.cwd(), 'logs', 'qa-local.jsonl'), {
+              time: new Date().toISOString(), captureId, sceneKey: `${sceneKey}.rejected${attempt}`, file: rejectedFile,
+              ok: verdict.ok === null ? null : false, score: verdict.ok === null ? null : 0,
+              defects: verdict.ok === false ? [{ type: inspectionDefectType(verdict.defect), where: sceneKey, note: verdict.reason + ': ' + JSON.stringify(verdict.outputToSource) }] : [],
+              model: process.env.VLM_MODEL || 'local', elapsedMs: 0, rulebookVersion: rbVersion,
+              sceneCount: count,
+              ...(isTest ? { test: true } : {}), ...(verdict.ok === null ? { error: verdict.reason } : {}),
+            });
+            console.warn(`[integrity] rejected ${captureId} ${sceneKey} attempt=${attempt}: ${verdict.reason}`);
+          },
+          signal,
+          // Unoccupied captures / behind-view / person-free scenes get a second attempt with a correction naming the defect
+          // (2026-10-19 L003: one missing_belongings rejection used to fail the whole capture). Occupied scenes unchanged.
+          maxAttempts:isTest&&req.body?.automaticImageRetries===false?1:(unoccupied||sceneUnoccupied||sceneDrawFromBehind)?2:isTurboEngine(selection.engine)?1:2,
+          expectedPeople,
+          onExhausted:'skip',
         });
+        if ('defect' in generated) {
+          // Never publish a rejected image, but do not fail the capture: this scene keeps its previous image on the displays.
+          const reason = `rejected:${generated.defect}`;
+          console.warn(`[integrity] scene ${sceneKey} skipped after ${generated.attempts} rejection${generated.attempts===1?'':'s'}: ${generated.defect} (${captureId})`);
+          skippedScenes.push({ sceneKey: sceneKey as 'gen_a' | 'gen_b' | 'gen_c', reason });
+          generatedCount -= 1;
+          evt.skippedScenes = skippedScenes;
+          captureEvents.patch(captureId, { skippedScenes });
+          archive?.addSkippedScene(index, { sceneKey, distanceSec: sceneDistances[index], reason, emptyRoom: emptyRoomDecision(index) });
+          continue;
+        }
+        const dataUrl = generated.image;
+        const executedImageModel=imageTrace.assetOnlyExecution?.modelExecuted===false?'cpu asset composition (no image model executed)':sceneImageModel;
         ensureActive();
 
+        const plannedDescription = scenario.scenario_description;
+        // User specification: subtitles show the generation instruction, not a post-generation observation.
+        scenario.scenario_description = plannedDescription;
+        ensureActive();
         const { buffer, extension } = decodeImageDataUrl(dataUrl);
         const savedImageAsset = saveImageAsset(
           buildSavedFilename(sceneKey.charAt(0).toUpperCase() + sceneKey.slice(1), extension),
@@ -1758,24 +2167,38 @@ async function startServer() {
             label: scenario.label,
             predictionPrompt: scenario.prediction_prompt,
             scenarioDescription: scenario.scenario_description,
+            plannedDescription,
+            displayDescriptionSource: "generation-instruction",
             imagePromptFull: imageTrace.editInstruction ?? null,
             sceneExtra: (sceneExtras as Record<string, string | undefined>)[sceneKey] ?? null,
             sceneExtraReflected: vlmTrace.guard?.extras?.[sceneKey]?.reflected ?? null,
-            behindView: drawFromBehind,
-            scaleRule: drawFromBehind,
-            referenceCrop: drawFromBehind ? referenceCrop : null,
+            behindView: sceneDrawFromBehind,
+            scaleRule: sceneDrawFromBehind,
+            emptyRoom: emptyRoomDecision(index),
+            referenceCrop,
+            peopleIntegrity: { ...generated.verdict, attempts: generated.attempts },
+            sceneReferenceCast:sceneCast?.metadata,
+            peopleEditRegion: editRegion ? {width:editRegion.width,height:editRegion.height,rectangles:editRegion.rectangles.map(({x,y,width,height})=>({x,y,width,height})),sourceEvidence:editRegion.sourceEvidence} : null,
+            identityReferenceCount: sceneCast?castIdentityImages.length:(sceneReference ? 1 : 0) + sceneRefs.slice(0, sceneReference ? 1 : 2).length,
+            identityReferenceCrops: sceneCast?sceneReferenceCrops?.slice(0,castIdentityImages.length)??[]:assetOnly&&unoccupied?[]:sceneReferenceCrops ?? [],
+            identityReferenceMissing: sceneCast?Math.max(0,people.length-castIdentityImages.length):Math.max(0, Math.min(2, expectedPeople) - ((sceneReference ? 1 : 0) + sceneRefs.slice(0, sceneReference ? 1 : 2).length)),
+            sourcePeopleDetection,
+            sourceFrameRestoration:imageTrace.sourceFrameRestoration,
+            assetOnlyExecution:imageTrace.assetOnlyExecution,
+            turboCandidate:imageTrace.turboCandidate,
+            localImageEngine:selection.engine,
+            turboFullFrameReason:selection.fullFrameReason,
+            scenarioInput:sceneInput?{imageSha256:sceneInput.imageSha256,file:sceneInputPath?path.basename(sceneInputPath):null,mode:sceneMode??'legacy',protectedCoreMaskSha256:sceneInput.protectedCoreMaskSha256,protectedCorePixels:sceneInput.protectedCorePixels,editRectangles:editRegion?.rectangles??null,targets:sceneInput.targets,rawNowSha256:scenarioPrepared?.composition.sourceSha256}:undefined,
             negativePrompt: imageTrace.negativePrompt ?? null,
             seed: imageTrace.seed ?? null,
             denoise: imageTrace.denoise ?? null,
             elapsedMs: Date.now() - imageStartedAt,
             imageBackend: backends.image,
-            imageModel: imageModelUsed,
+            imageModel: executedImageModel,
             referenceImage:
               backends.image === 'gemini'
                 ? imageTrace.referenceImage ?? 'none'
-                : referencePersonImage
-                  ? 'attached'
-                  : 'none',
+                : imageTrace.referenceImage ?? 'none',
             refFrames: refChoices.length > 0 && !referencePersonImage ? refChoices : undefined,
           },
           buffer,
@@ -1788,7 +2211,8 @@ async function startServer() {
           captureId,
           sceneKey,
           sceneIndex: index,
-          expectedImageCount: count,
+          expectedImageCount: generatedCount,
+          ...(skippedScenes.length ? { skippedScenes: skippedScenes.map((x) => x.sceneKey) } : {}),
           label,
           filename: savedImageAsset.filename,
           absolutePath: savedImageAsset.absolutePath,
@@ -1808,7 +2232,9 @@ async function startServer() {
           size: savedImageAsset.size,
           sceneText: scenarioContentText(scenario),
           nowText,
-          historySummary: summaryWithObstruction(),
+          historySummary: useHistory?summaryWithObstruction():testHistory.snapshot(historyContext.scope).summary,
+          ...historyContext.echo,
+          scenarioControl:scenarioControlEcho(scenarioControl),
           obstructed: typeof evt.obstructed === 'boolean' ? evt.obstructed : null,
           obstructedBy: evt.obstructedBy ?? null,
           extrasStatus: vlmTrace.guard?.extrasStatus && Object.keys(vlmTrace.guard.extrasStatus).length > 0 ? vlmTrace.guard.extrasStatus : undefined,
@@ -1817,7 +2243,7 @@ async function startServer() {
           vlmBackend: backends.vlm,
           vlmModel: vlmModelUsed,
           imageBackend: backends.image,
-          imageModel: imageModelUsed,
+          imageModel: executedImageModel,
           rulebookVersion: rbVersion,
         };
 
@@ -1831,13 +2257,21 @@ async function startServer() {
         }
         console.log(`generate: saved ${sceneKey} -> ${savedImageAsset.absolutePath}`);
         results.push({ sceneKey, label, url: savedImageAsset.url, predictionText: scenario.scenario_description });
-        qaJobs.push({ sceneKey, imagePath: savedImageAsset.absolutePath, predictionPrompt: scenario.prediction_prompt });
+        if(evt.browserFollow){
+          evt.browserBatch??=[];
+          const scope=evt.browserFollow.scope,sourceRecordedAtMs=evt.browserFollow.sourceRecordedAtMs;
+          if(!evt.browserBatch.length&&sourceImageAsset?.url)evt.browserBatch.push({id:captureId+':now',captureId,sceneKey:'now',scope,provenance:'actual',distanceSecSigned:null,imageUrl:evtImageUrl(sourceImageAsset.url)!,recordedAtMs:sourceRecordedAtMs,sourceRecordedAtMs,generatedAtMs:null,targetAtMs:null,caption:nowText});
+          const sceneAt=Date.parse(resolvedSceneTime);
+          evt.browserBatch.push({id:captureId+':'+sceneKey,captureId,sceneKey,scope,provenance:'generated',distanceSecSigned:Number.isFinite(sceneDistances[index])?sceneDistances[index]:null,imageUrl:evtImageUrl(savedImageAsset.url)!,recordedAtMs:null,sourceRecordedAtMs,generatedAtMs:Date.now(),targetAtMs:Number.isFinite(sceneAt)?sceneAt+sceneDistances[index]*1000:null,caption:scenarioContentText(scenario)});
+          captureEvents.patch(captureId,{...captureBatchCounts(evt),inputIdentity:evt.inputIdentity,images:evt.images,browserFollow:evt.browserFollow,browserBatch:evt.browserBatch});
+        }
+        qaJobs.push({ sceneKey, imagePath: savedImageAsset.absolutePath, predictionPrompt: scenario.prediction_prompt,nowPath:sceneInputPath,expectedPeople:sceneCast?people.length:expectedPeople,referenceCast:sceneCast?{sourcePeople:people,references:sceneCast.references,distanceSec:sceneDistances[index],sourceIdentityImages:sceneCast.sourceIdentityImages}:undefined });
       }
 
       ensureActive();
       cm.complete(captureId);
       await Promise.race([summaryPromise, new Promise((r) => setTimeout(r, 500))]);
-      if (!mobileLane) archive?.setHistorySummary(composeSummary(venueSummary));
+      if (!mobileLane) archive?.setHistorySummary(useHistory?composeSummary(venueSummary):testHistory.snapshot(historyContext.scope).summary);
       archive?.finish('completed');
       captureEvents.finish({ ...evt, result: 'completed', errorStage: null, errorMessage: null });
       // QA of the three images runs later, between captures (never while something generates).
@@ -1846,13 +2280,16 @@ async function startServer() {
           qaService.enqueueScene({
             captureId,
             sceneKey: job.sceneKey,
-            nowPath: sourceImageAsset.absolutePath,
+            nowPath: job.nowPath??sourceImageAsset.absolutePath,
+            identityNowPath:sourceImageAsset.absolutePath,
             imagePath: job.imagePath,
             predictionPrompt: job.predictionPrompt,
             archiveDir: archive?.dir ?? null,
             rulebookVersion: rbVersion,
             sceneCount: qaJobs.length,
             test: isTest,
+            expectedPeople: job.expectedPeople,
+            referenceCast:job.referenceCast,
           });
         }
       }
@@ -1861,7 +2298,14 @@ async function startServer() {
           captureId,
           observation: observation || nowText,
           savedAt: new Date().toISOString(),
-          scenarios: results.map((r) => ({ sceneKey: r.sceneKey, label: r.label, text: r.predictionText })),
+          // G-24: a skipped scene keeps the previous prediction text (its display keeps the previous image/caption too).
+          scenarios: scenarios.flatMap((_, index) => {
+            const key = `gen_${String.fromCharCode(97 + index)}`;
+            const r = results.find((x) => x.sceneKey === key);
+            if (r) return [{ sceneKey: r.sceneKey, label: r.label, text: r.predictionText }];
+            const previous = latestPredictionStore?.scenarios.find((x) => x.sceneKey === key);
+            return previous ? [previous] : [];
+          }),
         };
         if (!isTest && !mobileLane) {
           latestPredictionStore = latest;
@@ -1880,7 +2324,10 @@ async function startServer() {
         count: results.length,
         scenarios,
         images: results,
+        ...(skippedScenes.length ? { skippedScenes } : {}),
         sceneParams,
+        ...historyContext.echo,
+        scenarioControl:scenarioControlEcho(scenarioControl),
       });
     } catch (error: any) {
       if (isAbortError(error) || !cm.isActive(captureId)) {
@@ -1889,14 +2336,42 @@ async function startServer() {
         console.log(`generate: capture ${captureId} cancelled (${cm.stateOf(captureId)})`);
         return sendCancelled(res, captureId, cm);
       }
+      if(error instanceof TurboCandidateGeometryError&&!silent)sendToTouchDesigner({type:'comfy.alert',captureId,code:error.code,reason:error.reason,test:isTest,alert:{level:'warning',message:'今回の画像は表示できません（人物保護領域との重なり／対応不明）。前回の画像を表示中。'}},'turbo.geometry.unknown');
       console.error('generate pipeline failed:', error);
       archive?.fail(error, 'failed');
       captureEvents.finish({ ...evt, result: 'failed', errorStage: evtStage, errorMessage: String(error?.message ?? error) });
       cm.fail(captureId, error);
-      res.status(502).json({ error: error?.message || 'generation pipeline failed' });
+      res.status(error instanceof ScenarioControlValidationError || /ASSET_ONLY_(?:OPAQUE_CROP_REQUIRED|TARGET_OUTSIDE_MODEL_CROP)/.test(String(error?.message))?400:502).json({ error: error?.message || 'generation pipeline failed' });
     }
   };
   app.post("/api/generate", (req, res) => handleGenerate(req, res, "venue"));
+  if(nativeOperatorMode){
+    nativeOperator=await createNativeOperator({
+      directory:process.env.OPERATOR_CONTROL_DIRECTORY||path.join(path.dirname(path.resolve(archiveRootDir())),'operator-control'),
+      python:process.env.PEOPLE_DETECTOR_PYTHON||path.join(process.env.USERPROFILE||'','Documents/ComfyUI/.venv/Scripts/python.exe'),
+      preflightPersonReferences:async body=>{await preflightScenePersonReferences(body);},
+      isBusy:()=>captureManager.current!==null,capture:()=>captureManager.snapshot(),cancel:()=>captureManager.cancel(null,'requested'),
+      readScenes:mode=>browserOutputCurrent(captureEvents.readAll(),Date.now(),{instructionLookup,updateMode:mode}),
+      readFadeMode:id=>browserOutputs?.channelFadeMode(id)??Promise.resolve('original'),
+      readFadeTiming:id=>browserOutputs?.channelFadeTiming(id)??Promise.resolve(undefined),
+      readFaceBlur:id=>browserOutputs?.channelFaceBlur(id)??Promise.resolve(undefined),
+      readCaptions:id=>browserOutputs?.channelCaptions(id)??Promise.resolve(undefined),
+      presentOutput:presentBrowserFaces,
+      outputMapping:browserOutputs?createOperatorScenarioOutputs(browserOutputs):undefined,
+      readOutputIds:browserOutputs?async()=>(await browserOutputs.configuration()).outputs.map((o:any)=>o.id):undefined,
+      checkPersonReferences:async ids=>{if(!personReferenceAssets)throw Error('Private person reference service is unavailable');return (await personReferenceAssets.metadata(ids)).missingIds;},
+      readCost:()=>costTracker.update(),
+      latestOutcome:()=>captureEvents.readAll().filter(row=>row.browserFollow&&['completed','failed','cancelled'].includes(row.result)).sort((a,b)=>Date.parse(b.startedAt)-Date.parse(a.startedAt))[0],
+      recordFrame:body=>new Promise((resolve,reject)=>{let status=200;const response:any={status:(value:number)=>{status=value;return response;},json:(value:any)=>{if(status>=400)reject(Error(value.error??'record failed'));else resolve(value);return response;}};handleRecordFrame({body},response);}),
+      invokeGenerate:(body,onAccepted)=>new Promise((resolve,reject)=>{
+        let status=200;const response:any=new EventEmitter();
+        response.writableEnded=false;response.headersSent=false;response.destroyed=false;
+        response.status=(value:number)=>{status=value;return response;};
+        response.json=(value:unknown)=>{response.writableEnded=true;response.headersSent=true;resolve({status,body:value});return response;};
+        void handleGenerate({body,socket:{remoteAddress:'127.0.0.1'}},response,'venue',onAccepted,()=>nativeOperator?.assertCaptureAllowed(String(body.captureId))).catch(reject);
+      })
+    });
+  }
 
   // ---- Phone page (/m): see venue results, shoot with the phone; phone jobs run one at a time, only while the venue lane is idle.
   const mobileQueue = new MobileQueue<MobilePayload>({
@@ -1975,7 +2450,10 @@ async function startServer() {
         middlewareMode: true,
         hmr: {
           port: HMR_PORT
-        }
+        },
+        // 2026-10-20: Vite's chokidar watcher crawled captures/ (24k files, 21 GB) and logs/ on every new file,
+        // blocking the event loop for seconds (static images took 4-12 s; history thumbnails stayed black).
+        watch: { ignored: ['**/captures/**', '**/logs/**', '**/.local/**', '**/rulebook/**', '**/scripts/**', '**/docs/**', '**/touchdesigner/**', '**/tools/**'] }
       },
       appType: 'spa',
     });
@@ -2023,8 +2501,15 @@ async function startServer() {
     touchDesignerControlUdpServer.bind(touchDesignerControlUdpPort, touchDesignerControlUdpHost);
   }
 
+  // Public output gate (127.0.0.1:3443, for Tailscale Funnel). Inert without PUBLIC_OUTPUT_PASSWORD/PUBLIC_COOKIE_SECRET.
+  void import('./server/publicGate/index').then(m => m.startPublicGate()).catch(() => console.log('public gate disabled (load failed)'));
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`Server running on http://localhost:${PORT}`);
+    // Load the CPU-only detector before the first generated image needs it.
+    void detectPeople('data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGNgYGAAAAAEAAH2FzhVAAAAAElFTkSuQmCC')
+      .then(() => console.log('[integrity] CPU detector warm'))
+      .catch(error => console.error('[integrity] CPU detector warmup failed', String(error)));
+
     console.log(`Images will be saved to: ${capturesDir}`);
     console.log('TouchDesigner will receive the newest timestamped file path for each scene.');
     console.log(`Public base URL for image links: ${publicBaseUrl} (PUBLIC_BASE_URL)`);

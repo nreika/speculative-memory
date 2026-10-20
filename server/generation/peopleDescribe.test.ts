@@ -1,12 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { parsePeople, groundTruthNote, synthesizeScenarios, describePeople } from './peopleDescribe';
+import { parsePeople, groundTruthNote, synthesizeScenarios, describePeople, DESCRIBE_PROMPT } from './peopleDescribe';
+import { headCropFor } from './referenceCrop';
 import { planScenariosLocal } from './vlmClient';
 import { buildSceneExtrasNote } from './sceneExtras';
 import { hasBigArmMotion, modestMotion } from './peopleDescribe';
 import { behindViewSentence } from './orchestrator';
 import { buildNegativePrompt } from './comfyClient';
 import { isWeakScenario, synthesizeEmptyRoom } from './peopleDescribe';
+import { compactPeopleInstruction } from './compactPeople';
 
 const PEOPLE = [{ position: 'left front', pose: 'seated in a mesh chair', clothes: 'grey striped shirt', facing: 'away' }];
 
@@ -19,14 +21,150 @@ test('parsePeople / groundTruthNote', () => {
   assert.deepEqual(parsePeople('nope'), []);
 });
 
-test('describePeople: image call with format json and num_predict 512', async () => {
+test('describePeople: one image call keeps head bounds and requires per-item support and attachment evidence', async () => {
   let body: any;
+  let calls = 0;
   const r = await describePeople('data:image/jpeg;base64,dGVzdA==', {
-    fetchImpl: (async (_u: any, init: any) => { body = JSON.parse(init.body); return new Response(JSON.stringify({ response: JSON.stringify({ people: PEOPLE }) })); }) as any,
+    fetchImpl: (async (_u: any, init: any) => { calls++; body = JSON.parse(init.body); return new Response(JSON.stringify({ response: JSON.stringify({ people: PEOPLE }) })); }) as any,
   });
-  assert.equal(body.format, 'json');
-  assert.equal(body.options.num_predict, 512);
+  assert.equal(calls, 1);
+  const person = body.format.properties.people.items;
+  assert.ok(person.required.includes('head_box'));
+  assert.ok(person.required.includes('holding') && person.required.includes('worn') && person.required.includes('hair'));
+  assert.deepEqual(person.properties.holding.items.required,['item','hand','evidence']);
+  assert.deepEqual(person.properties.worn.items.required,['item','attachment']);
+  const head = person.properties.head_box.anyOf;
+  assert.deepEqual(head, [{type:'array',items:{type:'number',minimum:0,maximum:1000},minItems:4,maxItems:4},{type:'null'}]);
+  assert.deepEqual(body.format.required, ['people','obstructed','obstructedBy','belongings']);
+  assert.deepEqual(body.images, ['dGVzdA==']);
+  assert.equal(body.think, false);
+  assert.equal(body.options.num_predict, 768);
   assert.equal(r.people.length, 1);
+  assert.equal(r.people[0].headBox, null);
+});
+
+test('the describe prompt has a valid complete JSON example, with position guidance outside it', () => {
+  const example = DESCRIBE_PROMPT.match(/Example: (\{.*?\})\. /)?.[1];
+  assert.ok(example);
+  const value = JSON.parse(example);
+  assert.deepEqual(value.people[0].head_box, [20,100,220,400]);
+  assert.equal(value.people[0].facing, 'away');
+  assert.equal(value.obstructed, false);
+  assert.equal(value.obstructedBy, '');
+  assert.deepEqual(value.people[0].holding,[]);
+  assert.deepEqual(value.people[0].worn,[]);
+  assert.match(DESCRIBE_PROMPT, /Visible hair from behind or a partly cropped head still needs a box/);
+});
+
+test('two visible heads produce individual usable references, including back-facing hair and an edge crop', async () => {
+  const observed = [
+    {...PEOPLE[0],hair:'straight black shoulder-length hair',head_box:[0,500,220,740]},
+    {position:'right background',pose:'seated behind monitor',clothes:'dark shirt',hair:'short black hair',facing:'left',holding:'',worn:'',head_box:[850,570,1000,710]},
+  ];
+  let calls = 0;
+  const r = await describePeople('data:image/jpeg;base64,dGVzdA==', {
+    fetchImpl: (async () => {calls++;return Response.json({response:JSON.stringify({people:observed,obstructed:false,obstructedBy:''}),done_reason:'stop'});}) as any,
+  });
+  assert.equal(calls, 1);
+  assert.equal(r.ok, true);
+  assert.equal(r.people.length, 2);
+  assert.deepEqual(r.people.map(p=>p.headBox), observed.map(p=>p.head_box));
+  const crops = r.people.map(p=>headCropFor(p.headBox,1280,720));
+  assert.ok(crops.every(Boolean));
+  assert.equal(crops[0]!.x, 0);
+  assert.ok(crops[1]!.x+crops[1]!.width<=1280);
+  assert.equal(r.people[0].facing, 'away');
+  assert.equal(r.people[1].position, 'right background');
+  assert.equal(r.obstructed, false);
+});
+
+test('null, missing or invalid head bounds stay explicitly absent without dropping or fabricating the person', () => {
+  for (const head_box of [null, undefined, [100,300,90,400], [0,0,1001,300], [0,0,NaN,300], [0,0,10,10], [10,20,30]]) {
+    const people = parsePeople(JSON.stringify({people:[{...PEOPLE[0],hair:'visible black hair',holding:[{item:'tablet',hand:'left',evidence:'hand_supported'}],worn:[{item:'wrist strap',attachment:'body_attached'}],head_box}]}));
+    assert.equal(people.length, 1);
+    assert.equal(people[0].headBox, null);
+    assert.equal(headCropFor(people[0].headBox,1280,720), undefined);
+    assert.equal(people[0].hair, 'visible black hair');
+    assert.equal(people[0].holding, 'tablet in left hand');
+    assert.equal(people[0].worn, 'wrist strap');
+  }
+});
+
+test('keyboard/laptop contact and a furniture-supported bag never become held or worn preservation instructions', () => {
+  const holding = [{item:'laptop',hand:'left',evidence:'surface_contact'}];
+  const worn = [{item:'black backpack',attachment:'furniture_supported'}];
+  const people = parsePeople(JSON.stringify({people:[{...PEOPLE[0],holding,worn,head_box:[100,200,300,400]}]}));
+  assert.equal(people.length,1);
+  assert.equal(people[0].holding,'');
+  assert.equal(people[0].worn,'');
+  assert.deepEqual(people[0].holdingFacts,holding);
+  assert.deepEqual(people[0].wornFacts,worn);
+  assert.deepEqual(people[0].headBox,[100,200,300,400]);
+  const prompt=compactPeopleInstruction(people,1,'The person raises one free hand.');
+  assert.doesNotMatch(prompt,/Keep laptop with|Keep black backpack attached|continuously keeps laptop/);
+});
+
+test('real hand-supported items and body-attached accessories survive even alongside rejected candidates', () => {
+  const people=parsePeople(JSON.stringify({people:[{...PEOPLE[0],
+    holding:[{item:'white cup',hand:'right',evidence:'hand_supported'},{item:'keyboard',hand:'left',evidence:'surface_contact'}],
+    worn:[{item:'wrist case',attachment:'body_attached'},{item:'backpack',attachment:'furniture_supported'},{item:'bag',attachment:'nearby_only'}],
+  }]}));
+  assert.equal(people[0].holding,'white cup in right hand');
+  assert.equal(people[0].worn,'wrist case');
+  assert.equal(people[0].holdingFacts?.length,2);
+  assert.equal(people[0].wornFacts?.length,3);
+});
+
+test('support and attachment decisions depend on observed evidence rather than a forbidden object-name list', () => {
+  const people=parsePeople(JSON.stringify({people:[{...PEOPLE[0],
+    holding:[{item:'laptop',hand:'both',evidence:'hand_supported'}],
+    worn:[{item:'black backpack',attachment:'body_attached'}],
+  }]}));
+  assert.equal(people[0].holding,'laptop in both hands');
+  assert.equal(people[0].worn,'black backpack');
+});
+
+test('uncertain, malformed and legacy unverified assertions do not erase a person or authorize ownership', () => {
+  for(const [holding,worn] of [
+    ['laptop','black backpack'],
+    [[{item:'laptop',hand:'left',evidence:'unclear'}],[{item:'bag',attachment:'unclear'}]],
+    [[{item:'laptop',hand:'left'}],[{item:'bag'}]],
+    [[{item:'laptop',hand:'unknown',evidence:'hand_supported'}],[{item:'bag',attachment:'probably_worn'}]],
+  ]) {
+    const people=parsePeople(JSON.stringify({people:[{...PEOPLE[0],holding,worn}]}));
+    assert.equal(people.length,1);
+    assert.equal(people[0].holding,'');
+    assert.equal(people[0].worn,'');
+  }
+});
+
+test('one describe request preserves multiple people, head references and obstruction while filtering uncertain belongings',async()=>{
+  let calls=0;let body:any;
+  const observed=[
+    {...PEOPLE[0],holding:[{item:'cup',hand:'left',evidence:'hand_supported'}],worn:[],head_box:[0,100,200,300]},
+    {position:'right background',pose:'seated',clothes:'plain top',facing:'away',hair:'dark hair',holding:[{item:'laptop',hand:'both',evidence:'surface_contact'}],worn:[{item:'bag',attachment:'furniture_supported'}],head_box:[700,100,850,300]},
+  ];
+  const result=await describePeople('data:image/jpeg;base64,dGVzdA==',{fetchImpl:(async(_u:any,init:any)=>{calls++;body=JSON.parse(init.body);return Response.json({response:JSON.stringify({people:observed,obstructed:true,obstructedBy:'chair back'}),done_reason:'stop'});}) as any});
+  assert.equal(calls,1);
+  assert.equal(body.options.num_predict,768);
+  assert.equal(result.ok,true);
+  assert.equal(result.people.length,2);
+  assert.deepEqual(result.people.map(p=>p.headBox),observed.map(p=>p.head_box));
+  assert.equal(result.people[0].holding,'cup in left hand');
+  assert.equal(result.people[1].holding,'');
+  assert.equal(result.people[1].worn,'');
+  assert.equal(result.obstructed,true);
+  assert.equal(result.obstructedBy,'chair back');
+});
+
+test('a person visible only by hair or head bounds is retained even when the body fields are unknown', () => {
+  const people = parsePeople(JSON.stringify({people:[
+    {position:'',pose:'',clothes:'',hair:'cropped black hair',holding:'',worn:'',facing:'',head_box:null},
+    {position:'',pose:'',clothes:'',hair:'',holding:'',worn:'',facing:'',head_box:[0,0,100,100]},
+  ]}));
+  assert.equal(people.length, 2);
+  assert.equal(people[0].headBox, null);
+  assert.deepEqual(people[1].headBox, [0,0,100,100]);
 });
 
 test('synthesizeScenarios: extra wins; else motion by distance', () => {
@@ -287,11 +425,11 @@ test('extras end to end: dictionary action keeps the extra as the main event (-6
   assert.equal(trace.guard.extras.gen_b.english, 'The person in the teal shirt stands up from the chair.');
 });
 
-test('extras: unknown instruction -> pure text translation call (num_predict 32), never the image', async (t) => {
+test('extras: unknown instruction -> pure text translation call (num_predict 64), never the image', async (t) => {
   let tbody: any = null;
   t.mock.method(globalThis, 'fetch', async (_i: unknown, init?: RequestInit) => {
     const body = JSON.parse(String(init?.body));
-    if (/Translate this Japanese instruction into a short English verb phrase/.test(body.prompt)) { tbody = body; return new Response(JSON.stringify({ response: '{"action":"does a little dance"}' })); }
+    if (/Translate the COMPLETE Japanese instruction/.test(body.prompt)) { tbody = body; return new Response(JSON.stringify({ response: '{"action":"does a little dance"}' })); }
     if (body.images) {
       const item = (p: string) => ({ prediction_prompt: p, scenario_description: '30 seconds later, x.', label: 'L' });
       return new Response(JSON.stringify({ response: JSON.stringify({ clock_visible: false, scene_description: 'A woman sits at a desk.', scenarios: [item('The person turns.'), item('The person nods.'), item('The person looks.')] }) }));
@@ -302,7 +440,7 @@ test('extras: unknown instruction -> pure text translation call (num_predict 32)
     imageDataUrl: IMG, prompt: 'p', scenarioCount: 3, sceneDistances: [30, 30, 30],
     detector: { person: true, count: 1, elapsedMs: 5 }, people: [], sceneExtras: { gen_a: 'ふしぎな踊り' },
   });
-  assert.equal(tbody.options.num_predict, 32);
+  assert.equal(tbody.options.num_predict, 64);
   assert.equal(tbody.images, undefined);
   assert.equal(out[0].prediction_prompt, 'The person already in the photo does a little dance.');
   assert.equal(out[0].scenario_description, '30秒後、写っている人物がふしぎな踊り。');
@@ -394,4 +532,12 @@ test('parseObstruction / describePeople carry the obstruction verdict', async ()
   assert.equal(r.ok, true);
   assert.equal(r.obstructed, true);
   assert.equal(r.obstructedBy, 'chair back');
+});
+
+test('parsePeople normalises facing to toward | side | away | unknown and the prompt names those values', () => {
+  const facings = ['away', 'facing away', 'back to camera', 'profile', 'side', 'left', 'facing camera', 'toward', 'front', 'down', '', 'unknown'];
+  const parsed = facings.map((facing, i) => parsePeople(JSON.stringify({ people: [{ position: `p${i}`, pose: 'seated', clothes: 'shirt', facing }] }))[0]);
+  assert.deepEqual(parsed.map(p => p.facing), ['away', 'away', 'away', 'side', 'side', 'side', 'toward', 'toward', 'toward', 'unknown', 'unknown', 'unknown']);
+  assert.match(DESCRIBE_PROMPT, /Facing MUST be exactly one of: toward .*side .*away .*unknown/);
+  assert.equal(parsePeople(JSON.stringify({ people: [{ position: 'left', pose: 'seated', clothes: 'shirt', facing: '' }] }))[0].clothes, 'shirt');
 });

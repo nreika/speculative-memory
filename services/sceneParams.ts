@@ -16,6 +16,11 @@ export interface SceneParams {
   sceneDistancesSec?: number[];
   presence: number;
   tone: number;
+  /**
+   * G-25 0..1: chance that a recently seen person (<= 10 min) is drawn from behind in an unoccupied scene
+   * (per scene, reproducible roll). Control panel "Empty-room person"; default 0.3.
+   */
+  emptyRoomPersonChance?: number;
   /** Extra planning context (scene history / recent person); set by the server per capture, not a Perform control. */
   contextNote?: string;
 }
@@ -33,6 +38,7 @@ export const DEFAULT_SCENE_PARAMS: SceneParams = {
   sceneDistancesSec: [30, 30, -30],
   presence: 0.3,
   tone: 0.3,
+  emptyRoomPersonChance: 0.3,
 };
 
 /** Number from a JSON value; null/""/NaN/non-numeric -> undefined (= missing). */
@@ -117,6 +123,7 @@ export function normalizeSceneParams(raw: unknown, defaults: Partial<SceneParams
     sceneDistancesSec,
     presence: clampUnit(src.presence, base.presence),
     tone: clampUnit(src.tone, base.tone),
+    emptyRoomPersonChance: clampUnit(src.emptyRoomPersonChance, base.emptyRoomPersonChance ?? 0.3),
   };
 }
 

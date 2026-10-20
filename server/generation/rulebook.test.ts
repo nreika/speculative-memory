@@ -37,30 +37,21 @@ function withDir<T>(fn: (dir: string) => T): T {
   }
 }
 
-test('rulebook v1: the repository file equals the built-in wording and is valid', () => {
+test('rulebook v1: historical file is valid; current defaults override its obsolete lighting scope', () => {
   const file = JSON.parse(fs.readFileSync(path.join(process.cwd(), 'rulebook', 'rulebook.v1.json'), 'utf8'));
   assert.deepEqual(validateRulebook(file), []);
-  assert.deepEqual(file, buildV1());
+  const expected = buildV1();
+  assert.deepEqual({ ...file, imagePrompt: { ...file.imagePrompt, emptyRoom: { ...file.imagePrompt.emptyRoom, scope: expected.imagePrompt.emptyRoom.scope } } }, expected);
   assert.equal(file.parent, null);
 });
 
-test('v1 reproduces the pre-rulebook empty-room prompt word for word', () => {
-  withDir((dir) => {
+test('fixed lighting also overrides old rulebooks when composing an empty-room edit', () => {
+  withDir(dir => {
     ensureRulebookFiles(dir);
     const got = composeEditInstruction({ predictionPrompt: 'The light on the desk shifts slightly.', presence: 0 });
-    const expected =
-      'Edit this exact photo according to: The light on the desk shifts slightly. ' +
-      'Change only the lighting and small in-place details of the objects named. Everything else - the room, walls, floor, ceiling, background, furniture, camera, lighting, the number of monitors and what each monitor displays - stays pixel-identical to the input. ' +
-      'Keep every object, the furniture, the camera and the framing identical to the input. ' +
-      'Preserve the empty floor and the empty chairs exactly as they are. ' +
-      'Do not add any object that is not in the photo; every object stays exactly where it is. ' +
-      'Keep the number of monitors, screens and furniture, and what each screen displays, identical.' +
-      '\n\n' +
-      'Near-camera foreground objects keep their real-world scale, outline, position and texture exactly as in the input (e.g. the dark mesh in the foreground is the backrest of an ordinary office chair very close to the camera); do not enlarge, bend, inflate or turn them into a wall, sail or sculpture.' +
-      '\n\n' +
-      'Objects rest on surfaces in physically plausible positions (laptops and cups on desks, bags on the floor or a chair seat); nothing hangs on a chair back or floats in the air; gravity and support stay realistic.' +
-      '\n\nSharp, crisp, high-detail photo, in focus edge to edge. Do not add any new object; every object appears exactly once.';
-    assert.equal(got, expected);
+    assert.doesNotMatch(got, /shifts slightly|Change only the lighting/);
+    assert.match(got, /Keep the exact input exposure/);
+    assert.match(got, /every object stays exactly where it is/);
   });
 });
 

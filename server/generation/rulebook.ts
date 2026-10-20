@@ -9,8 +9,10 @@
  * No images or personal data here: the files are safe in the public repository.
  */
 import fs from 'node:fs';
+import { BEHIND_VIEW_OBJECTS_NEGATIVE } from './behindViewPlacement';
 import path from 'node:path';
 import * as T from './ruleTexts';
+import { hairTipNegativeTerms } from './hairPhrase';
 
 export interface Rulebook {
   version: number;
@@ -340,8 +342,12 @@ export function negativePrompt(
   const withAdded = n.obstructed && obstructed ? `${withText}, ${n.obstructed}` : withText;
   const withPerson = noPerson ? `${withAdded}, ${n.noPerson}` : withAdded;
   if (!behindView) return withPerson;
-  const hair = typeof behindView === 'object' ? hairNegativeTerms(behindView.hair) : '';
-  return `${withPerson}, ${n.behindView}${hair ? `, ${hair}` : ''}`;
+  const hair = typeof behindView === 'object' ? [hairNegativeTerms(behindView.hair), hairTipNegativeTerms(behindView.hair)].filter(Boolean).join(', ') : '';
+  // G-15: a behind view never turns into a profile (fixed terms next to the rulebook behindView negatives).
+  const profile = n.behindView.includes("profile") ? '' : ', face in profile, side view of the face';
+  // G-14 (2026-10-19): the recent person never replaces or covers the belongings on the chairs/desks.
+  const objects = n.behindView.includes('missing backpack') ? '' : `, ${BEHIND_VIEW_OBJECTS_NEGATIVE}`;
+  return `${withPerson}, ${n.behindView}${profile}${objects}${hair ? `, ${hair}` : ''}`;
 }
 
 /** Planner instruction with the rulebook's extra lines inserted before the JSON-format part. */

@@ -272,11 +272,51 @@ test('manual rollback and applying a proposal file (user agreed)', async () => {
   s.cleanup();
 });
 
-test('windowRows: version, start time, newest N captures; test captures excluded', () => {
-  const mk = (id: string, time: string, version = 1, test = false): QaRow => ({ time, captureId: id, sceneKey: 'gen_a', file: 'f', ok: true, score: 1, defects: [], model: 'm', elapsedMs: 1, rulebookVersion: version, test });
+test('windowRows: version, start time, newest N captures; test captures included for improvement', () => {
+  const mk = (id: string, time: string, version = 1, test = false): QaRow => ({ time, captureId: id, sceneKey: 'gen_a', file: 'f', ok: true, score: 1, defects: [], model: 'm', elapsedMs: 1, rulebookVersion: version, test, sceneCount: 1 });
   const rows = [mk('a', '2026-10-17T00:01:00Z'), mk('b', '2026-10-17T00:02:00Z'), mk('c', '2026-10-17T00:03:00Z'), mk('d', '2026-10-17T00:04:00Z', 2), mk('t', '2026-10-17T00:05:00Z', 1, true)];
-  assert.equal(captureCount(windowRows(rows, 1)), 3);
-  assert.deepEqual(windowRows(rows, 1, { captures: 2 }).map((r) => r.captureId), ['b', 'c']);
-  assert.deepEqual(windowRows(rows, 1, { since: '2026-10-17T00:02:00Z' }).map((r) => r.captureId), ['b', 'c']);
+  assert.equal(captureCount(windowRows(rows, 1)), 4);
+  assert.deepEqual(windowRows(rows, 1, { captures: 2 }).map((r) => r.captureId), ['c', 't']);
+  assert.deepEqual(windowRows(rows, 1, { since: '2026-10-17T00:02:00Z' }).map((r) => r.captureId), ['b', 'c', 't']);
   assert.deepEqual(windowRows(rows, 1, { before: '2026-10-17T00:02:00Z' }).map((r) => r.captureId), ['a']);
+});
+
+test('a rechecked test image uses the newest verdict without inflating the improvement sample', () => {
+  const mk=(ok:boolean,time:string):QaRow=>({captureId:'test-same',sceneKey:'gen_a',test:true,time,rulebookVersion:16,file:'same.png',ok,score:ok?1:0,defects:ok?[]:[{type:'fabricated_person',where:'left',note:'duplicate'}],model:'m',elapsedMs:1,sceneCount:1});
+  const rows=windowRows([mk(true,'2026-10-17T01:00:00Z'),mk(false,'2026-10-17T02:00:00Z')],16);
+  assert.equal(rows.length,1);assert.equal(rows[0].ok,false);assert.equal(captureCount(rows),1);
+});
+
+
+test('unknown, interrupted and rejected-only captures do not satisfy the automatic validation gate', async () => {
+  const s=setup();
+  s.addCaptures(1,9,()=>[]);
+  const time=s.now().toISOString();
+  const base:QaRow={time,captureId:'partial',sceneKey:'gen_a',file:'f.png',ok:true,score:1,defects:[],model:'m',elapsedMs:1,rulebookVersion:1};
+  const extra=[base,{...base,sceneKey:'gen_b'}, {...base,captureId:'unknown',ok:null},
+    {...base,captureId:'rejected',sceneKey:'gen_a.rejected1',ok:false}];
+  fs.appendFileSync(s.paths.qaFile,extra.map(r=>JSON.stringify(r)).join('\n')+'\n');
+  const r=await runCycle({paths:s.paths,config:CFG,now:s.now});
+  assert.equal(r.action,'wait');assert.match(r.detail,/9\/10/);assert.equal(readActive(s.paths.rulebookDir)?.version,1);
+  s.cleanup();
+});
+
+test('rejected defects remain improvement evidence without worsening accepted quality', async () => {
+  const s=setup();s.addCaptures(1,10,()=>[]);
+  const rows=fs.readFileSync(s.paths.qaFile,'utf-8').trim().split('\n').map(line=>JSON.parse(line) as QaRow);
+  const rejected=rows.filter(r=>r.sceneKey==='gen_b').map(r=>({...r,sceneKey:r.sceneKey+'.rejected1',ok:false,score:0,
+    defects:[{type:'fabricated_object',where:'desk',note:'extra bag'}]}));
+  fs.appendFileSync(s.paths.qaFile,rejected.map(r=>JSON.stringify(r)).join('\n')+'\n');
+  const r=await runCycle({paths:s.paths,config:CFG,now:s.now});
+  assert.equal(r.action,'applied');assert.equal(r.stats?.defectRate,0);assert.equal(r.stats?.rejected.defectRate,1);
+  assert.equal(r.stats?.judged,30);assert.equal(r.stats?.rejected.judged,10);assert.equal(r.stats?.completedCaptures,10);
+  s.cleanup();
+});
+
+test('the newest completed capture window retains recent rejected-only captures as evidence', () => {
+  const row:QaRow={time:'2030-01-01T00:00:00Z',captureId:'old',sceneKey:'gen_a',sceneCount:1,file:'f',ok:true,score:1,defects:[],model:'m',elapsedMs:1,rulebookVersion:1};
+  const rows=[row,{...row,captureId:'new',time:'2030-01-01T01:00:00Z'},
+    {...row,captureId:'failed',sceneKey:'gen_a.rejected1',ok:false,time:'2030-01-01T02:00:00Z'}];
+  const win=windowRows(rows,1,{captures:1});
+  assert.deepEqual(win.map(r=>r.captureId),['new','failed']);assert.equal(captureCount(win),1);
 });

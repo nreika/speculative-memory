@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="dark"><title>Speculative Memory — Control</title><link rel="stylesheet" href="/control/control.css"></head>
+<body>
+<form id="settings-form"></form>
+<header class="topbar">
+ <label class="mode-control">Mode<select id="mode" data-setting="mode" form="settings-form"><option value="manual">Manual</option><option value="timer">Auto · Interval</option><option value="chain">Auto · Continuous</option></select></label>
+ <button id="generate" type="button">Generate</button>
+ <label class="interval-control">Interval<input id="interval" data-setting="intervalSec" form="settings-form" type="number" min="5" max="3600" step="1"><span>sec</span></label>
+ <button id="run" type="button">Enable</button><button id="pause-generation" type="button">Pause</button><button id="cancel" class="danger" type="button" hidden>Cancel</button>
+ <span id="generation-state" class="pill">Connecting</span><span id="generation-detail" class="subtle">Reading current settings…</span>
+ <nav class="page-links" aria-label="Other control pages"><a href="/control/mapping/" target="_blank" rel="noopener">Mapping ↗</a><a href="/control/history/" target="_blank" rel="noopener">History ↗</a></nav>
+ <div class="session"><span id="connection-dot" class="dot"></span><span id="connection">Connecting to TD…</span></div>
+ <button id="gui-fullscreen" class="quiet" type="button">Full screen</button><button id="apply-top" class="primary" type="submit" form="settings-form" disabled>Apply</button><button id="save-project" type="button">Save</button>
+</header>
+<div id="notice" role="status" hidden></div>
+<div id="uncertain-action" hidden><span>The last command was not confirmed.</span><button id="recheck-state" type="button">Refresh state before continuing</button></div>
+<main class="workspace">
+ <aside class="settings-column">
+  <section class="panel input-panel"><div class="section-head"><h2>INPUT</h2><span id="input-kind" class="eyebrow">—</span><span id="input-preview-label" class="subtle">Current input</span></div><div class="input-visual"><img id="input-preview" alt="Current input preview" hidden></div><div class="input-controls"><select id="input-set" aria-label="Test scene"><option value="TSC-001">TSC-001</option><option value="TSC-002">TSC-002</option><option value="TSC-003">TSC-003</option><option value="cycle">Cycle all three</option></select><button id="select-input" type="button">Switch</button><span id="input-detail" class="subtle">—</span></div></section>
+  <section class="panel public-note"><div class="section-head"><h2>PUBLIC OUTPUT</h2><span class="eyebrow">127.0.0.1:3443 · Funnel</span></div><p class="subtle">Public viewers see only /display and /control/output pages through the password gate. Face blur in the browser is not anonymisation: the gate serves server-side blurred image copies only for outputs whose Face blur is on; other outputs show the original image. "Remote device (phone)" in INPUT is live input and writes venue history.</p></section>
+  <section class="panel world-panel"><div class="section-head"><h2>WORLD PARAMETER</h2></div><div id="world-distances"></div>
+   <label class="world-row range-label">PRESENCE <output id="presence-value"></output><input data-setting="presence" form="settings-form" type="range" min="0" max="1" step="0.01"></label>
+   <label class="world-row range-label">TONE <output id="tone-value"></output><input data-setting="tone" form="settings-form" type="range" min="0" max="1" step="0.01"></label>
+   <label class="world-row range-label">EMPTY-ROOM PERSON <output id="emptyRoomPersonChance-value"></output><input data-setting="emptyRoomPersonChance" form="settings-form" type="range" min="0" max="1" step="0.01" title="Chance (per scene) that the person seen in the last 10 minutes is drawn from behind in an empty frame"></label>
+   <div class="two-col backend-controls"><label>Recognition<select data-setting="vlmBackend" form="settings-form"><option value="local">Local</option><option value="gemini">Gemini (paid)</option></select></label><label>Generation<select data-setting="imageBackend" form="settings-form"><option value="local">Local</option><option value="gemini">Gemini (paid)</option></select></label></div>
+  </section>
+  <section class="panel outputs-panel"><div class="service-status"><span id="service-main">Main PC</span><span id="service-comfy">ComfyUI</span><span id="service-ollama">Ollama</span></div><p id="cost-display">Gemini — / Total —</p><div class="section-head"><h2>OUTPUT</h2></div><div id="output-routes" class="output-grid"></div><div class="action-row"><button id="show-outputs" type="button">Show</button><button id="hide-outputs" type="button">Hide</button><button id="shuffle" type="button">Shuffle</button><button id="reset-layout" type="button">Reset</button></div><div class="display-checks"><label class="check"><input data-setting="labels" form="settings-form" type="checkbox">Labels</label><label class="check"><input data-setting="subtitles" form="settings-form" type="checkbox">Subtitles</label><label class="check"><input data-setting="fade" form="settings-form" type="checkbox">Fade</label><button id="apply-layout" type="button">Apply routing</button></div><label class="timing-control">Display timing<select data-setting="displayTiming" form="settings-form"><option value="each">Each image</option><option value="all">All images</option></select></label><p id="routing-status" class="subtle"></p></section>
+  <div class="apply-bar"><span id="dirty-message">Settings are in sync</span><button id="reload-settings" type="button" hidden>Reload</button><button id="apply" class="primary" type="submit" form="settings-form" disabled>Apply</button></div>
+ </aside>
+ <div class="stage-column">
+  <section class="panel cone-panel"><div class="stage-heading"><h2>FUTURE CONE VISUALIZATION</h2><div class="cone-modes"><button id="cone-result" type="button" aria-pressed="true">Latest result</button><button id="cone-settings" type="button" aria-pressed="false">Settings</button><a href="/control/history/" target="_blank" rel="noopener">Timeline ↗</a></div><span id="cone-status" class="subtle"></span><span id="project-name" class="subtle"></span></div><svg id="cone" viewBox="0 0 1000 216" role="img" aria-label="Future cone with source and A, B, C time branches"></svg></section>
+  <section id="scene-cards" class="scene-grid" aria-label="Scene controls"></section>
+  <div class="lower-grid"><section class="panel source-panel"><div class="section-head"><h2>NOW</h2><span class="eyebrow">LAST SOURCE</span></div><img id="source-image" alt="Last recorded source frame" hidden><p id="source-caption">Waiting for a captured source frame.</p></section><section class="panel history-panel"><div class="section-head"><h2>History</h2></div><p id="history" class="history-text">Waiting for observations…</p></section></div>
+ </div>
+</main>
+<footer class="bottom-bar">
+ <label class="image-count-control">Images<select id="image-count" data-setting="imageCount" form="settings-form"></select></label>
+ <section class="scenario-panel"><div class="section-head"><h2>Scenario</h2><span id="scenario-state" class="pill">—</span></div><select id="scenario-file" aria-label="Scenario CSV"></select><button id="load-scenario" type="button">Load CSV</button><button id="upload-open" type="button">Import…</button><input id="scenario-upload" type="file" accept=".csv,.png" multiple hidden><details id="scenario-format" class="scenario-format" hidden><summary id="scenario-format-title" role="alert">FORMAT ERROR</summary><div id="scenario-format-box"><p id="scenario-format-file" class="subtle"></p><ul id="scenario-format-list"></ul></div></details><label class="check"><input data-setting="scenarioPreview" form="settings-form" type="checkbox">Preview only · no generation</label><div class="scenario-clock"><strong id="scenario-elapsed">0:00</strong><span id="scenario-duration" class="subtle">/ 0:00</span><progress id="scenario-progress" max="1" value="0"></progress></div><div class="action-row"><button id="play-scenario" type="button">Play / Restart</button><button id="pause-scenario" type="button">Pause</button><button id="stop-scenario" type="button">Stop</button></div><details class="scenario-info"><summary>Details</summary><div><p id="scenario-instructions"></p><p id="scenario-message" class="subtle"></p></div></details></section>
+ <details class="diagnostics"><summary>Connection</summary><pre id="diagnostics"></pre></details>
+</footer>
+<script type="module" src="/control/control.mjs"></script>
+</body></html>

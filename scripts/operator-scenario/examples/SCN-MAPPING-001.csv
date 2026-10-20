@@ -1,0 +1,12 @@
+seconds,action,target,value
+0,scenario,,OUTPUT-MAPPING-NO-GENERATION
+0,instructions,,"Existing screen-7 required; mapping only, no generate rows"
+0,output_source,screen-7,a
+4,output_source,screen-7,b
+8,output_visible,screen-7,false
+12,output_visible,screen-7,true
+12,output_fade,screen-7,crossfade
+12,output_fade_sec,screen-7,0.8
+16,output_face_blur,screen-7,true
+16,output_blur_px,screen-7,12
+20,end,,

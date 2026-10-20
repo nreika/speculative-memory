@@ -108,3 +108,9 @@ test('formatHistory: arrival/departure from hasPerson transitions; steady and em
   const e = formatHistory([], now);
   assert.deepEqual([e.lines, e.people, e.text], [[], '', '']);
 });
+
+test('quarantine excludes only its exact capture and preserves original log bytes',()=>{
+ const file=tmp();const records=[{time:'2026-10-18T01:00:00',captureId:'valid',sceneDescription:'A person standing',hasPerson:true,observation:'A person standing'},{time:'2026-10-18T02:00:00',captureId:'bad-test',sceneDescription:'Empty',hasPerson:false,observation:'Empty'}];
+ for(const row of records)appendHistory(row,file);const original=fs.readFileSync(file);fs.writeFileSync(file+'.quarantine.jsonl',JSON.stringify({captureId:'bad-test',reason:'confirmed placeholder test'})+'\n');assert.deepEqual(readHistory(file).map(r=>r.captureId),['valid']);assert.deepEqual(fs.readFileSync(file),original);
+ fs.writeFileSync(file+'.quarantine.jsonl','');assert.deepEqual(readHistory(file).map(r=>r.captureId),['valid','bad-test']);
+});

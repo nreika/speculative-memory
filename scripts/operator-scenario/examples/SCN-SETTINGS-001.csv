@@ -1,0 +1,10 @@
+seconds,action,target,value
+0,scenario,,SCN-SETTINGS-001
+0,instructions,,"Control-panel settings only; no generate rows"
+0,distance,A,10
+4,presence,,0.5
+8,tone,,0.3
+10,empty_person,,0.5
+12,pause,,
+16,resume,,
+20,end,,

@@ -32,6 +32,8 @@ export interface ScenarioResult {
    * description of what is visible in the frame NOW (shown as the NOW text in TD).
    */
   scene_now?: string;
+  /** G-24: an unoccupied scene with neither the recent person nor an object change is not generated (reason). */
+  skipped?: "no_recent_activity" | "no_movable_object" | "chance";
 }
 
 /** Content text shown for one scenario in TD: the situation description only, no prompt boilerplate. */

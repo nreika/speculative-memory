@@ -3,6 +3,7 @@
  * Simple vocabulary check (groups of synonyms): a group named in prediction_prompt but absent from
  * scene_description (+ the people description) counts as invented ("a beige jacket pulled from the chair").
  */
+import type {PersonInfo} from "./peopleDescribe";
 import type { ScenarioResult } from "../../services/promptBuilder";
 import { getRulebook } from "./rulebook";
 
@@ -100,3 +101,16 @@ export function objectReminder(frameText: string, invented: string[]): string {
 
 // kept for tests
 export const _wordRegex = wordRegex;
+
+/** Visible source facts establish object presence, never ownership or a future action.
+ * Keep this separate from prediction text: a generated object cannot authorize itself.
+ */
+export function observedObjectContext(scene:string,people:PersonInfo[]|undefined,foreground:unknown):string {
+ const facts=(people??[]).flatMap(person=>[
+  person.pose,person.position,person.clothes,
+  ...(person.holdingFacts??[]).filter(f=>f.evidence==='hand_supported'||f.evidence==='surface_contact').map(f=>f.item),
+  ...(person.wornFacts??[]).filter(f=>['body_attached','furniture_supported','nearby_only'].includes(f.attachment)).map(f=>f.item),
+ ]).filter(x=>typeof x==='string'&&x.trim());
+ const near=typeof foreground==='string'&&!/^(?:none\b|no\b|not\b|unknown\b|unclear\b|n\/a\b)/i.test(foreground.trim())?foreground.trim().slice(0,200):'';
+ return [scene,...facts,near].filter(Boolean).join(' ');
+}

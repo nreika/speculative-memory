@@ -1,3 +1,6 @@
+import {sceneReferenceArchiveMetadata,type SceneReferenceArchiveMetadata} from '../generation/sceneReferenceIntegration';
+import type { PeopleEditRegion } from '../generation/peopleEditRegion';
+import type { Detection } from '../generation/lightPeopleDetector';
 /**
  * Per-capture archive: one folder with the source frame, the generated images (PNG text
  * metadata embedded) and the full prompts. Purely additive: every method swallows its own
@@ -40,11 +43,26 @@ export interface ArchiveContext {
 }
 
 export interface ArchiveScene {
+  sceneReferenceCast?:SceneReferenceArchiveMetadata;
+  peopleEditRegion?: PeopleEditRegion | null;
+  sourceFrameRestoration?:unknown;
+  assetOnlyExecution?:unknown;
+  turboCandidate?:unknown;
+  localImageEngine?:string;
+  turboFullFrameReason?:string;
   sceneKey: string;
   distanceSec: number;
   label: string;
   predictionPrompt: string;
   scenarioDescription: string;
+  plannedDescription?: string;
+  displayDescriptionSource?: string;
+  identityReferenceCount?: number;
+  identityReferenceCrops?: Array<{x:number;y:number;width:number;height:number}>;
+  identityReferenceMissing?: number;
+  sourcePeopleDetection?: Detection | null;
+  scenarioInput?:unknown;
+  peopleIntegrity?: { ok: boolean | null; sourceCount: number | null; outputToSource: number[]; reason: string; attempts: number };
   imagePromptFull: string | null;
   /** TD sceneExtras entry for this scene ("must include"), if any. */
   sceneExtra?: string | null;
@@ -52,6 +70,8 @@ export interface ArchiveScene {
   sceneExtraReflected?: boolean | null;
   /** The recent person was drawn from behind (empty frame + recent-person allowance). */
   behindView?: boolean;
+  /** G-24/G-25 decision of this scene in an unoccupied frame (person roll, chance, personDrawn, reason, object gate). */
+  emptyRoom?: unknown;
   /** The same-scale / original-place sentence was part of the image prompt. */
   scaleRule?: boolean;
   /** Reference crop (pixels) used for that person, or null when the whole frame was passed. */
@@ -151,6 +171,21 @@ export class GenerationArchive {
   setNowText(text: string) {
     (this.doc as any).nowText = text;
   }
+  setHistoryContext(metadata:unknown) {this.doc.historyContext=metadata;this.safe(()=>this.flush());}
+  setScenarioControl(metadata:unknown) {this.doc.scenarioControl=metadata;this.safe(()=>this.flush());}
+  saveScenarioInput(index:number,buffer:Buffer,extension:string,metadata:unknown):string|undefined {
+    let filePath:string|undefined;
+    this.safe(()=>{
+      const file=this.name(`INPUT_${sceneLetter(index)}.${extension.replace(/[^a-zA-Z0-9]/g,'')}`);
+      const destination=path.join(this.dir,file);
+      fs.writeFileSync(destination,buffer);
+      (this.doc.scenarioInputs??={})[sceneLetter(index)]={file,...metadata as object};
+      this.flush();filePath=destination;
+    });
+    return filePath;
+  }
+
+  saveScenarioCoreMask(index:number,buffer:Buffer):string|undefined {let result:string|undefined;this.safe(()=>{const file=this.name(`CORE_${sceneLetter(index)}.png`);result=path.join(this.dir,file);fs.writeFileSync(result,buffer);(this.doc.scenarioInputs??={})[sceneLetter(index)]??={};this.doc.scenarioInputs[sceneLetter(index)].protectedCoreMaskFile=file;this.flush();});return result;}
 
   /** Phone captures: loose copies in the captures dir, deleted together with the folder (retention). */
   noteCaptureFiles(files: string[]) {
@@ -245,8 +280,24 @@ export class GenerationArchive {
         'utf8'
       );
     });
-    this.scenes.push({ letter, ...scene, ...t, rulebookVersion: this.ctx.rulebookVersion ?? null, file, promptFile: this.name(`${letter}_prompt.txt`) });
+    this.scenes.push({ letter, ...scene, ...(scene.sceneReferenceCast?{sceneReferenceCast:sceneReferenceArchiveMetadata(scene.sceneReferenceCast)}:{}), peopleEditRegion:scene.peopleEditRegion?{width:scene.peopleEditRegion.width,height:scene.peopleEditRegion.height,rectangles:scene.peopleEditRegion.rectangles.map(({x,y,width,height})=>({x,y,width,height})),sourceEvidence:scene.peopleEditRegion.sourceEvidence}:scene.peopleEditRegion, ...t, rulebookVersion: this.ctx.rulebookVersion ?? null, file, promptFile: this.name(`${letter}_prompt.txt`) });
     this.timings[`scene${letter}Ms`] = scene.elapsedMs;
+    this.safe(() => this.flush());
+  }
+
+  /**
+   * G-24: an unoccupied scene with neither the recent person nor an object change was not generated.
+   * Recorded in prompts.json scenes[] as { skipped: true, skipReason } (no image, no prompt file) and in the README.
+   */
+  addSkippedScene(index: number, scene: { sceneKey: string; distanceSec: number; reason: string; emptyRoom?: unknown }) {
+    const letter = sceneLetter(index);
+    this.scenes.push({ letter, sceneKey: scene.sceneKey, distanceSec: scene.distanceSec, skipped: true, skipReason: scene.reason, ...(scene.emptyRoom ? { emptyRoom: scene.emptyRoom } : {}), ...temporalLabels(scene.distanceSec), file: null });
+    this.safe(() => this.flush());
+  }
+
+  /** Per-scene G-24/G-25 decisions of an unoccupied frame (person roll, object gate, skip). */
+  setEmptyRoom(decisions: unknown) {
+    this.doc.emptyRoom = decisions;
     this.safe(() => this.flush());
   }
 
@@ -279,7 +330,11 @@ export class GenerationArchive {
       `${this.sourceFile ?? this.name('NOW.jpg')} = 元画像(NOW)`,
       '',
     ];
-    for (const s of this.scenes) {
+    for (const s of [...this.scenes].sort((a, b) => String(a.letter).localeCompare(String(b.letter)))) {
+      if (s.skipped) {
+        lines.push(`■ ${s.letter} (${s.sceneKey})  ${fmt(s.distanceSec)}  skip（生成しない: ${s.skipReason}）`, '');
+        continue;
+      }
       lines.push(
         `■ ${s.letter} (${s.sceneKey})  ${fmt(s.distanceSec)}  ${s.temporalLabelJa} / ${s.temporalLabelEn}  ${s.file}`,
         `  シナリオ: ${s.scenarioDescription}`,

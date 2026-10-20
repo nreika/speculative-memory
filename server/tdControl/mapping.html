@@ -1,0 +1,13 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Output mapping — Speculative Memory</title><link rel="stylesheet" href="/control/control.css"><link rel="stylesheet" href="/control/mapping.css"></head>
+<body>
+<header class="map-toolbar"><a href="/control/">← Control</a><h1>Output mapping</h1><span>Generation stays at 3 images</span><button id="add-output">Add output</button><button id="make-ten">Set up 10 outputs</button><button id="save-preset">Save preset</button><button id="load-preset">Load preset</button><input id="preset-file" type="file" accept=".json,application/json" hidden><label class="apply-mode">Apply<select id="apply-mode" aria-label="Apply mode"><option value="auto">Immediately</option><option value="manual">With Apply mapping</option></select></label><button id="save-mapping" hidden disabled>Apply mapping</button><button id="reload-mapping">Reload</button></header>
+<p id="map-status" role="status">Loading outputs…</p>
+<main class="mapping-workspace">
+ <section class="image-library"><header><h2>Images</h2><label class="import-button">Import images<input id="import-images" type="file" accept="image/png,image/jpeg,image/webp" multiple hidden></label></header>
+ <div class="library-tools"><select id="library-kind" aria-label="Image library filter"><option value="all">All images</option><option value="actual">Recorded</option><option value="generated">Generated</option><option value="uploaded">Imported</option></select><button id="refresh-library">Refresh</button></div>
+ <p id="selected-image">Select an image, then assign it to an output. Assignment updates the output immediately.</p><div id="image-pool"></div><button id="more-images" hidden>Load more</button>
+ </section>
+ <section class="mapping-outputs"><section class="direct-fades"><header><h2>Direct output URLs · Fade</h2><span>Control → Fade is the master switch.</span></header><div id="channel-fades"></div></section><div class="mapping-heading"><h2>Browser outputs</h2><p>Immediately: every change is saved at once. With Apply mapping: changes wait for the button (image assignment always saves at once).</p><span id="output-count"></span></div><div id="mapping-cards"></div></section>
+</main>
+<script type="module" src="/control/mapping.mjs"></script></body></html>

@@ -1,0 +1,88 @@
+{
+  "version": 14,
+  "createdAt": "2026-10-17T07:50:55.722712+00:00",
+  "parent": 13,
+  "note": "TSC-001: actual identity references, movement-only tone, fixed lighting, preserve people/items, describe finished image.",
+  "imagePrompt": {
+    "physicsRule": "Objects rest on surfaces in physically plausible positions (laptops and cups on desks, bags on the floor or a chair seat); nothing hangs on a chair back or floats in the air; gravity and support stay realistic.",
+    "hairRule": "Keep each person's hairstyle, hair length and hair colour exactly as in the input (and the reference image).",
+    "behindViewRule": "The person is seen from behind with their back turned to the camera; the face is not visible.",
+    "onePersonRule": "Exactly one person appears in the whole image, and no second person or duplicate.",
+    "behindViewPlacementRule": "a full figure in the middle or background of the room, never close to the camera, never filling the frame.",
+    "foregroundRuleNamed": "Near-camera foreground object ({fg}) keeps its real-world scale, outline, position and texture exactly as in the input; do not enlarge, bend, inflate or turn it into a wall, sail or sculpture.",
+    "foregroundRuleGeneric": "Near-camera foreground objects keep their real-world scale, outline, position and texture exactly as in the input (e.g. the dark mesh in the foreground is the backrest of an ordinary office chair very close to the camera); do not enlarge, bend, inflate or turn them into a wall, sail or sculpture.",
+    "disembodiedRule": "Do not add disembodied body parts; arms and hands must belong to a visible person; never attach limbs to furniture or objects.",
+    "referencePersonRule": "If a person appears, it must be the person shown in the second reference image (same clothing and hair); never a different person.",
+    "emptyRoomNoPersonRule": "The room is empty: do not add any person, figure, hand, arm or silhouette anywhere in the image; nobody enters.",
+    "emptyRoom": {
+      "head": "Edit this exact photo according to: ",
+      "scope": "Keep the unoccupied scene, every object and all screen content exactly as in the input.",
+      "keep": "Keep every object, the furniture, the camera and the framing identical to the input.",
+      "preserve": "Preserve the empty floor and the empty chairs exactly as they are.",
+      "noAdd": "Do not add any object that is not in the photo; every object stays exactly where it is.",
+      "screens": "Keep the number of monitors, screens and furniture, and what each screen displays, identical.",
+      "tail": "Sharp, crisp, high-detail photo, in focus edge to edge. Do not add any new object; every object appears exactly once."
+    },
+    "extraConstraints": [
+      "Only alter existing objects; never add new ones not present in original photo.",
+      "Do not introduce objects not visible in original photo.",
+      "Never add objects not visible in original photo, even if implied by context.",
+      "Do not add objects not visible in original photo, even if implied by context.",
+      "Only modify existing objects; never add unseen items, even implied by context."
+    ],
+    "holdingsRule": "Items a person holds or carries in the input (for example a microphone, phone, cup or bag) stay in their hands or on them in the same form; none of them disappears, is replaced or is put down unless the instruction says so.",
+    "noNewFaceRule": "Do not draw a face that is not visible in the input: a person seen from behind or in profile stays turned away and does not turn to show the face; never create a new frontal face.",
+    "noNewTextRule": "Do not add any new text, numbers, clock or user interface to any screen, sign or surface that is not in the input; every screen keeps exactly the content it has in the input, or stays dark if it is dark. The only digits that may change are on a clock or number sign that is already visible in the input.",
+    "obstructedRule": "A large object right in front of the camera (such as a chair backrest) blocks much of the view in the input: keep that object and the whole composition exactly as in the input; do not remove it and do not draw the room behind it or a new, brighter room. Things behind the obstruction stay behind it: do not bring them in front of the obstruction or make their outlines sharper; keep them exactly as hazy, dark or mesh-filtered as they appear in the input.",
+    "obstructedLeadRule": "The {by} is the frontmost layer of the whole image; everything seen through {through} stays dim, blurred and partially hidden by {pattern}, exactly as in the input.",
+    "noLightArtifactRule": "The lighting stays natural and soft, exactly like an ordinary unprocessed photograph.",
+    "emptyRoomLightRule": "Keep the original exposure, brightness, lighting colour, white balance and shadow positions identical."
+  },
+  "quality": {
+    "base": "Sharp, crisp, high-detail photo, in focus edge to edge, fully solid opaque people, no transparency, no ghosting. Keep the exact same number of monitors, screens and furniture as the input — do not add or remove any. Do not change what any monitor or TV displays. Each person has exactly two arms and two hands. When a person moves, redraw them in the new pose and at the new spot only: their previous position (any moved arm, hand or body) must disappear completely and show whatever was behind them. No duplicated limbs, hands or people. Do not add any new object or person that is not in the input; when an object moves, remove it from its original position so it appears only once.",
+    "entering": "Sharp, crisp, high-detail photo, in focus edge to edge, fully solid opaque people, no transparency, no ghosting. Keep the exact same number of monitors, screens and furniture as the input — do not add or remove any. Do not change what any monitor or TV displays. Each person has exactly two arms and two hands. When a person moves, redraw them in the new pose and at the new spot only: their previous position (any moved arm, hand or body) must disappear completely and show whatever was behind them. No duplicated limbs, hands or people. Do not add any new object; a new person may appear only if the instruction says someone enters the frame, exactly once and with exactly two arms and two hands; when an object moves, remove it from its original position so it appears only once.",
+    "clock": "The only text that may change is the physical flip-number sign; keep it as two rows of two-digit cards, always showing a leading zero (08, not 8), same size and position as the input.",
+    "longSpan": "This is the same photograph: identical camera position, zoom and viewpoint. The desks, chairs, bag, laptops, cables, curtains, floor and walls stay exactly where they are and exactly as they look in the input; only the person's pose and position change. Do not zoom, shift or re-compose the view."
+  },
+  "negative": {
+    "base": "blurry, soft focus, out of focus, hazy, low detail, motion blur, transparent, translucent, see-through, ghost, double exposure, creature, monster face, melted face, distorted face, disfigured, deformed hands, extra limbs, duplicated person, merged bodies, extra people, extra monitor, additional screen, more televisions, duplicated display, extra furniture, changed screen content, different monitor image, disembodied hands, floating arms, limbs growing from furniture, giant mesh, oversized foreground object, warped mesh, inflated chair, moire, floating object, object hanging on chair back, levitating laptop, extra chair, additional bag, added furniture, arms raised overhead, stretching arms up, waving, hair color change, different hairstyle, changed hair length",
+    "clock": "single-digit clock number, missing leading zero, garbled digits, distorted numbers",
+    "noPerson": "person, people, man, woman, human, human figure, face, hands, silhouette, shadow of a person, dark figure, black silhouette, standing figure, shadow person, mannequin",
+    "behindView": "face visible, looking at camera, frontal face, giant person, person too close to camera, oversized figure, cropped body filling frame, two people, second person, duplicate person, extra person",
+    "added": [
+      "item removed from hands, missing held item",
+      "newly drawn face, face turned to the camera",
+      "added objects, extra objects that are not in the original, new furniture, new bags",
+      "lens flare, light streaks, rainbow lines, glow, sparkles"
+    ],
+    "noNewText": "clock, digits, text on screen, garbled text, numbers",
+    "obstructed": "sharp monitor in front of the mesh, objects in front of the chair back, objects pasted on top of the obstruction"
+  },
+  "guard": {
+    "guardRetries": 3,
+    "timeBudgetMs": 25000,
+    "duplicateThreshold": 0.9,
+    "extraObjectGroups": [],
+    "extraEmptyRoomBannedWords": []
+  },
+  "vlm": {
+    "extraInstructions": [
+      "Never make a person turn around to show a face that is not visible in this frame, and never remove an item a person holds.",
+      "Preserve all visible people and their held/worn items. Change only the existing people's actions, not lighting, brightness, colours, white balance or screen contents. If empty, keep the scene unchanged."
+    ]
+  },
+  "toneImage": {
+    "people": [
+      "Amount of change: micro-movements of the existing people; preserve their identity and belongings.",
+      "Amount of change: a gentle visible change of pose or gaze; preserve identity and belongings.",
+      "Amount of change: a clearly different energetic pose and readable expression; preserve identity, belongings and people count.",
+      "Amount of change: a strong, unmistakable change of posture, shoulders and torso; preserve identity, belongings and people count."
+    ],
+    "emptyRoom": [
+      "Keep the unoccupied scene exactly as in the input.",
+      "Keep the unoccupied scene exactly as in the input.",
+      "Keep the unoccupied scene exactly as in the input.",
+      "Keep the unoccupied scene exactly as in the input."
+    ]
+  }
+}

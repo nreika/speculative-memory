@@ -36,7 +36,8 @@ test('empty room: invented objects are replaced by environmental templates (sing
   const out = await planScenariosLocal({ imageDataUrl: IMG, prompt: 'p', scenarioCount: 3, trace, sceneDistances: [30, 30, -150] });
   assert.equal(calls(), 1);
   assert.doesNotMatch(out[0].prediction_prompt, /jacket|chair/);
-  assert.equal(out[1].prediction_prompt, 'The light on the curtain dims slightly.');
+  // A lighting-only sentence is removed; in an empty room it becomes a small change of a movable frame object (never "exactly as in the input").
+  assert.equal(out[1].prediction_prompt, 'The white paper bag sits a few centimetres further to the left.');
   assert.deepEqual(trace.guard.fabricatedObjects.map((f: any) => f.index), [0]);
 });
 
@@ -46,7 +47,7 @@ test('with planner retries allowed: one re-ask with the visible-objects reminder
   t.mock.method(globalThis, 'fetch', (globalThis.fetch as any), {});
   const out = await planScenariosLocal({ imageDataUrl: IMG, prompt: 'p', scenarioCount: 3, maxAttempts: 3 });
   assert.equal(calls(), 2);
-  assert.equal(out[0].prediction_prompt, 'The light dims a bit.');
+  assert.equal(out[0].prediction_prompt, 'The white paper bag sits a few centimetres further to the right.');
   void prompts;
 });
 

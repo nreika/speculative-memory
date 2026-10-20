@@ -29,7 +29,7 @@ test('normalizeSceneParams: defaults when missing, so old clients keep working',
   assert.deepEqual(normalizeSceneParams(undefined), DEFAULT_SCENE_PARAMS);
   assert.deepEqual(normalizeSceneParams({ image: 'x', imageCount: 3 }), DEFAULT_SCENE_PARAMS);
   assert.deepEqual(normalizeSceneParams({ futureDistanceSec: null, presence: '', tone: 'abc' }), DEFAULT_SCENE_PARAMS);
-  assert.deepEqual(DEFAULT_SCENE_PARAMS, { futureDistanceSec: 30, sceneDistancesSec: [30, 30, -30], presence: 0.3, tone: 0.3 });
+  assert.deepEqual(DEFAULT_SCENE_PARAMS, { futureDistanceSec: 30, sceneDistancesSec: [30, 30, -30], presence: 0.3, tone: 0.3, emptyRoomPersonChance: 0.3 });
 });
 
 test('normalizeSceneParams: clamps (5-300 s, integer; 0-1) and accepts numeric strings', () => {
@@ -38,6 +38,7 @@ test('normalizeSceneParams: clamps (5-300 s, integer; 0-1) and accepts numeric s
     sceneDistancesSec: [5, 5, -5],
     presence: 0,
     tone: 1,
+    emptyRoomPersonChance: 0.3,
   });
   assert.equal(normalizeSceneParams({ futureDistanceSec: 9999 }).futureDistanceSec, 300);
   assert.equal(normalizeSceneParams({ futureDistanceSec: 12.6 }).futureDistanceSec, 13);
@@ -115,7 +116,7 @@ test('scenario prompt: visible-only rule and tone-aware movement rule are always
     assert.match(p, /cut off by the frame edge or not shown/);
     assert.match(p, /follows the Tone instruction below/);
     assert.match(p, /exactly two arms and two hands/);
-    assert.match(p, /Do not add new objects/);
+    assert.match(p, /do not add or remove monitors, screens, chairs, tables or other objects/);
   }
 });
 
@@ -150,7 +151,7 @@ test('scenario prompt carries the distance everywhere and no leftover 30 seconds
   // the always-on rules stay, whatever the controls say
   assert.match(p, /exactly two arms and two hands/);
   assert.match(p, /Never duplicate any person or object/);
-  assert.match(p, /There must always be exactly one of each object/);
+  assert.match(p, /keep the exact same count of everything/);
 });
 
 test('scenario prompt for the targeted variant also uses the distance', () => {
@@ -211,8 +212,9 @@ test('image edit prompt: a new person is never allowed, whatever the presence (G
   assert.match(high, /Do not add any new person that is not in the input/);
   const composedLow = composeEditInstruction({ predictionPrompt: 'x', presence: 0.3 });
   const composedHigh = composeEditInstruction({ predictionPrompt: 'x', presence: 1 });
-  assert.ok(composedLow.endsWith(QUALITY_SUFFIX));
-  assert.ok(composedHigh.endsWith(QUALITY_SUFFIX));
+  // The quality suffix is followed only by the single main-change sentence (2026-10-19 motion fix).
+  assert.ok(composedLow.endsWith(QUALITY_SUFFIX + '\n\nMain change that must be clearly visible: x.'));
+  assert.ok(composedHigh.endsWith(QUALITY_SUFFIX + '\n\nMain change that must be clearly visible: x.'));
   // anatomy / no-duplicate rules are in both
   for (const c of [composedLow, composedHigh]) {
     assert.match(c, /exactly two arms and two hands/);
@@ -425,7 +427,7 @@ test('image prompt: spans of 2+ minutes (either direction) add the "keep the bac
   assert.doesNotMatch(composeEditInstruction({ predictionPrompt: 'x' }), /same photograph from the same fixed camera/);
   // the rules that always apply are still there for a long span
   const c = composeEditInstruction({ predictionPrompt: 'x', distanceSec: 600 });
-  assert.ok(c.endsWith(LONG_SPAN_QUALITY_SUFFIX));
+  assert.ok(c.endsWith(LONG_SPAN_QUALITY_SUFFIX + '\n\nMain change that must be clearly visible: x.'));
   assert.ok(!composeEditInstruction({ predictionPrompt: "x", distanceSec: 30 }).includes(LONG_SPAN_QUALITY_SUFFIX));
   assert.match(c, /exactly two arms and two hands/);
   assert.match(c, /Do not add any new person that is not in the input/);
@@ -450,4 +452,12 @@ test("clock digits use each scene's own signed offset (14:07:37)", () => {
     composeEditInstruction({ predictionPrompt: 'x', clock: clockForSignedDistance(-600, t, false), mode: 'auto' }),
     /digits|flip-number/
   );
+});
+
+test('normalizeSceneParams: emptyRoomPersonChance clamps to 0..1 like presence/tone, default 0.3', () => {
+  assert.equal(normalizeSceneParams({}).emptyRoomPersonChance, 0.3);
+  assert.equal(normalizeSceneParams({ emptyRoomPersonChance: 1.7 }).emptyRoomPersonChance, 1);
+  assert.equal(normalizeSceneParams({ emptyRoomPersonChance: -1 }).emptyRoomPersonChance, 0);
+  assert.equal(normalizeSceneParams({ emptyRoomPersonChance: '0.5' }).emptyRoomPersonChance, 0.5);
+  assert.equal(normalizeSceneParams({ emptyRoomPersonChance: 'x' }).emptyRoomPersonChance, 0.3);
 });

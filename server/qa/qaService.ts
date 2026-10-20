@@ -1,3 +1,6 @@
+import {inspectAndCaptionWithReferences,inspectionDefectType} from '../generation/combinedInspection';
+import {buildSceneReferenceCast,parseSceneReferenceCastIntegrity,type ScenePersonReference,type SourceIdentityImage,type ReferenceCastIntegrity} from '../generation/sceneReferenceCast';
+import type {PersonInfo} from '../generation/peopleDescribe';
 /**
  * Glue for the continuous local QA: the queue (between captures only), the log files, prompts.json / capture-events
  * patches, the automatic rulebook improvement and the HTTP routes (/api/qa, /api/qa/summary, /api/qa/proposals, /api/rulebook).
@@ -9,13 +12,22 @@ import type { CaptureEventStore } from '../events/captureEvents';
 import { getRulebook, listVersions, readActive } from '../generation/rulebook';
 import { configFromEnv, defaultPaths, listProposals, ollamaTextLlm, readChanges, readState, runCycle, type ImproverPaths } from './improver';
 import { parseGuidelines } from './guidelines';
-import { QaQueue, appendQaRow, judgeImage, patchPromptsJson, readQaRows, summarizeQa, type QaRow } from './localJudge';
+import { inspectPeopleIntegrity } from '../generation/peopleIntegrity';
+import { QaQueue, appendQaRow, judgeImage, patchPromptsJson, readQaRows, latestQaRows, summarizeQa, isRejectedQaRow, completedQaCaptureIds, type QaRow } from './localJudge';
 
+/** Private, per-scene pinned job metadata. Never serialize imageDataUrl into QA rows/archive. */
+export interface QaReferenceCastJob {
+ sourcePeople:PersonInfo[]; references:ScenePersonReference[]; distanceSec:number;
+ sourceIdentityImages?:SourceIdentityImage[];
+}
 export interface QaSceneJob {
+ referenceCast?:QaReferenceCastJob;
   captureId: string;
   sceneKey: string;
   /** Absolute paths of the source frame and the generated image. */
   nowPath: string;
+  /** Raw camera frame for identity/count; preservation may use the intentional composed scene input. */
+  identityNowPath?: string;
   imagePath: string;
   predictionPrompt: string;
   archiveDir?: string | null;
@@ -23,6 +35,7 @@ export interface QaSceneJob {
   /** Scenes of this capture (the capture summary is written when all of them are judged). */
   sceneCount: number;
   test?: boolean;
+  expectedPeople?: number;
 }
 
 export interface QaServiceOptions {
@@ -33,6 +46,8 @@ export interface QaServiceOptions {
   autoImprove?: boolean;
   /** Test hooks. */
   judge?: typeof judgeImage;
+  inspectPeople?: typeof inspectPeopleIntegrity;
+  inspectReferenceCast?:typeof inspectAndCaptionWithReferences;
 }
 
 const mime = (f: string) => (/\.png$/i.test(f) ? 'image/png' : 'image/jpeg');
@@ -89,14 +104,51 @@ export class QaService {
   }
 
   enqueueScene(job: QaSceneJob): void {
-    if (!this.enabled || job.test) return;
+    if (!this.enabled) return;
+    // Pin private reference bytes/descriptions before the asynchronous queue can observe caller edits.
+    if(job.referenceCast)job={...job,referenceCast:structuredClone(job.referenceCast)};
     const dropped = this.queue.trim(12);
     if (dropped > 0) console.error(`[qa] backlog: dropped ${dropped} old job(s)`);
     this.queue.enqueue({
       captureId: job.captureId,
       sceneKey: job.sceneKey,
       run: async (signal) => {
-        const result = await this.judge({ nowImage: dataUrl(job.nowPath), image: dataUrl(job.imagePath), predictionPrompt: job.predictionPrompt }, { signal });
+        let result:Awaited<ReturnType<typeof judgeImage>>;
+        if(job.referenceCast){
+          const started=Date.now();
+          let integrity:ReferenceCastIntegrity|undefined,inspectionError:string|undefined,observedDefect:string|undefined;
+          try {
+            const meta=job.referenceCast;
+            if(!Number.isFinite(meta.distanceSec))throw Error('Invalid reference cast distance');
+            const roster=buildSceneReferenceCast(meta.sourcePeople,meta.references,meta.sourceIdentityImages);
+            if(job.expectedPeople!==roster.originalSourceCount)throw Error('expectedPeople must retain the original source count');
+            const observed=await (this.opts.inspectReferenceCast??inspectAndCaptionWithReferences)(dataUrl(job.identityNowPath??job.nowPath),dataUrl(job.imagePath),meta.sourcePeople,meta.references,meta.distanceSec,signal,meta.sourceIdentityImages);
+            // Recheck the exact allowed IDs; never trust a count-only ok flag or caller-supplied roster.
+            integrity=parseSceneReferenceCastIntegrity({originalSourceCount:observed.observedOriginalSourceCount,people:observed.outputToInventoryIds.map(inventoryId=>({inventoryId}))},roster);
+            if(observed.ok!==true&&integrity.ok===true){integrity.ok=observed.ok;integrity.reason=observed.reason;observedDefect=observed.defect;}
+          } catch(error) {
+            inspectionError='Reference cast inspection unavailable: '+String(error);
+          }
+          const inspectionMs=Date.now()-started;
+          signal.throwIfAborted();
+          // Always exactly one general judge invocation, including inventory failure. Never retry it here.
+          result=await this.judge({nowImage:dataUrl(job.nowPath),image:dataUrl(job.imagePath),predictionPrompt:job.predictionPrompt,
+            ...(integrity?.ok===true?{personInventory:{originalSourceCount:integrity.originalSourceCount,expectedInventoryCount:integrity.expectedInventoryCount,verified:true as const}}:{})},{signal});
+          if(integrity?.ok===false)result={...result,ok:result.ok===null?null:false,score:result.ok===null?null:Math.min(result.score??1,.5),defects:[...result.defects,{type:inspectionDefectType(observedDefect),where:job.sceneKey,note:integrity.reason+': '+JSON.stringify(integrity.outputToInventoryIds)}]};
+          else if(!integrity||integrity.ok===null)result={...result,ok:null,score:null,error:inspectionError??integrity?.reason??'Reference cast inventory unknown'};
+          result={...result,elapsedMs:result.elapsedMs+inspectionMs,inspectionVersion:(result.inspectionVersion??'general-qa')+'+reference-cast-v1',...(integrity?{referenceCastIntegrity:integrity}:{})};
+        } else result = await this.judge({ nowImage: dataUrl(job.nowPath), image: dataUrl(job.imagePath), predictionPrompt: job.predictionPrompt }, { signal });
+        if (!job.referenceCast && job.expectedPeople !== undefined) {
+          const started = Date.now();
+          try {
+            const integrity = await (this.opts.inspectPeople ?? inspectPeopleIntegrity)(dataUrl(job.identityNowPath??job.nowPath), dataUrl(job.imagePath), job.expectedPeople, signal);
+            if (integrity.ok === false) result = { ...result, ok: result.ok === null ? null : false, score: result.ok === null ? null : Math.min(result.score ?? 1, 0.5), defects: [...result.defects, { type: 'fabricated_person', where: job.sceneKey, note: integrity.reason + ': ' + JSON.stringify(integrity.outputToSource) }] };
+            else if (integrity.ok === null) result = { ...result, ok: null, score: null, error: integrity.reason };
+          } catch (error) {
+            result = { ...result, ok: null, score: null, error: 'Person integrity check unavailable: ' + String(error) };
+          }
+          result.elapsedMs += Date.now() - started;
+        }
         if (signal.aborted) return; // interrupted by a capture: the queue puts the job back
         const row: QaRow = {
           time: new Date().toISOString(),
@@ -105,6 +157,9 @@ export class QaService {
           file: path.basename(job.imagePath),
           ...result,
           rulebookVersion: job.rulebookVersion,
+          sceneCount: job.sceneCount,
+          disposition: 'accepted',
+          ...(job.test ? { test: true } : {}),
         };
         this.record(row, job);
       },
@@ -118,6 +173,9 @@ export class QaService {
       score: row.score,
       defects: row.defects,
       model: row.model,
+      inspectionVersion: row.inspectionVersion,
+      evidence: row.evidence,
+      ...(row.referenceCastIntegrity?{referenceCastIntegrity:row.referenceCastIntegrity}:{}),
       elapsedMs: row.elapsedMs,
       rulebookVersion: row.rulebookVersion,
       error: row.error,
@@ -126,11 +184,11 @@ export class QaService {
     console.log(
       `[qa] ${row.captureId} ${row.sceneKey}: ${row.ok === null ? `unknown (${row.error})` : row.ok ? 'ok' : `defects ${row.defects.map((d) => d.type).join(',')}`} score=${row.score ?? '-'} ${(row.elapsedMs / 1000).toFixed(1)}s`
     );
-    const list = this.perCapture.get(row.captureId) ?? [];
-    list.push(row);
+    const list = latestQaRows([...(this.perCapture.get(row.captureId) ?? []), row]).filter(r => !isRejectedQaRow(r));
     this.perCapture.set(row.captureId, list);
     if (list.length >= job.sceneCount) {
-      this.perCapture.delete(row.captureId);
+      const complete = completedQaCaptureIds(list).has(row.captureId);
+      if (complete) this.perCapture.delete(row.captureId);
       const defects: Record<string, number> = {};
       for (const r of list) for (const t of new Set(r.defects.map((d) => d.type))) defects[t] = (defects[t] ?? 0) + 1;
       try {
@@ -146,7 +204,7 @@ export class QaService {
       } catch {
         /* the log must never stop QA */
       }
-      if (this.autoImprove) this.scheduleImprove();
+      if (complete && this.autoImprove) this.scheduleImprove();
     }
     while (this.perCapture.size > 50) this.perCapture.delete(this.perCapture.keys().next().value as string);
   }
@@ -170,7 +228,6 @@ export class QaService {
 
   registerRoutes(app: Express): void {
     const paths = this.paths;
-    const nonTest = (rows: QaRow[]) => rows.filter((r) => !r.test);
     app.get('/api/qa', (req, res) => {
       const limit = Math.min(Math.max(Math.floor(Number(req.query.limit)) || 100, 1), 2000);
       const rows = readQaRows(paths.qaFile);
@@ -185,7 +242,8 @@ export class QaService {
         const d = new Date(iso);
         return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
       };
-      const rows = nonTest(readQaRows(paths.qaFile)).filter((r) => !day || local(r.time) === day);
+      const scope = req.query.source;
+      const rows = latestQaRows(readQaRows(paths.qaFile)).filter((r) => (!day || local(r.time) === day) && (scope === 'test' ? r.test === true : scope === 'venue' ? !r.test : true));
       res.json({ day, by, groups: summarizeQa(rows, by) });
     });
     // rulebook/USER_GUIDELINES.md (G-xx, fixed: the automatic improvement never edits it): list + addition history for /logs.

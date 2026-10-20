@@ -1,3 +1,4 @@
+import {sharedOllamaContextLength} from "../generation/sharedOllamaContext";
 /**
  * ~200-character Japanese summary of what has happened in the room so far, shown under NOW on the venue display.
  * Built from the scene history (formatted: times, merged identical lines, arrivals/departures) by a short
@@ -261,7 +262,7 @@ export async function summarizeHistory(
         think: false,
         format: "json",
         keep_alive: process.env.OLLAMA_KEEP_ALIVE ?? "0",
-        options: { temperature: 0.1, num_predict: 256, num_ctx: 4096 },
+        options: { temperature: 0.1, num_predict: 256, num_ctx: sharedOllamaContextLength() },
       }),
       signal: opts.signal
         ? AbortSignal.any([opts.signal, AbortSignal.timeout(opts.timeoutMs ?? 45_000)])

@@ -101,3 +101,47 @@ test('temporal labels', () => {
   assert.equal(temporalLabels(-60).temporalLabelEn, '1 minute into the past');
   assert.equal(temporalLabels(0).temporalLabelJa, '現在');
 });
+
+test('scenario inputs and history context never overwrite canonical NOW or another scene', () => {
+ const root=fs.mkdtempSync(path.join(os.tmpdir(),'scenario-archive-'));
+ const archive=new GenerationArchive(baseCtx,root);
+ const raw=Buffer.from('canonical original bytes');archive.saveSource(raw,'jpg');
+ archive.setHistoryContext({historyScope:'test:TSC-001:run:L1',testLoop:1});
+ archive.setScenarioControl({version:1,assetSha256:'original-asset-hash'});
+ const a=archive.saveScenarioInput(0,Buffer.from('scene A'),'png',{imageSha256:'a'});
+ const b=archive.saveScenarioInput(1,Buffer.from('scene B'),'png',{imageSha256:'b'});
+ archive.finish('completed');
+ assert.notEqual(a,b);assert.equal(fs.readFileSync(a!,'utf8'),'scene A');assert.equal(fs.readFileSync(b!,'utf8'),'scene B');
+ assert.deepEqual(fs.readFileSync(path.join(archive.dir,baseCtx.generationId+'_NOW.jpg')),raw);
+ const doc=JSON.parse(fs.readFileSync(path.join(archive.dir,baseCtx.generationId+'_prompts.json'),'utf8'));
+ assert.equal(doc.sourceFile,baseCtx.generationId+'_NOW.jpg');assert.equal(doc.scenarioInputs.A.imageSha256,'a');assert.equal(doc.scenarioInputs.B.imageSha256,'b');assert.equal(doc.historyContext.testLoop,1);
+});
+
+
+test('reference cast archive exit keeps original/allowed inventory separately and removes private image fields',()=>{
+ const root=fs.mkdtempSync(path.join(os.tmpdir(),'cast-archive-'));try{
+  const archive=new GenerationArchive(baseCtx,root);
+  const metadata:any={schema:1,originalSourceCount:1,expectedInventoryCount:2,allowedInventory:[{id:'source:0',origin:'source',personIndex:0,imageNumber:1},{id:'ref:upload:0',origin:'reference',personIndex:0,imageNumber:3,contentId:'upload',sha256:'a'.repeat(64),imageDataUrl:'data:image/png;base64,PRIVATE'}],imageBindings:[{imageNumber:1,role:'source-scene'},{imageNumber:2,role:'source-identity',sourceIndexes:[0]},{imageNumber:3,role:'added-people',contentId:'upload'}],references:[{contentId:'upload',sha256:'a'.repeat(64),peopleCount:1,imageDataUrl:'data:image/png;base64,PRIVATE'}],imageDataUrl:'data:image/png;base64,PRIVATE'};
+  archive.addScene(0,{sceneKey:'gen_a',distanceSec:15,label:'A',predictionPrompt:'shared room',scenarioDescription:'add reference',imagePromptFull:'allowed cast',negativePrompt:null,seed:1,elapsedMs:1,sceneReferenceCast:metadata},tinyPng(),'png');archive.finish('completed');
+  const text=fs.readFileSync(path.join(archive.dir,baseCtx.generationId+'_prompts.json'),'utf8'),doc=JSON.parse(text);
+  assert.equal(doc.scenes[0].sceneReferenceCast.originalSourceCount,1);assert.equal(doc.scenes[0].sceneReferenceCast.expectedInventoryCount,2);assert.equal(doc.scenes[0].sceneReferenceCast.allowedInventory[1].id,'ref:upload:0');assert.doesNotMatch(text,/base64|imageDataUrl|PRIVATE/);
+ }finally{fs.rmSync(root,{recursive:true,force:true});}
+});
+
+test('G-24 skipped scene: prompts.json scenes[] carries skipped:true + reason, README names the skip, no image is written', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'genarch-skip-'));
+  const id = baseCtx.generationId;
+  const a = new GenerationArchive({ ...baseCtx, params: { ...baseCtx.params, sceneDistancesSec: [30, 30, -30], imageCount: 3 } }, root);
+  a.setEmptyRoom([{ sceneKey: 'gen_b', roll: 0.8, personDrawn: false, skipped: true, skipReason: 'no_recent_activity' }]);
+  a.addScene(0, { sceneKey: 'gen_a', distanceSec: 30, label: 'x', predictionPrompt: 'p', scenarioDescription: 'd', imagePromptFull: 'i', negativePrompt: null, seed: 1, elapsedMs: 1 }, tinyPng(), 'png');
+  a.addSkippedScene(1, { sceneKey: 'gen_b', distanceSec: 30, reason: 'no_recent_activity', emptyRoom: { roll: 0.8 } });
+  a.finish('completed');
+  const dir = path.join(root, id.slice(0, 10), id);
+  const doc = JSON.parse(fs.readFileSync(path.join(dir, `${id}_prompts.json`), 'utf8'));
+  assert.equal(doc.scenes.length, 2);
+  assert.deepEqual([doc.scenes[1].letter, doc.scenes[1].sceneKey, doc.scenes[1].skipped, doc.scenes[1].skipReason, doc.scenes[1].file], ['B', 'gen_b', true, 'no_recent_activity', null]);
+  assert.equal(doc.emptyRoom[0].skipReason, 'no_recent_activity');
+  assert.ok(!fs.existsSync(path.join(dir, `${id}_B.png`)));
+  assert.match(fs.readFileSync(path.join(dir, `${id}_README.txt`), 'utf8'), /B \(gen_b\).*skip.*no_recent_activity/);
+  fs.rmSync(root, { recursive: true, force: true });
+});

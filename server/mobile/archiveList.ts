@@ -58,7 +58,7 @@ export function toMobileItem(doc: any): MobileCaptureItem | null {
   const generationId = String(doc?.generationId ?? '');
   if (!GENERATION_ID.test(generationId)) return null;
   const scenes: MobileScene[] = Array.isArray(doc.scenes)
-    ? doc.scenes.map((s: any, i: number) => ({
+    ? doc.scenes.filter((s: any) => s?.skipped !== true).map((s: any, i: number) => ({
         key: String(s?.sceneKey ?? `gen_${String.fromCharCode(97 + i)}`),
         letter: String(s?.letter ?? String.fromCharCode(65 + i)),
         distanceSec: num(s?.distanceSec, num(doc?.params?.sceneDistancesSec?.[i])),

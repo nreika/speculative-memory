@@ -1,14 +1,20 @@
+import {operatorActorPosition,personAtImagePosition,translatedOperatorAction,positionedActorSubject} from './operatorActionTranslation';
+import {sharedOllamaContextLength} from "./sharedOllamaContext";
+import {displayTranslationSubset} from "./displayTranslationSubset";
 /**
  * Local VLM scenario planner via Ollama.
  * Replaces the Gemini "predictFutureScenarios" text step.
  */
+import { withoutLightingChanges,uniqueActionPerson,occupiedHandSides } from "./fidelity";
+import { bothArmsHolding } from "./handConflict";
 import { parseClockVisible, type ScenarioResult } from "../../services/promptBuilder";
 import { withEnglishSpan, withJapaneseSpan } from "./spanFix";
 import { groundTruthNote, hasBigArmMotion, isWeakScenario, mentionsSeveralPeople, modestMotion, recentPersonPhrase, spanPhrase, synthesizeEmptyRoom, synthesizeScenarios, type PersonInfo } from "./peopleDescribe";
-import { extractObjects } from "./scenarioGuard";
+import { emptyRoomObjectChange, extractObjects, isNoChangeSentence } from "./scenarioGuard";
+import { resolveEmptyScene, resolveRecentPersonScene, type EmptyRoomSceneDecision } from "./emptyRoomDecision";
 import { guardRetries, timeBudgetMs, withVlmExtras } from "./rulebook";
-import { findFabricatedObjects, objectReminder } from "./objectGuard";
-import { buildExtraSentence, buildSceneExtrasNote, lookupAction, SCENE_KEYS, serverExtraDescription, type SceneExtras } from "./sceneExtras";
+import { findFabricatedObjects, objectReminder, observedObjectContext } from "./objectGuard";
+import { buildExtraSentence, buildSceneExtrasNote, preserveActionConditions, resolveActionPhrase, SCENE_KEYS, serverExtraDescription, type SceneExtras } from "./sceneExtras";
 import {
   applySafeFallback,
   occupancySourceOf,
@@ -44,7 +50,7 @@ export function stripJapaneseDescriptionRule(prompt: string): string {
 const JSON_INSTRUCTION =
   "\n\nFIRST decide who is visible and write scene_description. IF NO PERSON is visible in this frame (the room is empty), " +
   "NO scenario may mention any person, people, hands, arms, he, she or they: there is nobody, so describe only changes of objects that are already visible " +
-  "(ONLY environmental changes: light or shadow changing, a curtain swaying, a screen's content changing, lamps turning on or off; NEVER moving, rotating, opening, taking out or putting away any object, because nobody is there to do it). Write only affirmative changes of objects or light there (never sentences such as 'Nobody enters' or 'no one is present'). This overrides every example below that mentions people. " +
+  "(keep architecture, camera, screen contents, lighting, brightness, colours and white balance unchanged). An existing movable object may move or rotate naturally when supported by the visible scene and time span; otherwise keep it in place. Preserve each original object's identity, count, real-world size and continuous structure; never make it vanish or replace it. Do not invent an invisible mover or an unsupported large displacement. Write only affirmative object-state changes (never sentences such as 'Nobody enters' or 'no one is present'). This overrides every example below that mentions people. " +
   "Each prediction_prompt MUST be a short image-EDIT instruction (max 2 sentences) that " +
   "describes ONLY what changes from the given frame — the new actions, poses and positions of the people who are visible (only if any), " +
   "and nearby object states. Do NOT re-describe the room, camera, lighting or the " +
@@ -56,7 +62,7 @@ const JSON_INSTRUCTION =
   "Follow the per-scenario direction and time span, and the People and Tone instructions given above (how far before or after this frame each scenario is, how much people appear or move, how calm or dramatic); a new person may enter only when the People instruction allows it, always from a frame edge or door and never in the middle of the scene. In an empty room nobody enters unless the People instruction allows it. " +
   "Never change anyone's hairstyle, hair length or hair colour. " +
   "Never write large arm motions (raising both hands or arms overhead, stretching, waving, banzai) unless an operator MAIN EVENT asks for it; only small posture changes, sitting down or standing up, walking and turning are allowed. " +
-  "Do not add new objects and do not relocate small loose items (bags, papers, cups); prefer changes in place (a chair rotated, a monitor off); a dark monitor stays dark. If an object must move, say it is moved FROM its original spot TO the new one and the original spot becomes empty. " +
+  "Do not add, duplicate or remove objects. Existing movable furniture or loose items may change position only when the scenario and visible physical support justify it; do not invent a mover, move unrelated objects, or enlarge the amount of movement to hide errors. A dark monitor stays dark; all screen contents and lighting stay unchanged. If an object must move, say it is moved FROM its original spot TO the new one and the original spot becomes empty. " +
   "If a person is visible, every person keeps exactly two arms and two hands, and nobody is ever duplicated.\n" +
   'Return ONLY a JSON object of the form ' +
   '{"clock_visible":false,"scene_description":"...","scenarios":[{"prediction_prompt":"...","scenario_description":"...","label":"..."}]}. ' +
@@ -71,7 +77,7 @@ const JSON_INSTRUCTION =
   "No markdown, no commentary.";
 
 // Context and output budget. The prompt+image is ~2.9k tokens; num_ctx must hold it plus the output.
-const VLM_NUM_CTX = Number(process.env.VLM_NUM_CTX || "8192");
+const VLM_NUM_CTX = sharedOllamaContextLength();
 const VLM_NUM_PREDICT = Number(process.env.VLM_NUM_PREDICT || "2048");
 
 interface OllamaGenerateResponse {
@@ -127,7 +133,7 @@ export interface PlanTrace {
 // Empty room: ONE planner call (then server-side templates); people present: at most 2 calls within the budget.
 // Time budget: rulebook guard.timeBudgetMs (env VLM_TIME_BUDGET_MS overrides).
 const NO_PEOPLE_REMINDER =
-  "\n\nREMINDER: the frame description shows NO person. Write every scenario about objects, light or screens only; " +
+  "\n\nREMINDER: the frame description shows NO person. Keep objects, lighting and screens exactly as in the input; " +
   "do not write person, people, he, she, they, hand or arm.";
 
 export async function planScenariosLocal(args: {
@@ -140,6 +146,12 @@ export async function planScenariosLocal(args: {
   signal?: AbortSignal;
   /** A person was seen recently (RECENT_PERSON_WINDOW_MIN): people in scenarios are not treated as invented. */
   allowPerson?: boolean;
+  /**
+   * G-24/G-25 per-scene decisions for an unoccupied frame (server/generation/emptyRoomDecision.ts). When given, the recent
+   * person is drawn only in scenes with personDrawn, and the other empty scenes get an object change or are skipped.
+   * Absent = the old behaviour (allowPerson for every scene, object change whenever the scene asks for no change).
+   */
+  emptyRoomScenes?: EmptyRoomSceneDecision[];
   /** Person detector verdict on the source frame (server/presence/personDetect.ts); true = occupied regardless of the text. */
   detector?: { person: boolean | null; count?: number; elapsedMs: number; doneReason?: string; raw?: string };
   /** People described by the short image call (detector said person=true). */
@@ -185,6 +197,8 @@ export async function planScenariosLocal(args: {
   const detectorEmpty = args.detector?.person === false;
   const sceneEmpty = (text: string) => detectorEmpty || isUnoccupied(text);
   const detectorDisagrees = (text: string) => args.detector?.person === false && !isUnoccupied(text);
+  // Recent person drawn in scene i (empty frame): every scene with allowPerson, or only the scenes the per-scene roll chose.
+  const personScene = (i: number) => args.allowPerson === true && (args.emptyRoomScenes ? args.emptyRoomScenes[i]?.personDrawn === true : true);
   let armsRaisedIdx: number[] = [];
   // sceneExtras are NOT left to the planner: each is rewritten into one concrete English sentence about the
   // person already in the photo (short image call) and the scene is written by the server (no judge call).
@@ -206,11 +220,19 @@ export async function planScenariosLocal(args: {
       const ja = args.sceneExtras[key];
       if (!ja) continue;
       // Action: dictionary first, else a pure text translation (no image: the model would describe the current pose).
-      const hit = lookupAction(ja);
-      let actionEn = hit?.en ?? (await translateActionPhrase(ja, args.signal, args.llm));
+      // Dictionary only on an exact whole phrase; otherwise the meaning-preserving text translation, used verbatim.
+      const located=operatorActorPosition(ja);
+      const positioned=located.position?personAtImagePosition(args.people??[],located.position):undefined;
+      const poseActor=positioned??(args.people?.length===1?args.people[0]:undefined);
+      const resolved=await resolveActionPhrase(located.actionText,(text,pose)=>translateActionPhrase(text,args.signal,args.llm,pose),poseActor?.pose);
+      let actionEn = resolved.en;
       if (!actionEn) actionEn = `performs: ${ja}`;
-      extrasJa[key] = hit?.ja ?? ja;
-      const sentence = buildExtraSentence(actionEn, args.people?.[0]?.clothes);
+      extrasJa[key] = located.position?ja:resolved.ja ?? ja;
+      actionEn=translatedOperatorAction(ja,actionEn,located.position);
+      const baseSentence = located.position?buildExtraSentence(actionEn).replace('The person already in the photo',positionedActorSubject(located.position,positioned?.clothes)):buildExtraSentence(actionEn,args.people?.[0]?.clothes);
+      const actor=positioned??uniqueActionPerson(baseSentence,args.people??[]);
+      // A both-hands object (tablet in both hands, arms crossed/hugging) moves to one arm when the extra needs a hand.
+      const sentence = preserveActionConditions(ja,baseSentence,actor?occupiedHandSides(actor):[],actor?bothArmsHolding(actor)?.item:undefined);
       extrasResolved[key] = sentence;
       extrasEnglish[key] = sentence;
       console.error(`[extras] ${key}: "${ja}" -> ${sentence}`);
@@ -249,14 +271,44 @@ export async function planScenariosLocal(args: {
   const finishWith = async (list: ScenarioResult[]): Promise<ScenarioResult[]> => {
     // The leading time span comes from each scene's signed distance, not from the model (before and after translation).
     const spanDists = args.sceneDistances ?? [30, 30, -30];
-    const spanned = list.map((x, i) => ({ ...x, scenario_description: withEnglishSpan(x.scenario_description, spanDists[i] ?? 30) }));
-    const out = (await translateDisplayTextToJapanese(spanned, args.signal, args.llm)).map((x, i) => ({
+    // Empty room: a scene that would ask for no change ("The pipes remain exactly as in the input", or nothing left after the
+    // lighting filter) becomes one small change of a movable object in the frame; the no-change text only when none exists.
+    const emptyFrame = sceneEmpty(list[0]?.scene_now ?? "") && !detectedPerson;
+    list = list.map((x, i) => {
+      const kept = withoutLightingChanges(x.prediction_prompt);
+      const emptyFinal = emptyFrame && !personScene(i);
+      const decision = args.emptyRoomScenes?.[i];
+      if (emptyFrame && personScene(i) && decision) {
+        // G-24 gate is authoritative also in a scene that draws the recent person: when objectAllowed=false the planner's own
+        // object changes ("the bin shifts / is opened", joined as "..., while ...") are dropped; only the person's quiet motion stays.
+        const r = resolveRecentPersonScene({ decision, kept, personOnly: `The person ${recentPersonPhrase(i)}.` });
+        if (r !== kept) console.error(`[empty-room] scene ${i + 1}: object change dropped (${decision.objectBlockedReason}); person-only motion`);
+        return { ...x, prediction_prompt: r };
+      }
+      if (emptyFinal && decision) {
+        // G-24: object change only after recent activity + roll; otherwise the scene is skipped (no "remains the same").
+        const r = resolveEmptyScene({ decision, kept, isNoChange: isNoChangeSentence,
+          objectChange: () => emptyRoomObjectChange(list[0]?.scene_now, list[0]?.foreground_object, spanDists[i] ?? 30, i) });
+        decision.skipped = !!r.skipped;
+        if (!r.skipped) delete decision.skipReason;
+        if (r.skipped) { decision.skipReason = r.skipped; console.error(`[empty-room] scene ${i + 1} skipped: ${r.skipped}`); return { ...x, prediction_prompt: "", skipped: r.skipped }; }
+        return { ...x, prediction_prompt: r.text };
+      }
+      if (emptyFinal && (!kept || isNoChangeSentence(kept))) {
+        const change = emptyRoomObjectChange(list[0]?.scene_now, list[0]?.foreground_object, spanDists[i] ?? 30, i);
+        if (change) return { ...x, prediction_prompt: change };
+      }
+      return { ...x, prediction_prompt: kept || 'Keep the scene exactly as in the input.' };
+    });
+    const spanned = list.map((x, i) => ({ ...x, scenario_description: x.skipped ? "" : withEnglishSpan(x.prediction_prompt, spanDists[i] ?? 30) }));
+    const out = (await translateDisplayTextToJapanese(spanned, args.signal, args.llm,process.env.VLM_SKIP_OVERRIDDEN_TRANSLATIONS==='true'?extrasOverrides:undefined)).map((x, i) => ({
       ...x,
       scenario_description: withJapaneseSpan(x.scenario_description, spanDists[i] ?? 30),
     }));
     // Recent person drawn into an empty frame: the display text always names the subject ("人物は…").
     if (args.allowPerson === true && !detectedPerson) {
       out.forEach((x, i) => {
+        if (!personScene(i) || x.skipped) return;
         // only where the sentence's subject is the person (never on an environment sentence such as "the box is pushed...")
         if (!/^the person\b/i.test(list[i]?.prediction_prompt ?? "")) return;
         const m = x.scenario_description.match(/^((?:[0-9０-９]+分)?[0-9０-９]+秒[後前]、)(.*)$/);
@@ -267,6 +319,9 @@ export async function planScenariosLocal(args: {
     extrasOverrides.forEach((ja, i) => {
       if (out[i]) out[i] = { ...out[i], scenario_description: ja };
     });
+    // Skipped empty-room scenes carry no text at all (never a "remains the same" sentence).
+    out.forEach((x, i) => { if (list[i]?.skipped) out[i] = { ...x, prediction_prompt: "", scenario_description: "", skipped: list[i].skipped }; });
+    if (args.emptyRoomScenes && emptyFrame && args.trace?.guard) args.trace.guard.emptyRoom = args.emptyRoomScenes;
     return out;
   };
   const fabricatedPerAttempt: number[][] = [];
@@ -349,13 +404,13 @@ export async function planScenariosLocal(args: {
       armIdx.sort((x, y) => x - y);
       armsRaisedIdx = armIdx;
       // Objects the frame does not contain (a jacket pulled from a chair that is not there): one re-ask, then replaced.
-      const peopleText = (args.people ?? []).map((p) => `${p.pose} ${p.position} ${p.clothes}`).join(" ");
-      const objFab = bad.length === 0 ? findFabricatedObjects(`${scene} ${peopleText}`, picked) : [];
+      const objectContext=observedObjectContext(scene,args.people,picked[0]?.foreground_object);
+      const objFab = bad.length === 0 ? findFabricatedObjects(objectContext, picked) : [];
       if (objFab.length > 0 && !objectRetried && canRetry()) {
         objectRetried = true;
         const words = Array.from(new Set(objFab.flatMap((f) => f.words)));
         console.error(`[guard] fabricated objects in scenarios ${objFab.map((f) => `${f.index + 1}:${f.words.join("/")}`).join(", ")} -> retry once`);
-        body.prompt = body.prompt + objectReminder(scene, words);
+        body.prompt = body.prompt + objectReminder(objectContext, words);
         continue;
       }
       // Repeated scenarios: one re-ask; if still repeated in an empty room, vary with scene-object templates.
@@ -382,9 +437,9 @@ export async function planScenariosLocal(args: {
         for (const f of objFab) if (!bad.includes(f.index) && !dupReplaced.includes(f.index) && !weak.includes(f.index)) weak.push(f.index);
         if (objFab.length > 0) console.error(`[guard] fabricated objects still present after retry: replaced by environmental templates (${objFab.map((f) => f.words.join('/')).join(', ')})`);
       }
-      let final = applySafeFallback(picked, [...bad, ...dupReplaced, ...weak]);
+      let final = applySafeFallback(picked, [...bad, ...dupReplaced, ...weak], args.sceneDistances);
       if (weak.length > 0) {
-        const synthEmpty = synthesizeEmptyRoom({ distances: args.sceneDistances ?? [30, 30, -30], objects: extractObjects(scene), count: picked.length });
+        const synthEmpty = synthesizeEmptyRoom({ distances: args.sceneDistances ?? [30, 30, -30], objects: extractObjects(scene), count: picked.length, scene, foregroundObject: picked[0]?.foreground_object });
         final = final.map((s, i) => (weak.includes(i) ? { ...s, prediction_prompt: synthEmpty[i].prediction_prompt, scenario_description: synthEmpty[i].scenario_description } : s));
         console.error(`[guard] weak empty-room scenarios ${weak.map((i) => i + 1).join(",")} replaced by server templates`);
       }
@@ -418,6 +473,7 @@ export async function planScenariosLocal(args: {
       if (recentDraw) {
         const span = (x: ScenarioResult) => (x.scenario_description.match(/^[^,]{0,40},/) ?? ["Shortly after,"])[0];
         final = final.map((x, i) => {
+          if (!personScene(i)) return x;
           const pred = x.prediction_prompt;
           const phrase = recentPersonPhrase(i);
           if (mentionsSeveralPeople(pred)) {
@@ -531,11 +587,24 @@ export async function planScenariosLocal(args: {
   }
 }
 
+/**
+ * A translation that describes no change at all ("remains seated", "does not move"). A state-keeping clause joined to a
+ * real action ("stays seated on the chair and looks down at the desk") is a valid action and must not be rejected.
+ */
+export function isNoChangeAction(action: string): boolean {
+  const noChange = /\b(remains?|stays?|keeps? still|without moving|does not move|no change|unchanged)\b/i;
+  const parts = action.split(/\s*(?:,|;|\band\b|\bwhile\b|\bthen\b)\s*/i).map((p) => p.trim()).filter(Boolean);
+  return parts.length > 0 && parts.every((p) => noChange.test(p));
+}
+
 /** Pure text translation of a Japanese instruction into a short third-person English verb phrase ({"action": "..."}). */
-export async function translateActionPhrase(text: string, signal?: AbortSignal, llm?: PlannerLlm): Promise<string | null> {
+export async function translateActionPhrase(text: string, signal?: AbortSignal, llm?: PlannerLlm, pose?: string): Promise<string | null> {
   const prompt =
-    "Translate this Japanese instruction into a short English verb phrase describing an action, " +
-    'e.g. 「立ち上がってる」 -> "stands up from the chair", 「帰ろうとしている」 -> "gets ready to leave and heads for the exit". ' +
+    "Translate the COMPLETE Japanese instruction into a concise English action phrase. Preserve every verb, object, support surface, left/right/both-hand position, grip and held-object condition; never reduce multiple clauses to the first action. " +
+    "〜たまま / 〜まま means the person keeps that state while doing the main action (座ったまま = stays seated, 立ったまま = keeps standing); 〜ながら means while; 〜ずに means without. " +
+    "Screen/image left, right or center identifies the person in the image, never an anatomical hand. If the instruction says one hand or the other hand, keep those unspecified; do not assign left or right. Return the verb phrase without a person subject. " +
+    (pose ? `The person is currently ${String(pose).replace(/[^A-Za-z ,-]/g, " ").trim().slice(0, 40)}. ` : "") +
+    'e.g. 「立ち上がってる」 -> "stands up from the chair", 「帰ろうとしている」 -> "gets ready to leave and heads for the exit", 「椅子に座ったまま机を見る」 -> "stays seated on the chair and looks down at the desk", 「机に片手を置く」 -> "places one hand on the desk". ' +
     `Instruction: "${text}"\nOutput JSON {"action":"..."} only.`;
   try {
     let raw: string;
@@ -552,7 +621,7 @@ export async function translateActionPhrase(text: string, signal?: AbortSignal, 
           think: false,
           format: "json",
           keep_alive: PHASE_KEEP_ALIVE,
-          options: { temperature: 0, num_predict: 32, num_ctx: 2048 },
+          options: { temperature: 0, num_predict: 64, num_ctx: sharedOllamaContextLength() },
         }),
         signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(20000)]) : AbortSignal.timeout(20000),
       });
@@ -562,7 +631,7 @@ export async function translateActionPhrase(text: string, signal?: AbortSignal, 
     const a = JSON.parse(raw || "{}")?.action;
     if (typeof a !== "string" || !a.trim()) return null;
     const action = a.trim().slice(0, 160);
-    return /\b(remains?|stays?|without moving|does not move|no change|unchanged)\b/i.test(action) ? null : action;
+    return isNoChangeAction(action) ? null : action;
   } catch {
     return null;
   }
@@ -603,7 +672,7 @@ export async function rewriteExtraEnglish(
           think: false,
           format: "json",
           keep_alive: PHASE_KEEP_ALIVE,
-          options: { temperature: 0, num_predict: 64, num_ctx: 4096 },
+          options: { temperature: 0, num_predict: 64, num_ctx: sharedOllamaContextLength() },
         }),
         signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(30000)]) : AbortSignal.timeout(30000),
       });
@@ -647,7 +716,7 @@ export async function judgeArmsRaised(prediction: string, signal?: AbortSignal, 
           think: false,
           format: "json",
           keep_alive: PHASE_KEEP_ALIVE,
-          options: { temperature: 0, num_predict: 16, num_ctx: 2048 },
+          options: { temperature: 0, num_predict: 16, num_ctx: sharedOllamaContextLength() },
         }),
         signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(20000)]) : AbortSignal.timeout(20000),
       });
@@ -682,7 +751,7 @@ export async function translateExtraToEnglish(text: string, signal?: AbortSignal
           think: false,
           format: "json",
           keep_alive: PHASE_KEEP_ALIVE,
-          options: { temperature: 0, num_predict: 48, num_ctx: 2048 },
+          options: { temperature: 0, num_predict: 48, num_ctx: sharedOllamaContextLength() },
         }),
         signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(30000)]) : AbortSignal.timeout(30000),
       });
@@ -719,7 +788,7 @@ Scenario: "${scenario.prediction_prompt} ${scenario.scenario_description}"
     think: false,
     format: "json",
     keep_alive: PHASE_KEEP_ALIVE,
-    options: { temperature: 0, num_predict: 16, num_ctx: 2048 },
+    options: { temperature: 0, num_predict: 16, num_ctx: sharedOllamaContextLength() },
   });
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
@@ -753,10 +822,12 @@ Scenario: "${scenario.prediction_prompt} ${scenario.scenario_description}"
 export async function translateDisplayTextToJapanese(
   scenarios: ScenarioResult[],
   signal?: AbortSignal,
-  llm?: PlannerLlm
+  llm?: PlannerLlm,
+  displayOverrides:ReadonlyMap<number,string>=new Map()
 ): Promise<ScenarioResult[]> {
   const sceneNow = scenarios[0]?.scene_now ?? "";
-  const payload = { scene: sceneNow, items: scenarios.map((s) => s.scenario_description) };
+  const subset=displayTranslationSubset(scenarios.map(s=>s.scenario_description),displayOverrides);
+  const payload = { scene: sceneNow, items: subset.items };
   try {
     let outRaw: string;
     if (llm) {
@@ -793,11 +864,12 @@ export async function translateDisplayTextToJapanese(
     }
     const out = JSON.parse(outRaw || "{}");
     const items: unknown = out?.items;
-    if (!Array.isArray(items) || items.length !== scenarios.length) throw new Error("item count mismatch");
+    if (!Array.isArray(items) || items.length !== subset.items.length) throw new Error("item count mismatch");
+    const descriptions=subset.restore(items);
     const scene = typeof out?.scene === "string" && out.scene.trim() ? out.scene.trim() : sceneNow;
     return scenarios.map((s, i) => ({
       ...s,
-      scenario_description: String(items[i] ?? "").trim() || s.scenario_description,
+      scenario_description: descriptions[i],
       scene_now: scene,
     }));
   } catch (err) {
@@ -870,3 +942,4 @@ export async function vlmReachable(): Promise<boolean> {
 }
 
 export const vlmConfig = { url: OLLAMA_URL, model: VLM_MODEL };
+

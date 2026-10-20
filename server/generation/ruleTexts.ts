@@ -86,7 +86,7 @@ export const EMPTY_ROOM_NO_PERSON_RULE =
 export const EMPTY_ROOM = {
   head: "Edit this exact photo according to: ",
   scope:
-    "Change only the lighting and small in-place details of the objects named. Everything else - the room, walls, floor, ceiling, background, furniture, camera, lighting, the number of monitors and what each monitor displays - stays pixel-identical to the input.",
+    "Keep the unoccupied scene, every object and all screen content exactly as in the input. Exposure, brightness, lighting colour and white balance stay unchanged.",
   keep: "Keep every object, the furniture, the camera and the framing identical to the input.",
   preserve: "Preserve the empty floor and the empty chairs exactly as they are.",
   noAdd: "Do not add any object that is not in the photo; every object stays exactly where it is.",
@@ -103,14 +103,14 @@ export const VLM_EXTRA_MARKER = "Return ONLY a JSON object of the form ";
  * gestures (G-11); the examples use face, shoulders, torso and light. The empty-room variants contain no person words.
  */
 export const TONE_IMAGE_RULES: string[] = [
-  "Amount of change: keep it minimal. Only micro-movements of the people already in the picture, and the lighting, colour temperature and time of day stay almost exactly as in the input.",
-  "Amount of change: keep it small. A gentle change of pose or gaze, and only a slight change of the lighting; the time of day advances very little.",
-  "Amount of change: make it clearly visible. A clearly different pose and facial expression, and a noticeable but natural change of the light (somewhat brighter or dimmer, warmer or cooler) as far as the time span allows.",
-  "Amount of change: make it large and unmistakable. A strong, abrupt pose and facial expression (face, shoulders and torso), and a clear change of the light (brightness and colour shifting towards morning or evening, a visible lamp switching on or off) as far as the time span allows; the room, objects and camera stay identical.",
+  "Amount of change: micro-movements of the existing people; preserve their identity and belongings.",
+  "Amount of change: a gentle visible change of pose or gaze; preserve identity and belongings.",
+  "Amount of change: a clearly different energetic pose and readable expression; preserve identity, belongings and people count.",
+  "Amount of change: a strong, unmistakable change of posture, shoulders and torso; preserve identity, belongings and people count."
 ];
 export const TONE_IMAGE_RULES_EMPTY: string[] = [
-  "Amount of change: keep it minimal. The light changes only barely, a slight shift of brightness.",
-  "Amount of change: keep it small. The light shifts slightly in brightness or colour temperature, and shadows move a little.",
-  "Amount of change: make it clearly visible. The light visibly changes, clearly brighter or dimmer, warmer or cooler, with shadows that have moved, as far as the time span allows.",
-  "Amount of change: make it large. The light changes strongly, a big shift of brightness and colour with long or moved shadows, or a visible lamp switching on or off, as far as the time span allows; everything else in the room stays identical.",
+  "Keep the unoccupied scene exactly as in the input.",
+  "Keep the unoccupied scene exactly as in the input.",
+  "Keep the unoccupied scene exactly as in the input.",
+  "Keep the unoccupied scene exactly as in the input."
 ];

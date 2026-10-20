@@ -6,21 +6,28 @@
 # Prints stop time, recovery time and downtime seconds (put them in the report).
 $repo = Split-Path -Parent $PSScriptRoot
 $log = Join-Path $repo 'logs\server.log'
-$last = Get-Content $log -Tail 1
-if ($last -notmatch 'capture\] (completed|failed|cancelled)') { "NOT RESTARTING: capture in progress or unknown state. last line: $last"; exit 1 }
+# QA/logging can append after capture completion. The live manager is authoritative.
+try {
+  $captureStatus = Invoke-RestMethod 'http://127.0.0.1:3000/api/capture/status' -TimeoutSec 3
+  if ($captureStatus.active) { "NOT RESTARTING: capture in progress: $($captureStatus.active.captureId)"; exit 1 }
+} catch {
+  $last = Get-Content $log -Tail 1
+  if ($last -notmatch 'capture\] (completed|failed|cancelled)') { "NOT RESTARTING: capture state unknown. last line: $last"; exit 1 }
+}
 $c = Get-NetTCPConnection -LocalPort 3000 -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
 if ($c) {
   $p = Get-Process -Id $c.OwningProcess
   if (((Get-Date) - $p.StartTime).TotalSeconds -lt 60) { "NOT RESTARTING: server started $([int]((Get-Date) - $p.StartTime).TotalSeconds) s ago"; exit 1 }
 }
-$cmd = "cmd.exe /c `"cd /d $repo && node_modules\.bin\tsx.cmd server.ts >> logs\server.log 2>> logs\server.err.log`""
+$nodePath = (Get-Command node.exe -ErrorAction Stop).Source
+$bootstrap = Join-Path $repo 'scripts\server-bootstrap.mjs'
+$cmd = '"' + $nodePath + '" --import tsx "' + $bootstrap + '"'
+
 # ShowWindow=0 (SW_HIDE): the server's console window stays hidden (stop it with stop-server.ps1 or taskkill)
 $si = New-CimInstance -ClassName Win32_ProcessStartup -ClientOnly -Property @{ ShowWindow = [uint16]0 }
 function Start-Server { (Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = $cmd; CurrentDirectory = $repo; ProcessStartupInformation = $si }).ReturnValue }
 function Test-Up {
-  $l = Get-NetTCPConnection -LocalPort 3000 -State Listen -ErrorAction SilentlyContinue
-  if (-not $l) { return $false }
-  try { (Invoke-WebRequest 'http://127.0.0.1:3000/api/usage' -UseBasicParsing -TimeoutSec 2).StatusCode -eq 200 } catch { $false }
+  try { (Invoke-WebRequest 'http://127.0.0.1:3000/api/capture/status' -UseBasicParsing -TimeoutSec 2).StatusCode -eq 200 } catch { $false }
 }
 $stopAt = Get-Date
 if ($c) { Stop-Process -Id $c.OwningProcess -Force }

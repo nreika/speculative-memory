@@ -1,8 +1,16 @@
+import { remoteCamera } from '../remoteCamera';
+import {defaultLocalImageEngine,selectedLocalImageUrl} from '../generation/imageEngine';
 import type { Express } from 'express';
 
 export interface HealthResult {
   ok: true;
+  scenarioControlVersion?:1;
+  scenarioControlCapabilities?:Record<string,unknown>;
   comfyui: boolean;
+  comfyuiUrl?:string;
+  localImageEngine?:string;
+  localImageEngineReachable?:boolean;
+  turbo?:{url:string;reachable:boolean};
   ollama: boolean;
   time: string;
   /** ComfyUI queue sizes (null when /queue does not answer). A growing `pending` with nothing finishing = hung job. */
@@ -16,6 +24,8 @@ export interface HealthResult {
 
 export interface HealthOptions {
   /** Live watchdog state merged into the answer. */
+  scenarioControlVersion?:1;
+  scenarioControlCapabilities?:Record<string,unknown>;
   watchdogStatus?: () => { lastTimeoutAt: string | null; autoRestarts: number; consecutiveTimeouts: number; alert: { level: string; message: string; since: string } | null };
   fetchImpl?: typeof fetch;
   now?: () => number;
@@ -52,7 +62,7 @@ export async function probe(fetchImpl: typeof fetch, url: string, timeoutMs: num
 export function createHealthChecker(opts: HealthOptions = {}): () => Promise<HealthResult> {
   const fetchImpl = opts.fetchImpl ?? fetch;
   const now = opts.now ?? Date.now;
-  const comfyUrl = opts.comfyUrl ?? (() => (process.env.COMFYUI_URL || 'http://127.0.0.1:8000').replace(/\/$/, ''));
+  const comfyUrl = opts.comfyUrl ?? (() => selectedLocalImageUrl());
   const ollamaUrl = opts.ollamaUrl ?? (() => (process.env.OLLAMA_URL || 'http://127.0.0.1:11434').replace(/\/$/, ''));
   const timeoutMs = opts.timeoutMs ?? 2000;
   const cacheMs = opts.cacheMs ?? 5000;
@@ -76,11 +86,13 @@ export function createHealthChecker(opts: HealthOptions = {}): () => Promise<Hea
           clearTimeout(timer);
         }
       })();
+      const localImageEngine=defaultLocalImageEngine();
+      const selectedUrl=comfyUrl();
       const [comfyui, ollama] = await Promise.all([
         probe(fetchImpl, `${comfyUrl()}/system_stats`, timeoutMs),
         probe(fetchImpl, `${ollamaUrl()}/api/tags`, timeoutMs),
       ]);
-      const value: HealthResult = { ok: true, comfyui, ollama, time: new Date(now()).toISOString(), comfyQueue: await queueProbe };
+      const value: HealthResult = { ok: true, comfyui, ollama, comfyuiUrl:selectedUrl,localImageEngine,localImageEngineReachable:comfyui,...(localImageEngine==='qwen21-turbo'?{turbo:{url:selectedUrl,reachable:comfyui}}:{}),time: new Date(now()).toISOString(), comfyQueue: await queueProbe };
       cached = { at: now(), value };
       return value;
     })().finally(() => {
@@ -98,10 +110,13 @@ export function registerHealthRoutes(app: Express, opts: HealthOptions = {}): vo
     const extra = wd
       ? { lastTimeoutAt: wd.lastTimeoutAt, autoRestarts: wd.autoRestarts, consecutiveTimeouts: wd.consecutiveTimeouts, comfyAlert: wd.alert }
       : {};
+    // Remote phone camera (input "remote-device"): state 'stale' means captures are refused ("remote camera stale").
+    const rc = remoteCamera.status();
+    Object.assign(extra, { remoteCamera: { selected: rc.selected, state: rc.state, ageSec: rc.ageSec, ...(rc.selected && rc.state !== 'fresh' ? { message: 'remote camera stale' } : {}) } });
     try {
-      res.json({ ...(await check()), ...extra });
+      res.json({ ...(await check()), ...extra, ...(opts.scenarioControlVersion?{scenarioControlVersion:opts.scenarioControlVersion,...(opts.scenarioControlCapabilities?{scenarioControlCapabilities:opts.scenarioControlCapabilities}:{})}:{}) });
     } catch {
-      res.json({ ok: true, comfyui: false, ollama: false, time: new Date().toISOString(), comfyQueue: null, ...extra });
+      res.json({ ok: true, comfyui: false, ollama: false, time: new Date().toISOString(), comfyQueue: null, ...extra, ...(opts.scenarioControlVersion?{scenarioControlVersion:opts.scenarioControlVersion,...(opts.scenarioControlCapabilities?{scenarioControlCapabilities:opts.scenarioControlCapabilities}:{})}:{}) });
     }
   });
 }

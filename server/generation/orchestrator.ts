@@ -1,3 +1,12 @@
+import {composeSceneReferenceCastInstruction,buildSceneReferenceCast,type ScenePersonReference,type SourceIdentityImage} from './sceneReferenceCast';
+import {probe} from '../health/routes';
+import {restoreAssetOnlySourceFrame} from '../scenarioFrame';
+import {tryAssetOnlyCpuResult} from '../assetOnlyFastPath';
+import {generateTurboCandidate,generateTurboProduction,type TurboCandidateParams} from './turboCandidate';
+import {defaultLocalImageEngine,selectedLocalImageUrl,type LocalImageEngine} from './imageEngine';
+import type { PeopleEditRegion } from './peopleEditRegion';
+import { compactPeopleInstruction } from './compactPeople';
+import { mainChangeLine } from './mainChange';
 /**
  * Server-side generation orchestrator.
  *
@@ -6,6 +15,13 @@
  *   GENERATION_BACKEND=gemini  -> original Gemini path (services/geminiService)
  *   GENERATION_BACKEND=hybrid  -> Gemini for scenario text, ComfyUI for images
  */
+import { FIXED_LIGHTING, identityConstraints, withoutLightingChanges, actionWithBelongings, actionHandConflict } from "./fidelity";
+import { withoutHandCommitments, armsChangeAction } from "./handConflict";
+import type { PersonInfo } from "./peopleDescribe";
+import { behindViewHairPhrase } from "./hairPhrase";
+import { behindViewPlacementSentence, behindViewFreeSpotSentence, isStandingAction } from "./behindViewPlacement";
+/** Recent person drawn from behind: look, recent place, scene belongings; scene/headBox feed the G-14 v2 free spot. */
+export type BehindViewLook = { clothes?: string; hair?: string; position?: string; objects?: string[]; scene?: string; headBox?: readonly number[] | null; belongings?: import("./peopleDescribe").SceneBelonging[] };
 import { Target } from "../../types";
 import {
   PromptVariantOptions,
@@ -21,7 +37,6 @@ import {
   buildNegativePrompt,
   buildQualitySuffix,
   comfyConfig,
-  comfyReachable,
   generateQwenEdit,
 } from "./comfyClient";
 import { guardOnce, occupancySourceOf, sanitizeEmptyRoomPrediction } from "./scenarioGuard";
@@ -205,6 +220,8 @@ export async function predictScenarios(args: {
   trace?: PlanTrace;
   /** A person was seen recently: people in scenarios are allowed (the guard then does not replace them). */
   allowPerson?: boolean;
+  /** G-24/G-25 per-scene empty-room decisions (emptyRoomDecision.ts); see planScenariosLocal. */
+  emptyRoomScenes?: import("./emptyRoomDecision").EmptyRoomSceneDecision[];
   /** TD sceneExtras (checked after local planning). */
   sceneExtras?: SceneExtras;
   /** Person detector verdict on the source frame. */
@@ -231,6 +248,7 @@ export async function predictScenarios(args: {
     trace: args.trace,
     signal: args.signal,
     allowPerson: args.allowPerson,
+    emptyRoomScenes: args.emptyRoomScenes,
     sceneExtras: args.sceneExtras,
     detector: args.detector,
     people: args.people,
@@ -248,14 +266,28 @@ export const BEHIND_VIEW_RULE = "The person is seen from behind with their back 
 /** The recent-person path draws exactly ONE person (the last one seen), never a second or a duplicate. */
 export const ONE_PERSON_RULE = "Exactly one person appears in the whole image, and no second person or duplicate.";
 
-export function behindViewSentence(p?: { clothes?: string; hair?: string; position?: string }): string {
+/**
+ * G-15: the behind view never shows a face or a profile (one B render turned the head to a side view). Fixed text,
+ * added right after the rulebook behindViewRule.
+ */
+export const BEHIND_VIEW_NO_FACE_RULE =
+  "Seen from behind; no part of the face is visible: no profile, no cheek, nose or eye outline, the head is not turned to the side or toward the camera, only the back of the head and the hair are seen.";
+
+/** `action`: the planned action; a standing (not clearly seated) person also gets the concrete free spot (G-14 v2). */
+export function behindViewSentence(p?: BehindViewLook, action?: string): string {
   const ip = getRulebook().imagePrompt;
-  const same = [p?.clothes ? `same clothes: ${p.clothes}` : "", p?.hair ? `same hair: ${p.hair} (keep the hair length exactly; never shorten or lengthen it)` : ""].filter(Boolean).join(", ");
-  const base = (same ? `${ip.behindViewRule} ${same[0].toUpperCase()}${same.slice(1)}.` : ip.behindViewRule) + ` ${ip.hairRule}`;
+  // G-13: the hair is written as described, with base colour and coloured tips kept apart ("dark hair, only the tips pink").
+  const hair = behindViewHairPhrase(p?.hair);
+  const same = [p?.clothes ? `same clothes: ${p.clothes}` : "", hair ? `same hair: ${hair} (keep the hair length exactly; never shorten or lengthen it)` : ""].filter(Boolean).join(", ");
+  const base = (same ? `${ip.behindViewRule} ${same[0].toUpperCase()}${same.slice(1)}.` : ip.behindViewRule) + ` ${BEHIND_VIEW_NO_FACE_RULE} ${ip.hairRule}`;
   const place = p?.position ? ` (${p.position}, e.g. at the far desk)` : "";
   return (
     `${ip.onePersonRule} ${base} The person stands or sits at their original place${place} at the same scale as in the reference image: ` +
-    ip.behindViewPlacementRule
+    ip.behindViewPlacementRule +
+    // G-14 (2026-10-19): beside the existing objects, never on top of / in place of them; an occupied place moves aside.
+    " " + behindViewPlacementSentence(p?.objects) +
+    // G-14 v2: a standing person gets one named free spot beside the occupied chair (seated renders kept the belongings).
+    (isStandingAction(action) ? " " + behindViewFreeSpotSentence(p) : "")
   );
 }
 
@@ -273,7 +305,7 @@ export function foregroundScaleRule(foreground?: string): string {
 }
 
 export const REFERENCE_FRAMES_SENTENCE =
-  "The person in the reference images (image2/image3) is the SAME person as in image1; keep their face, hair and clothes consistent with those references.";
+  "Match each existing person to their identity reference in image2/image3. Preserve their exact facial features, hair length, hair colour and coloured tips; the requested pose may change. References never introduce another person or replace the image1 composition.";
 
 /** The full ComfyUI edit instruction; clock wording appears only when the clock edit applies. */
 export function composeEditInstruction(args: {
@@ -295,10 +327,13 @@ export function composeEditInstruction(args: {
   referencePerson?: boolean;
   /** Recent frames of the person are attached as image2/image3: keep face, hair and clothes consistent. */
   referenceFrames?: boolean;
+  people?: PersonInfo[];
+  personCount?: number;
+  compactPeople?: boolean;
   /** VLM's description of the near-camera object (real size/distance), if any. */
   foregroundObject?: string;
   /** A recently seen person is drawn in an empty frame: from behind, same clothes and hair. */
-  behindView?: { clothes?: string; hair?: string; position?: string };
+  behindView?: BehindViewLook;
   /** The describe step judged the lens blocked by a near object (chair back...): keep it and the composition (G-07 supplement). */
   obstructed?: boolean;
   /** What blocks the lens (describe step), e.g. "mesh chair backrest". */
@@ -309,13 +344,28 @@ export function composeEditInstruction(args: {
     clockEdit && args.clock
       ? buildClockInstruction(args.clock.direction, args.clock.sceneTime, args.clock.distanceSec)
       : "";
+  args = { ...args, predictionPrompt: withoutLightingChanges(args.predictionPrompt) || "Keep the scene exactly as in the input." };
   const presence = args.presence ?? SERVER_SCENE_DEFAULTS.presence;
   const spanSec =
     args.distanceSec ??
     (args.clock ? (args.clock.direction === "past" ? -1 : 1) * (args.clock.distanceSec ?? TIME_DELTA_SEC) : 0);
   // Unoccupied room: a separate template with no person words at all (negations steer a diffusion model the wrong way).
-  const rb = getRulebook();
+  const rb0 = getRulebook();
+  // A both-hands object while the action needs a hand: the fixed holdings rule must not say "same hand" (third-hand fix 2026-10-19).
+  const handConflict = actionHandConflict(args.predictionPrompt, args.people ?? []);
+  // The action itself says the arms change (uncross / one arm keeps the object, the other hand rises); the Main-change line repeats it.
+  if (handConflict) args = { ...args, predictionPrompt: armsChangeAction(args.predictionPrompt, handConflict) };
+  const rb = handConflict ? { ...rb0, imagePrompt: { ...rb0.imagePrompt, holdingsRule: rb0.imagePrompt.holdingsRule && withoutHandCommitments(rb0.imagePrompt.holdingsRule) } } : rb0;
   const ip = rb.imagePrompt;
+  if (args.compactPeople && args.people?.length && (args.personCount ?? 0) > 0 && !args.behindView && presence > 0) {
+    return obstructedLead(rb,args.obstructed,args.obstructedBy) +
+      compactPeopleInstruction(args.people,args.personCount!,args.predictionPrompt,!!args.behindView) + clockInstruction +
+      "\n\n" + ip.noNewFaceRule + "\n\n" + ip.holdingsRule +
+      "\n\n" + ip.extraConstraints.join(' ') +
+      (args.tone !== undefined ? "\n\n"+toneImageRule(args.tone,false,rb) : '') +
+      (args.obstructed ? "\n\n"+foregroundScaleRule(args.foregroundObject)+"\n\n"+physicsBlock(rb)+screenAndFrameText(rb,true) : '') +
+      mainChangeLine(args.predictionPrompt);
+  }
   if (presence <= 0 && !args.referencePerson) {
     const er = ip.emptyRoom;
     return (
@@ -332,13 +382,14 @@ export function composeEditInstruction(args: {
       "\n\n" + physicsBlock(rb) +
       screenAndFrameText(rb, args.obstructed, true) +
       (args.tone !== undefined ? "\n\n" + toneImageRule(args.tone, true, rb) : "") +
-      `\n\n${er.tail}`
+      `\n\n${er.tail} ${FIXED_LIGHTING}`
     );
   }
   return (
     obstructedLead(rb, args.obstructed, args.obstructedBy) +
-    (args.behindView ? behindViewSentence(args.behindView) + "\n\n" : "") +
-    buildFutureImagePrompt(args.predictionPrompt, args.options, clockEdit, presence, spanSec) +
+    (args.behindView ? behindViewSentence(args.behindView, args.predictionPrompt) + "\n\n" : "") +
+    buildFutureImagePrompt(actionWithBelongings(args.predictionPrompt, args.people ?? []), args.options, clockEdit, presence, spanSec) +
+    "\n\n" + FIXED_LIGHTING + "\n\n" + identityConstraints(args.people ?? [], args.personCount, args.predictionPrompt) +
     clockInstruction +
     (presence <= 0
       ? "\n\n" + ip.emptyRoomNoPersonRule
@@ -355,7 +406,8 @@ export function composeEditInstruction(args: {
     screenAndFrameText(rb, args.obstructed) +
     "\n\n" + ip.disembodiedRule +
     "\n\n" +
-    buildQualitySuffix(clockEdit, presenceAllowsNewPerson(presence), Math.abs(spanSec) >= LONG_SPAN_IMAGE_SEC)
+    buildQualitySuffix(clockEdit, presenceAllowsNewPerson(presence), Math.abs(spanSec) >= LONG_SPAN_IMAGE_SEC) +
+    mainChangeLine(args.predictionPrompt)
   );
 }
 
@@ -378,6 +430,9 @@ export function obstructedDenoise(env: NodeJS.ProcessEnv = process.env): number 
 }
 
 export interface ImageTrace {
+  assetOnlyExecution?:{mode:'cpu-only-assets-only';modelExecuted:false;modelCalls:0;generationMs:0;cpuMs:number;proofVersion:string;generatedContributionPixels:0};
+  turboCandidate?:unknown;
+  sourceFrameRestoration?:unknown;
   editInstruction?: string | null;
   negativePrompt?: string | null;
   seed?: number | null;
@@ -409,7 +464,7 @@ export async function generateImage(args: {
   /** Near-camera object description from the planner (real size/distance). */
   foregroundObject?: string;
   /** Draw the recent person from behind (see BEHIND_VIEW_RULE); the details come from the people description. */
-  behindView?: { clothes?: string; hair?: string; position?: string };
+  behindView?: BehindViewLook;
   /** See composeEditInstruction. */
   obstructed?: boolean;
   obstructedBy?: string;
@@ -419,6 +474,14 @@ export async function generateImage(args: {
   referencePerson?: boolean;
   /** Recent person frames (downscaled data URLs, max 2) attached as image2/image3 on the ComfyUI path. */
   referenceImages?: string[];
+  referenceCrops?: Array<{x:number;y:number;width:number;height:number}>;
+  editRegion?: PeopleEditRegion;
+  scenarioElementInstruction?: string;
+  assetOnlyInstruction?: string;
+  assetOnlyFrame?:{rawImageDataUrl:string;protectedCoreMaskDataUrl:string;rectangles:Array<{x:number;y:number;width:number;height:number}>};
+  people?: PersonInfo[];
+  personCount?: number;
+  compactPeople?: boolean;
   /** For cost attribution (logs/usage.jsonl) on the pure gemini backend. */
   captureId?: string | null;
   /** Cancels the generation (ComfyUI prompt dequeued/interrupted; Gemini abandoned). */
@@ -427,13 +490,23 @@ export async function generateImage(args: {
   trace?: ImageTrace;
   /** Image backend for this request (default: from GENERATION_BACKEND). */
   imageBackend?: StepBackend;
+  referenceCast?:{sourcePeople:PersonInfo[];references:ScenePersonReference[];sourceIdentityImages?:SourceIdentityImage[]};
+  localImageEngine?:LocalImageEngine;
+  turboContext?:Pick<TurboCandidateParams,'sourceActors'|'protectedBoxes'|'sourceEvidenceComplete'|'expectedPeople'>;
 }): Promise<string> {
+  const localImageEngine=args.localImageEngine??defaultLocalImageEngine();
   const clockEdit = !!args.clock && shouldEditClock(args.clock.visible);
   // Reference frames are a ComfyUI-only feature (Gemini takes at most the single recent-person photo).
-  const refFrames = (args.imageBackend ?? DEFAULT_STEP_BACKENDS.image) === "gemini" ? [] : (args.referenceImages ?? []).slice(0, 2);
+  const refFrames = (args.imageBackend ?? DEFAULT_STEP_BACKENDS.image) === "gemini" ? [] : isTurboEngineForReferences(localImageEngine) ? (args.referenceImages ?? []) : (args.referenceImages ?? []).slice(0, 2);
 
-  const editInstruction =
-    composeEditInstruction({
+  if(args.referenceCast){
+    if(localImageEngine!=='qwen21-turbo'||(args.imageBackend??DEFAULT_STEP_BACKENDS.image)!=='local'||args.assetOnlyInstruction||args.assetOnlyFrame||args.behindView||args.referencePerson||args.faceImageDataUrl)throw Error('Reference cast requires the dedicated production Turbo input roles');
+    const roster=buildSceneReferenceCast(args.referenceCast.sourcePeople,args.referenceCast.references,args.referenceCast.sourceIdentityImages);
+    if(refFrames.length!==roster.imageBindings.length-1)throw Error('Reference cast image bindings disagree with attached images');
+    for(const ref of args.referenceCast.references){const slot=roster.allowedInventory.find(x=>x.contentId===ref.contentId)!.imageNumber;if(refFrames[slot-2]!==ref.imageDataUrl)throw Error('Reference cast image order mismatch');}
+  }
+  let editInstruction =
+    args.referenceCast ? composeSceneReferenceCastInstruction({...args.referenceCast,predictionPrompt:args.predictionPrompt}) : args.assetOnlyInstruction ?? composeEditInstruction({
       predictionPrompt: args.predictionPrompt,
       options: args.options,
       clock: args.clock,
@@ -441,18 +514,22 @@ export async function generateImage(args: {
       tone: args.tone,
       distanceSec: args.distanceSec,
       referencePerson: args.referencePerson === true && !!args.faceImageDataUrl,
-      referenceFrames: refFrames.length > 0,
+      referenceFrames: refFrames.length > 0 || (!!args.faceImageDataUrl && !args.referencePerson),
+      people: args.people,
+      personCount: args.personCount,
+      compactPeople: args.compactPeople,
       foregroundObject: args.foregroundObject,
       behindView: args.behindView,
       obstructed: args.obstructed,
       obstructedBy: args.obstructedBy,
     });
+  if(args.scenarioElementInstruction)editInstruction+='\n\n'+withoutLightingChanges(args.scenarioElementInstruction);
 
   // Empty room (presence 0): also push person words into the negative prompt (inert at cfg 1, active above).
-  const negativePrompt = buildNegativePrompt(clockEdit, (args.presence ?? SERVER_SCENE_DEFAULTS.presence) <= 0, args.behindView ? { hair: args.behindView.hair } : false, args.obstructed === true);
+  const negativePrompt = buildNegativePrompt(clockEdit, !args.referenceCast&&(args.presence ?? SERVER_SCENE_DEFAULTS.presence) <= 0, args.behindView ? { hair: args.behindView.hair } : false, args.obstructed === true);
   const seed = args.seed ?? Math.floor(Math.random() * 2 ** 31);
   const denoise = args.obstructed === true ? obstructedDenoise() : null;
-  if (args.trace) Object.assign(args.trace, { editInstruction, negativePrompt, seed, denoise: (args.imageBackend ?? DEFAULT_STEP_BACKENDS.image) === "gemini" ? null : denoise });
+  if (args.trace) Object.assign(args.trace, { referenceImage: args.faceImageDataUrl || refFrames.length ? "attached" : "none", editInstruction, negativePrompt, seed, denoise: (args.imageBackend ?? DEFAULT_STEP_BACKENDS.image) === "gemini" ? null : denoise });
 
   if ((args.imageBackend ?? DEFAULT_STEP_BACKENDS.image) === "gemini") {
     // Same instruction as the ComfyUI path (empty-room template, foreground scale rule, quality suffix);
@@ -467,6 +544,24 @@ export async function generateImage(args: {
     );
   }
 
+  // Only production asset_only with a mathematical zero-contribution proof may bypass diffusion.
+  // This returns to the existing caller: integrity inspection, captions, archive/save and QA still run.
+  if(localImageEngine==='qwen21-turbo'&&process.env.LOCAL_IMAGE_ENGINE==='qwen21-turbo'&&args.assetOnlyInstruction&&args.assetOnlyFrame){
+    const cpu=await tryAssetOnlyCpuResult(args.assetOnlyFrame.rawImageDataUrl,args.originalImageDataUrl,args.assetOnlyFrame.protectedCoreMaskDataUrl,args.assetOnlyFrame.rectangles,{signal:args.signal});
+    if(cpu){
+      if(args.trace)Object.assign(args.trace,{seed:null,denoise:null,negativePrompt:null,referenceImage:'not-used-cpu-only',assetOnlyExecution:{mode:'cpu-only-assets-only',modelExecuted:false,modelCalls:0,generationMs:0,cpuMs:cpu.cpuMs,proofVersion:'asset-only-core-covers-edit-union-v1',generatedContributionPixels:0},sourceFrameRestoration:{executionMode:'cpu-only-assets-only',modelExecuted:false,modelSize:null,sourceSize:{width:cpu.width,height:cpu.height},proof:cpu.proof,timings:{cpuMs:cpu.cpuMs,generationMs:0},method:'all allowed model pixels provably overwritten by protected composed pixels; raw frame kept outside'}});
+      return cpu.imageDataUrl;
+    }
+  }
+  if(localImageEngine==='qwen21-turbo-candidate'||localImageEngine==='qwen21-turbo'){
+    const candidate=localImageEngine==='qwen21-turbo-candidate';
+    if(candidate&&(!args.turboContext||args.assetOnlyFrame||args.scenarioElementInstruction))throw Error('Turbo test context missing or unsupported image-element mode');
+    const params={...args.turboContext,compositionMode:args.turboContext?'protected' as const:'full-frame' as const,sceneImage:args.originalImageDataUrl,prompt:editInstruction,negativePrompt,faceImage:args.faceImageDataUrl,faceCrop:args.faceCrop,referenceImages:refFrames,referenceCrops:args.referenceCrops,seed,steps:8,cfg:1,denoise:1,filenamePrefix:args.filenamePrefix,signal:args.signal};
+    const result=localImageEngine==='qwen21-turbo'?await generateTurboProduction(params):await generateTurboCandidate({...params,...args.turboContext!,test:true});
+    if(args.trace){args.trace.turboCandidate=result.trace;args.trace.denoise=1;}
+    if(args.assetOnlyFrame){const restored=await restoreAssetOnlySourceFrame(args.assetOnlyFrame.rawImageDataUrl,result.dataUrl,args.assetOnlyFrame.rectangles,{signal:args.signal,composedImageDataUrl:args.originalImageDataUrl,protectedCoreMaskDataUrl:args.assetOnlyFrame.protectedCoreMaskDataUrl});if(args.trace)args.trace.sourceFrameRestoration=restored.transform;return restored.imageDataUrl;}
+    return result.dataUrl;
+  }
   const { dataUrl } = await generateQwenEdit({
     sceneImage: args.originalImageDataUrl,
     prompt: editInstruction,
@@ -474,22 +569,29 @@ export async function generateImage(args: {
     faceImage: args.faceImageDataUrl,
     faceCrop: args.faceCrop,
     referenceImages: refFrames,
+    referenceCrops: args.referenceCrops,
+    editRegion: args.editRegion,
     seed,
     denoise: denoise ?? undefined,
     filenamePrefix: args.filenamePrefix,
     signal: args.signal,
   });
+  if(args.assetOnlyFrame){const restored=await restoreAssetOnlySourceFrame(args.assetOnlyFrame.rawImageDataUrl,dataUrl,args.assetOnlyFrame.rectangles,{signal:args.signal,composedImageDataUrl:args.originalImageDataUrl,protectedCoreMaskDataUrl:args.assetOnlyFrame.protectedCoreMaskDataUrl});if(args.trace)args.trace.sourceFrameRestoration=restored.transform;return restored.imageDataUrl;}
   return dataUrl;
 }
 
+function isTurboEngineForReferences(engine:LocalImageEngine){return engine==='qwen21-turbo'||engine==='qwen21-turbo-candidate';}
+
 export async function backendStatus() {
+  const localImageEngine=defaultLocalImageEngine(),url=selectedLocalImageUrl();
   const [comfy, vlm] = await Promise.all([
-    comfyReachable(),
+    probe(fetch,`${url}/system_stats`,2000),
     vlmReachable(),
   ]);
   return {
     backend: BACKEND,
-    comfyui: { url: comfyConfig.url, reachable: comfy, models: comfyConfig.models },
+    localImageEngine,
+    comfyui: { url, reachable: comfy, models: localImageEngine==='qwen21-turbo'?{unet:'qwen_image_2.1_turbo_int8_convrot.safetensors',clip:'qwen3vl_8b_w4a8.safetensors',vae:'qwen_image_2.1_vae_bf16.safetensors'}:comfyConfig.models },
     vlm: { url: vlmConfig.url, model: vlmConfig.model, reachable: vlm },
   };
 }

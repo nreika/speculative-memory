@@ -1,8 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { cropRectFor, imageSize, parsePosition } from './referenceCrop';
+import { cropRectFor, imageSize, parsePosition,referenceScaleSize } from './referenceCrop';
 import { composeEditInstruction, behindViewSentence, BEHIND_VIEW_RULE, ONE_PERSON_RULE } from './orchestrator';
 import { buildNegativePrompt, hairNegative } from './comfyClient';
+
+test('reference scaling preserves normal 768-high frames and rejects the deployed node edge overflow',()=>{
+ assert.deepEqual(referenceScaleSize(1280,720),{width:1368,height:768});assert.deepEqual(referenceScaleSize(116,116),{width:768,height:768});
+ assert.deepEqual(referenceScaleSize(16384,768),{width:16384,height:768});
+ assert.throws(()=>referenceScaleSize(16384,100),/ImageScale 16384/);assert.throws(()=>referenceScaleSize(0,10),/dimensions/);
+});
 
 test('position label -> crop rectangle (third of the frame + padding, multiples of 8)', () => {
   assert.deepEqual(parsePosition('left front'), { col: 0, row: 'front' });
@@ -46,8 +52,8 @@ test('G-13: hair rule is in the occupied template and the behind-view sentence; 
 test('behind-view sentence (with place, scale, hair) leads the whole image prompt', () => {
   const p = composeEditInstruction({ predictionPrompt: 'The person stands up.', presence: 0.3, referencePerson: true, behindView: { clothes: 'teal shirt', hair: 'long straight black hair with pink tips', position: 'right' } });
   assert.ok(p.startsWith(ONE_PERSON_RULE));
-  assert.match(p.slice(0, 700), /same hair: long straight black hair with pink tips/);
-  assert.match(p.slice(0, 700), /original place \(right/);
+  assert.match(p.slice(0, 700), /same hair: long straight black hair, only the tips pink \(the rest of the hair stays black/);
+  assert.match(p.slice(0, 1000), /original place \(right/);
 });
 
 test('-89: one person only (sentence + negatives) and hair length (negative depends on the recorded hair)', () => {
@@ -59,4 +65,42 @@ test('-89: one person only (sentence + negatives) and hair length (negative depe
   assert.equal(hairNegative('pink-tipped'), '');
   assert.match(buildNegativePrompt(false, false, { hair: 'long light brown hair' }), /short hair, bob haircut, cropped hair/);
   assert.doesNotMatch(buildNegativePrompt(false, false, { hair: 'short black hair' }), /bob haircut/);
+});
+
+import { behindViewHairPhrase, parseHairTips, hairTipNegativeTerms } from './hairPhrase';
+import { BEHIND_VIEW_NO_FACE_RULE } from './orchestrator';
+import { figureCropFor } from './referenceCrop';
+
+test('G-13: hair with coloured tips keeps base colour and tips apart ("dark hair, only the tips pink")', () => {
+  assert.deepEqual(parseHairTips('black hair with pink tips'), { base: 'black hair', baseColour: 'black', tips: 'pink' });
+  assert.equal(behindViewHairPhrase('black hair with pink tips'), 'black hair, only the tips pink (the rest of the hair stays black; never colour the whole hair pink)');
+  assert.equal(behindViewHairPhrase('dark hair, pink tips'), 'dark hair, only the tips pink (the rest of the hair stays dark; never colour the whole hair pink)');
+  assert.equal(behindViewHairPhrase('pink-tipped black hair'), 'black hair, only the tips pink (the rest of the hair stays black; never colour the whole hair pink)');
+  assert.equal(behindViewHairPhrase('pink-tipped'), 'hair in its original darker base colour as in the reference image, only the tips pink (never colour the whole hair pink)');
+  assert.equal(behindViewHairPhrase('short black hair'), 'short black hair');
+  assert.equal(parseHairTips('long hair that ends at the shoulders'), null);
+  const s = behindViewSentence({ clothes: 'teal long-sleeve shirt', hair: 'black hair with pink tips' });
+  assert.match(s, /same hair: black hair, only the tips pink \(the rest of the hair stays black; never colour the whole hair pink\) \(keep the hair length exactly/);
+  assert.doesNotMatch(s, /same hair: pink/);
+  assert.equal(hairTipNegativeTerms('black hair with pink tips'), 'fully pink hair, pink hair from root to tip, hair dyed pink all over');
+  assert.match(buildNegativePrompt(false, false, { hair: 'black hair with pink tips' }), /fully pink hair/);
+  assert.equal(hairTipNegativeTerms('short black hair'), '');
+});
+
+test('G-15: behind view forbids any face or profile (sentence + negatives)', () => {
+  const s = behindViewSentence({ clothes: 'teal shirt', hair: 'short black hair' });
+  assert.ok(s.includes(BEHIND_VIEW_NO_FACE_RULE));
+  assert.match(BEHIND_VIEW_NO_FACE_RULE, /^Seen from behind; no part of the face is visible: no profile/);
+  const p = composeEditInstruction({ predictionPrompt: 'The person sits quietly.', presence: 0.3, referencePerson: true, behindView: { clothes: 'teal shirt' } });
+  assert.ok(p.includes(BEHIND_VIEW_NO_FACE_RULE));
+  assert.match(buildNegativePrompt(false, false, true), /face in profile, side view of the face/);
+  assert.doesNotMatch(buildNegativePrompt(false), /face in profile/);
+});
+
+test('G-13: behind-view reference is the full figure around head_box (head + shoulders + torso), position crop without it', () => {
+  const r = figureCropFor([480, 200, 540, 300], 'center', 1280, 720);
+  assert.ok(r.width >= 3 * 0.06 * 1280 && r.height >= 0.5 * 720, JSON.stringify(r));
+  assert.ok(r.x <= 0.48 * 1280 && r.x + r.width >= 0.54 * 1280 && r.y <= 0.2 * 720);
+  assert.ok(r.width % 8 === 0 && r.height % 8 === 0 && r.x + r.width <= 1280 && r.y + r.height <= 720);
+  assert.deepEqual(figureCropFor(null, 'center', 1280, 720), cropRectFor('center', 1280, 720));
 });

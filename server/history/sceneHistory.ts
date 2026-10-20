@@ -19,7 +19,7 @@ export interface SceneHistoryEntry {
   /** Person detector verdict for the frame (null / missing = not available); preferred over the text. */
   detectorPerson?: boolean | null;
   /** Who was in the frame (describe call), for drawing a recent person again. */
-  people?: Array<{ position: string; pose: string; clothes: string; facing: string; hair?: string }>;
+  people?: Array<{ position: string; pose: string; clothes: string; facing: string; hair?: string; headBox?: [number, number, number, number] | null }>;
   /** Same text as sceneDescription (kept separate for the history API / future action log). */
   observation: string;
   /** File name inside the captures dir of the frame this was observed from (reference image for a re-entering person). */
@@ -56,7 +56,14 @@ export function appendHistory(entry: SceneHistoryEntry, file = historyFilePath()
   fs.appendFileSync(file, JSON.stringify(entry) + "\n", "utf8");
 }
 
+/** Reversible, capture-specific exclusions; original observations are never removed. */
+export function quarantinedCaptureIds(file=historyFilePath()):Set<string> {
+ const ids=new Set<string>();let text='';try{text=fs.readFileSync(file+'.quarantine.jsonl','utf8');}catch{return ids;}
+ for(const line of text.split(/\r?\n/)){try{const row=JSON.parse(line);if(typeof row.captureId==='string'&&row.captureId&&typeof row.reason==='string'&&row.reason)ids.add(row.captureId);}catch{}}
+ return ids;
+}
 export function readHistory(file = historyFilePath()): SceneHistoryEntry[] {
+  const excluded=quarantinedCaptureIds(file);
   let text = "";
   try {
     text = fs.readFileSync(file, "utf8");
@@ -68,6 +75,7 @@ export function readHistory(file = historyFilePath()): SceneHistoryEntry[] {
     if (!line.trim()) continue;
     try {
       const e = JSON.parse(line);
+      if(excluded.has(String(e?.captureId??'')))continue;
       if (typeof e?.time === "string" && typeof e?.sceneDescription === "string") {
         out.push({
           time: e.time,

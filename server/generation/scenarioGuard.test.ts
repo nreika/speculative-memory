@@ -66,7 +66,77 @@ test('empty-room image prompt has no person words, even from a noisy prediction'
   assert.equal(clean, 'the overhead light dims slightly');
   const full = composeEditInstruction({ predictionPrompt: noisy, presence: 0, foregroundObject: 'the backrest of an ordinary office chair about 50 cm wide, right in front of the camera' });
   assert.doesNotMatch(full, /person|people|figure|silhouette|hand|arm|nobody|no one/i);
-  assert.match(full, /Edit this exact photo according to: the overhead light dims slightly\./);
-  assert.match(full, /pixel-identical/);
-  assert.equal(sanitizeEmptyRoomPrediction('Nobody is here.'), 'the light on the furniture shifts slightly');
+  assert.match(full, /Edit this exact photo according to: The side support of the chair turns\./);
+  assert.doesNotMatch(full, /dims slightly|gets warmer/);
+  assert.match(full, /exposure, brightness, lighting colour, white balance/);
+  assert.equal(sanitizeEmptyRoomPrediction('Nobody is here.'), 'Keep the scene exactly as in the input');
+});
+
+import { emptyRoomObjectChange, isNoChangeSentence, movableObjects, applySafeFallback } from './scenarioGuard';
+import { withoutLightingChanges } from './fidelity';
+import { synthesizeEmptyRoom } from './peopleDescribe';
+import { planScenariosLocal } from './vlmClient';
+
+// Archived 2026-10-19_14-09-13 / 14-08-21 (empty workshop; planner invented a person in every scenario).
+const WORKSHOP = 'An industrial-style workshop with exposed ductwork, fluorescent lighting, and translucent curtains dividing workspaces. A large green plastic storage bin is prominent in the foreground, next to a black office chair with a beige tote bag hanging from its backrest. Behind, shelves hold various boxes and containers, with a metal-framed workbench visible.';
+const WORKSHOP_FG = 'the top of a large green plastic storage bin, about 45 cm wide, positioned directly in front of the camera';
+
+test('empty room: movable objects come from the frame, never the near-camera object, shelf items or hanging bags', () => {
+  assert.deepEqual(movableObjects(WORKSHOP, WORKSHOP_FG).map((o) => o.phrase), ['black office chair']);
+  assert.deepEqual(movableObjects(WORKSHOP).map((o) => o.phrase), ['black office chair', 'green plastic storage bin']);
+  // The backrest in front of the camera pins that chair; other chairs (plural) may still turn.
+  assert.deepEqual(movableObjects('An office with desks, chairs and monitors. A backpack rests on one desk.', 'the backrest of an ordinary office chair about 50 cm wide').map((o) => o.phrase),
+    ['chairs further from the camera', 'backpack']);
+  assert.deepEqual(movableObjects('A workshop with exposed pipes and fluorescent lights.', null), []);
+  assert.deepEqual(movableObjects('A large green plastic storage bin is in the foreground.', 'a green plastic storage bin, in front of the camera'), []);
+});
+
+test('empty room: one small object change scaled by distance, no lighting / person / no-change words', () => {
+  const a = emptyRoomObjectChange(WORKSHOP, WORKSHOP_FG, 15, 0)!;
+  const b = emptyRoomObjectChange(WORKSHOP, WORKSHOP_FG, 30, 1)!;
+  const c = emptyRoomObjectChange(WORKSHOP, WORKSHOP_FG, -30, 2)!;
+  assert.equal(a, 'The black office chair is turned a few degrees to the right.');
+  assert.equal(new Set([a, b, c]).size, 3);
+  assert.match(emptyRoomObjectChange(WORKSHOP, WORKSHOP_FG, 150, 0)!, /about fifteen degrees/);
+  assert.match(emptyRoomObjectChange(WORKSHOP, WORKSHOP_FG, -600, 0)!, /about thirty degrees .* about twenty centimetres/);
+  for (const d of [15, 30, -30, 150, 600]) for (let i = 0; i < 3; i += 1) {
+    const s = emptyRoomObjectChange(WORKSHOP, undefined, d, i)!;
+    assert.equal(withoutLightingChanges(s), s);
+    assert.equal(sanitizeEmptyRoomPrediction(s), s.replace(/\.$/, ''));
+    assert.ok(!mentionsPerson(s) && !isNoChangeSentence(s), s);
+  }
+  assert.equal(emptyRoomObjectChange('A workshop with exposed pipes.', null, 30, 0), null);
+});
+
+test('empty room: the fallbacks write an object change instead of "remains exactly as in the input"', () => {
+  assert.ok(isNoChangeSentence('The exposed pipes remains exactly as in the input.'));
+  assert.ok(isNoChangeSentence('Keep the scene exactly as in the input.'));
+  const s = [mk('The person leans forward.'), mk('The person turns.'), mk('The person sits back.')].map((x) => ({ ...x, scene_now: WORKSHOP, foreground_object: WORKSHOP_FG }));
+  const out = applySafeFallback(s, [0, 1, 2], [15, 30, -30]);
+  for (const x of out) assert.match(x.prediction_prompt, /^The black office chair (?:is turned|sits) /);
+  for (const x of synthesizeEmptyRoom({ distances: [15, 30, -30], count: 3, scene: WORKSHOP, foregroundObject: WORKSHOP_FG })) {
+    assert.ok(!isNoChangeSentence(x.prediction_prompt), x.prediction_prompt);
+  }
+  // No movable object at all: the old text stays (the scene is a skip candidate, see docs/empty-room-prompt-diff-2026-10-19.md).
+  assert.ok(isNoChangeSentence(applySafeFallback([{ ...mk('The person leaves.'), scene_now: 'A workshop with exposed pipes.' }], [0])[0].prediction_prompt));
+});
+
+test('empty room end to end: invented people are replaced by object changes in prompt and display text', async (t) => {
+  t.mock.method(globalThis, 'fetch', async (_i: unknown, init?: RequestInit) => {
+    const body = JSON.parse(String(init?.body));
+    if (!body.images) return new Response(JSON.stringify({ response: '{}' }));
+    const item = (p: string) => ({ prediction_prompt: p, scenario_description: '30 seconds later, x.', label: 'L' });
+    return new Response(JSON.stringify({ response: JSON.stringify({
+      clock_visible: false, scene_description: WORKSHOP, foreground_object: WORKSHOP_FG,
+      scenarios: [item('The person seated in the black office chair leans forward.'), item('The person turns their head.'), item('The fluorescent lighting gets dimmer.')],
+    }) }));
+  });
+  const out = await planScenariosLocal({
+    imageDataUrl: 'data:image/jpeg;base64,dGVzdA==', prompt: 'p', scenarioCount: 3,
+    detector: { person: false, count: 0, elapsedMs: 5 }, people: [], sceneDistances: [15, 30, -30],
+  });
+  for (const x of out) {
+    assert.match(x.prediction_prompt, /^The black office chair /);
+    assert.doesNotMatch(x.prediction_prompt + x.scenario_description, /exactly as in the input|remains/);
+  }
 });
