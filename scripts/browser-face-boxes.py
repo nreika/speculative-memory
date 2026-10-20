@@ -8,7 +8,7 @@ except ImportError:
  print(json.dumps({'status':'unavailable','boxes':[]}));sys.exit(0)
 def accept_face(kind, weight):
  # Cascade-specific stage margin, not a calibrated probability. No coordinate/size exclusions.
- return bool(np.isfinite(weight) and weight >= (3.5 if kind == 'frontal' else 0.5))
+ return bool(np.isfinite(weight) and weight >= (3.5 if kind == 'frontal' else 20.0 if kind == 'frontal-alt2' else 0.5))
 
 try:
  q=json.loads(sys.stdin.buffer.read(45*1024*1024));raw=base64.b64decode(q['image'],validate=True)
@@ -19,13 +19,17 @@ try:
  if w*h>40000000:raise ValueError('Image dimensions exceed limit')
  started=time.perf_counter();gray=cv2.cvtColor(img,cv2.COLOR_BGR2GRAY)
  scale=min(1.0,1280/max(w,h));small=cv2.resize(gray,None,fx=scale,fy=scale) if scale<1 else gray
- classifiers=[('frontal',False,'haarcascade_frontalface_default.xml'),('profile',False,'haarcascade_profileface.xml'),('profile',True,'haarcascade_profileface.xml')]
+ # 2026-10-20: the default cascade missed clear frontal faces under the venue's backlight; alt2 on an equalized frame finds them
+ # (weights ~55) and stayed silent on empty-room frames.
+ equalized=cv2.equalizeHist(small)
+ classifiers=[('frontal',False,'haarcascade_frontalface_default.xml'),('frontal-alt2',False,'haarcascade_frontalface_alt2.xml'),('profile',False,'haarcascade_profileface.xml'),('profile',True,'haarcascade_profileface.xml')]
  boxes=[]
  for kind,flip,xml in classifiers:
   cascade=cv2.CascadeClassifier(cv2.data.haarcascades+xml)
   if cascade.empty():raise ValueError('Missing bundled face cascade')
-  frame=cv2.flip(small,1) if flip else small
-  rectangles, reject_levels, weights = cascade.detectMultiScale3(frame,scaleFactor=1.1,minNeighbors=6,minSize=(28,28),outputRejectLevels=True)
+  base=equalized if kind=='frontal-alt2' else small
+  frame=cv2.flip(base,1) if flip else base
+  rectangles, reject_levels, weights = cascade.detectMultiScale3(frame,scaleFactor=1.1,minNeighbors=4 if kind=='frontal-alt2' else 6,minSize=(28,28),outputRejectLevels=True)
   for (x,y,bw,bh), weight in zip(rectangles,weights):
    if not accept_face(kind,float(weight)):continue
    if flip:x=small.shape[1]-x-bw
@@ -37,7 +41,7 @@ try:
  for b in sorted(boxes,key=lambda b:b['width']*b['height'],reverse=True):
   if not any(iou(b,k)>.3 for k in keep):keep.append(b)
  if len(keep)>64:raise ValueError('Too many face candidates')
- print(json.dumps({'status':'detected' if keep else 'no-faces','width':w,'height':h,'boxes':keep,'detectorMs':(time.perf_counter()-started)*1000,'method':'opencv-haar-frontal-profile-margin-v2'}))
+ print(json.dumps({'status':'detected' if keep else 'no-faces','width':w,'height':h,'boxes':keep,'detectorMs':(time.perf_counter()-started)*1000,'method':'opencv-haar-frontal-alt2-profile-margin-v3'}))
 except Exception:
  print(json.dumps({'status':'error','boxes':[]}))
 

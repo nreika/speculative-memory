@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {normalizeEvent,buildSections,buildSharedSections,connectionLayout,mixedConnectionLayout,verticalConnectionLayout,sourceConnectionPath,thumbnailGapPercent,elapsedLabel,secondsLabel,jstDay,pendingRefreshIds,RecentHistoryGaps} from './history-model.mjs';
+import {normalizeEvent,buildSections,buildSharedSections,connectionLayout,mixedConnectionLayout,verticalConnectionLayout,sourceConnectionPath,thumbnailGapPercent,elapsedLabel,secondsLabel,jstDay,pendingRefreshIds,RecentHistoryGaps,thumbFor,pageCounter} from './history-model.mjs';
 
 function fixture(overrides={}){
  const startedAt='2026-10-18T15:36:45.000Z',id='test-batch',scope='test:run';
@@ -237,4 +237,46 @@ test('shared lane counts keep SOURCE at the same x in every section',async()=>{
  const x1=verticalConnectionLayout(s1,0,crowded,900,lanes).nodes.find(p=>p.key==='now').x;
  const x2=verticalConnectionLayout(s2,0,quiet,900,lanes).nodes.find(p=>p.key==='now').x;
  assert.equal(x1,x2);
+});
+test('points carry the server thumbnail when present and keep the full image as the click-through',()=>{
+ const event=normalizeEvent(fixture({thumbUrls:{now:'/captures/thumbs/now.jpg',a:null,b:'https://evil.example/b.jpg',c:'/captures/thumbs/../c.jpg'}}));
+ const by=Object.fromEntries(event.points.map(p=>[p.key,p]));
+ assert.equal(by.now.thumbUrl,'/captures/thumbs/now.jpg');assert.equal(by.now.url,'/captures/now.png');
+ assert.equal(by.a.thumbUrl,null);assert.equal(by.b.thumbUrl,null);assert.equal(by.c.thumbUrl,null);assert.equal(by.c.url,'/captures/c.png');
+ assert.ok(normalizeEvent(fixture()).points.every(p=>p.thumbUrl===null),'older servers without thumbUrls fall back to full images');
+ assert.equal(thumbFor('/captures/thumbs/record_1.jpg'),'/captures/thumbs/record_1.jpg');assert.equal(thumbFor('/captures/record_1.jpg'),null);
+ assert.equal(pageCounter(3,600,1000),'Page 3 · 600 records loaded · window last 1000');
+});
+test('G-27 scenario runs: labels in JST, revised marker for a different sha of the same scenario id, running runs end now',async()=>{
+ const {normalizeScenarioRuns}=await import('./history-model.mjs');
+ const runs=normalizeScenarioRuns([
+  {runId:'r2',scenarioId:'SCN-SIMPLE-001',file:'SCN-SIMPLE-001.csv',sha256:'bbb',startedAt:'2026-10-20T08:00:00.000Z',endedAt:null},
+  {runId:'r1',scenarioId:'SCN-SIMPLE-001',file:'SCN-SIMPLE-001.csv',sha256:'aaa',startedAt:'2026-10-20T07:36:26.000Z',endedAt:'2026-10-20T07:40:26.000Z',endReason:'end'},
+  {runId:'../bad',scenarioId:'x',startedAt:'2026-10-20T07:00:00Z'},{runId:'r3',scenarioId:'x',startedAt:'nonsense'}],Date.parse('2026-10-20T08:01:00.000Z'));
+ assert.deepEqual(runs.map(r=>r.runId),['r1','r2']);
+ assert.equal(runs[0].label,'SCN-SIMPLE-001 16:36:26–16:40:26');assert.equal(runs[0].revised,false);
+ assert.equal(runs[1].label,'SCN-SIMPLE-001 17:00:00–running (修正版)');assert.equal(runs[1].end,Date.parse('2026-10-20T08:01:00.000Z'));
+});
+test('G-27 run bands share the plot scale in horizontal and vertical views, clip at section edges and stack overlaps in lanes',async()=>{
+ const {normalizeScenarioRuns,runsForSession,runBandLayout,verticalRunBandLayout,plotPosition}=await import('./history-model.mjs');
+ const origin=Date.parse('2026-10-20T07:36:00.000Z');
+ const runs=normalizeScenarioRuns([
+  {runId:'a',scenarioId:'A',sha256:'1',startedAt:new Date(origin+30000).toISOString(),endedAt:new Date(origin+90000).toISOString()},
+  {runId:'b',scenarioId:'B',sha256:'2',startedAt:new Date(origin+60000).toISOString(),endedAt:new Date(origin+200000).toISOString()},
+  {runId:'c',scenarioId:'C',sha256:'3',startedAt:new Date(origin+900000).toISOString(),endedAt:new Date(origin+960000).toISOString()}]);
+ const section={start:0,end:120000,min:0,max:120000};
+ const h=runBandLayout(runs,origin,section);
+ assert.deepEqual(h.bands.map(b=>b.run.runId),['a','b']);assert.equal(h.lanes,2);
+ assert.equal(h.bands[0].left,plotPosition(origin+30000,origin,section));assert.equal(h.bands[0].right,plotPosition(origin+90000,origin,section));
+ assert.equal(h.bands[1].right,92);assert.equal(h.bands[1].clippedEnd,true);assert.equal(h.bands[0].clippedStart,false);
+ const v=verticalRunBandLayout(runs,origin,section,{top:48,scale:.004});
+ assert.equal(v.bands[0].top,48+30000*.004);assert.equal(v.bands[0].height,60000*.004);assert.equal(v.lanes,2);assert.equal(v.bands[1].clippedEnd,true);
+ const event=(ms,tag)=>({id:'e'+ms,start:origin+ms,end:origin+ms+50000,scenarioRun:tag?{runId:tag}:null});
+ assert.deepEqual(runsForSession(runs,[event(70000)]).map(r=>r.runId),['a','b']);
+ assert.deepEqual(runsForSession(runs,[event(5000000,'c')]).map(r=>r.runId),['c'],'a tagged capture keeps its run even outside the span');
+ assert.deepEqual(runsForSession(runs,[]),[]);
+});
+test('G-27 normalizeEvent keeps a safe scenarioRun tag only',()=>{
+ assert.deepEqual(normalizeEvent(fixture({scenarioRun:{runId:'abc123',scenarioId:'SCN-SIMPLE-001',csvSha:'f00'}})).scenarioRun,{runId:'abc123',scenarioId:'SCN-SIMPLE-001',csvSha:'f00'});
+ assert.equal(normalizeEvent(fixture({scenarioRun:{runId:'../x'}})).scenarioRun,null);assert.equal(normalizeEvent(fixture()).scenarioRun,null);
 });

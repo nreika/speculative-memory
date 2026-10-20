@@ -42,6 +42,8 @@ export interface Rulebook {
     obstructedRule?: string;
     /** G-07 supplement 3: first sentence of the prompt when obstructed; placeholders {by}, {through}, {pattern} (absent in older files). */
     obstructedLeadRule?: string;
+    /** Framing anchor: same field of view / zoom / tilt / camera position, edges unchanged; every template, after the obstruction lead (absent in older files). */
+    framingAnchorRule?: string;
     /** G-17: no lens flare / light streaks / glow, in both templates (absent in older files). */
     noLightArtifactRule?: string;
     /** G-17: in an empty room the light changes in brightness and colour temperature only (absent in older files). */
@@ -163,6 +165,7 @@ export function validateRulebook(rb: any): string[] {
   need(ip.obstructedRule === undefined || isStr(ip.obstructedRule), 'imagePrompt.obstructedRule');
   need(ip.obstructedLeadRule === undefined || isStr(ip.obstructedLeadRule), 'imagePrompt.obstructedLeadRule');
   need(ip.noLightArtifactRule === undefined || isStr(ip.noLightArtifactRule), 'imagePrompt.noLightArtifactRule');
+  need(ip.framingAnchorRule === undefined || isStr(ip.framingAnchorRule), 'imagePrompt.framingAnchorRule');
   need(ip.emptyRoomLightRule === undefined || isStr(ip.emptyRoomLightRule), 'imagePrompt.emptyRoomLightRule');
   need(rb.negative?.noNewText === undefined || isStr(rb.negative.noNewText), 'negative.noNewText');
   need(rb.negative?.obstructed === undefined || isStr(rb.negative.obstructed), 'negative.obstructed');
@@ -290,6 +293,28 @@ export function obstructedLead(rb: Rulebook = getRulebook(), obstructed = false,
   const mesh = /mesh/i.test(what);
   return tpl.replace('{by}', what).replace('{through}', mesh ? 'the mesh' : 'it').replace('{pattern}', mesh ? 'the mesh pattern' : 'its pattern') + '\n\n';
 }
+
+/** Framing anchor sentence + blank line ('' when the version has none). Goes right after obstructedLead in every template. */
+export function framingAnchor(rb: Rulebook = getRulebook()): string {
+  const s = rb.imagePrompt.framingAnchorRule;
+  return s ? `${s}\n\n` : '';
+}
+
+/**
+ * Next rulebook version with the framing anchor (scripts/rulebook-add-framing-anchor.ts). The built-in long-span text loses
+ * its camera sentences (merged into the anchor, not repeated); a customised longSpan is left as it is.
+ */
+export function withFramingAnchor(cur: Rulebook, version: number, now = new Date()): Rulebook {
+  const next: Rulebook = JSON.parse(JSON.stringify(cur));
+  next.version = version;
+  next.parent = cur.version;
+  next.createdAt = now.toISOString();
+  next.note = 'framing_drift 2026-10-20 (prompt-only first): framing anchor sentence for every scene after the obstruction lead; quality.longSpan camera sentences merged into it.';
+  next.imagePrompt.framingAnchorRule = T.FRAMING_ANCHOR_RULE;
+  if (next.quality.longSpan === T.LONG_SPAN_QUALITY_SUFFIX) next.quality.longSpan = T.LONG_SPAN_QUALITY_SUFFIX_ANCHORED;
+  return next;
+}
+export const hasFramingAnchor = (rb: Rulebook): boolean => rb.imagePrompt.framingAnchorRule === T.FRAMING_ANCHOR_RULE;
 
 /** G-16 (no new text/clock/UI) and the G-07 supplement (obstructed camera: keep the obstruction); '' when the version has none. */
 export function screenAndFrameText(rb: Rulebook = getRulebook(), obstructed = false, emptyRoom = false): string {

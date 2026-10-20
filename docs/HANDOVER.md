@@ -41,6 +41,22 @@
 - **現在タイマーは停止中（Capturemode = manual）。ユーザーの指示があるまで timer / chain にしない。**
 
 ## 0.5 いまの状態（2026-10-06 03時。下の「06時すぎの追記」が最新）
+- **2026-10-20 17時 シナリオCSVの全制御・終了時復元・CSV複製（G-27、要再起動）**: SCN-SIMPLE-001 ライブ試験で、CSV が mode=timer / interval_sec=60 を設定しても 4 分間キャプチャが無かった（scheduler が scenario.ownsLayout() 中は自動キャプチャを止めていた）。
+- 対策A: operatorScenario.autoCaptureMode() = このライブ実行自身の mode 行が timer/chain のときだけ値を返す。nativeOperator の scheduler はそのとき interval/chain の自動キャプチャを続け、authorize もその source だけ通す（手動 Generate は従来どおり 409、mode 行の無い CSV は generate 行のみ）。
+- 対策B: end（自然終了）は Stop と同じ release()（レイアウト・出力割り当て・設定・hold を開始前の値へ）を行い、直前に読み込んでいたシナリオ（既定 SCN-001.csv）を読み直して ready に戻る。復元した項目は scenario-events.jsonl に restore.layout / restore.outputs / restore.setting / restore.hold / run.archived / scenario.reloaded として 1 件ずつ残る。hold は「開始前の値」に戻す（オペレーターが一時停止してから Play した場合は一時停止に戻る）。
+- 対策C: server/scenarioRunArchive.ts。ライブ Play ごとに読み込み時点の CSV 本文を logs/scenario-runs/<開始ISO>_<id>_<runId>.csv に複製＋同名 .json、logs/scenario-runs.jsonl に開始行と終了行（end|stop、再起動で開いたままの回は error）。GET /api/scenario-runs, /api/scenario-runs/:runId, /api/scenario-runs/:runId/csv。
+- capture-events の started 行に scenarioRun {runId, scenarioId, csvSha}（ネイティブ生成でライブ実行中のとき）。/api/events/timeline は scenarioRuns も返し、TIME HISTORY は各セクションに帯（横表示は軸の上、縦表示は時刻列の右）と凡例を描き、クリックで複製 CSV と .json を表示。同じ id で sha が違う回は「(修正版)」。
+- hold の終了ポリシー（コーディネーター決定）: Play 前に一時停止が必須なので開始前の hold は常に「一時停止」。自然終了（end）後は生成を有効（hold=false）にする。ただし CSV で最後に適用された hold 行が pause なら一時停止のまま。Stop は従来どおり開始前の値に戻す。ログは restore.hold（policy:end、note「restore.hold (end policy: enabled)」）。
+- ついで: native-recording の「Live frame recording failed」が消えなかった件。失敗理由を付けて記録し console.error、次の成功で消す。
+- テスト: nativeOperator（CSV の mode で自動キャプチャ・タグ・Stop で停止、mode 行なしは自動なし、end の復元＋複製＋再読込、録画エラーの解除）、scenarioRunArchive.test.ts、operatorScenario（autoCaptureMode）、history-model（帯レイアウト・修正版）。
+- **2026-10-20 16:2x 過去シーン（C）が過去になっていない（G-26、要再起動）**: 原因は計画指示に過去専用の契約が無く（vlmClient.ts JSON_INSTRUCTION は全場面に「フレームからの新しい動作」を書かせ、promptBuilder.ts の rewindGuidance 1 行だけ）、表示文は prediction_prompt を時制ルールなしで訳し、画像指示も前向きの編集として組んでいたこと。
+- 対策: 負の距離の場面に PAST-SCENE CONTRACT（フレーム＝END、あり得た少し前の状態、ユーザー原文と例つき）と PAST_SCENE_JSON_RULE。過去場面の英文は pastScenePrediction（「originally A, now B」→A、then/will を切る）、和文は pastJapaneseText（今では/現在/今は 以降を切り、文末を「…ていた」）、翻訳指示にも過去形ルール。画像指示は先頭に「This image is the moment N BEFORE this photo…」、末尾は「Main difference from the photo (this is the EARLIER moment): …」。無人の物の変化は逆向き（まだ少し別の位置→その後写真の位置）。A/B の文面は従来どおり。
+- STATE LEDGER（server/generation/pastScene.ts）: 履歴行（live は scene-history の recentEntries、テストはループの再生観察）＋今のフレームから状態ごとに {key: person | posture:seated|standing | object:<cup|bag|container…>, label, firstSeen, lastSeen, durationMin, seenNow, lastAbsent} を作り計画に渡す。判定 judgePastContinuity: 持ち物→姿勢→在室の順に注目し、lastAbsent が |距離|×2 以内なら new（巻き戻し可）、履歴で既に続いていれば ongoing（同じ活動の少し前）、それ以外・履歴なしは unknown（最小の整合的な差、大胆な巻き戻しはしない）。未来場面には FUTURE CONTINUITY（続いている活動を続ける）の 1 行。ログ `[past] ledger N rows … continuity=…`。
+- 検証: server/generation/pastScene.test.ts 7 件（契約文、今では整形、画像の過去の行、無人の逆向き、ledger の ongoing/new/unknown）、tsc クリーン。オフライン差分 docs/past-scene-prompt-diff-2026-10-20.md（`npx tsx scripts/past-scene-diff.ts <archive dirs>`）。VLM が契約どおり書くかは実機でしか判断できない（16-15-26 の「originally」部分は NOW と同じ姿勢かもしれない）。
+- 未対応: 物体語彙は固定リスト（LEDGER_OBJECTS）で観察文に出た語だけ、行に書かれていない物は「見えていない」扱い。ルールブック版（rulebook.v<N>.json）にはまだ入れていない（コード定数）。
+- **2026-10-20 14:58 再起動事故（自動起動なし）**: Start メニューの「再起動」(14:58) と Windows Update の再起動 (15:01/15:02) でメイン PC が落ち、Node :3000 と turbo ComfyUI :8001 が自動では上がらず、15:23 まで停止。
+- 対策: タスクスケジューラに 2 本（ログオン時・ログオン中のみ・失敗時 1 分間隔で 3 回再試行）。`SpeculativeMemory ComfyUI 8001`（launch-comfy8001.ps1 を隠しウィンドウで起動、ログは qwen21-turbo-lab\runtime\comfy8001-autostart.log）と `SpeculativeMemory Node 3000`（scripts\start-server-autostart.ps1。:8001 の /queue を最大 180 秒待ってから Node を safe-restart.ps1 と同じ方法で起動。:3000 が既に LISTEN なら何もしない。記録は logs\autostart.log）。
+- 登録: `powershell -NoProfile -ExecutionPolicy Bypass -File scripts\install-autostart.ps1`（`-DryRun` で内容だけ表示）。削除: `scripts\uninstall-autostart.ps1`（または `schtasks /delete /tn "<名前>" /f`）。Comfy Desktop :8000 は意図的に自動起動しない。
 - **2026-10-20 14:5x サーバー全体が遅い（静的画像 4〜12 秒、History のサムネイルが真っ黒）**: inspector でプロファイルしたところ、非アイドル時間のほぼ全てが Vite(chokidar) の lstat/picomatch。`captures/`（24,043 ファイル・21 GB）と logs/ を監視していて、撮影ごとの新規ファイルでクロールが走り event loop を塞いでいた。修正: `server.ts` の createViteServer に `server.watch.ignored`（captures/logs/.local/rulebook/scripts/docs/touchdesigner/tools）。再起動 11 で反映。注意: 以前の「.env.local 変更で vite が自動再起動する」は誤り（middleware モードでは node は再起動しない）。
 - **2026-10-19 22:4x ライブカメラへ切り替えると 504 / 「Input bridge returned inconsistent data」**: ブリッジ（native_input.py）は live-camera 時に replay を null ではなく {active:false,setId:null,cycle:false,pendingSet:null} で返すが、`operatorInput.ts` validateState が test-replay 用の厳密検証を適用して拒否 → select が 504、サーバーは replay のまま、生成停止（昼の食い違いも同原因）。修正: live-camera かつ idle な replay オブジェクトは null に正規化して受理（テスト追加）。同時に生成中の input.select を queue する修正（pendingInput、完了直後に適用、Control に Queued… 表示）も同梱。
 - **2026-10-19 scenario.play 504（SCN-SETTINGS-002）**: オペレーターの `generation.pause` は仕様どおりシナリオ時計も止める（state=paused）。従来はその後の `scenario.play` が「最初から再開始」で、`play()` の素の Error（'Scenario is updating' 等、statusCode なし）が delegate から出ると operatorState が 504「Command outcome is unconfirmed」に変換していた。
@@ -307,6 +323,29 @@
 - 修正2: それでも見つからないテスト回は、アーカイブ（直近2日分のフォルダを新しい順）から同じ historyScope・10分以内・guard.detector.person=true の最新 prompts.json を探し、_NOW.jpg＋guard.people を直近人物として使う（`[history] recent person recovered from archive (N min ago)`、モデル呼び出しなし、見つけたものはストアにも保存）。
 - 修正3（server/nativeOperator.ts、autoCaptureDue / zeroScenesGenerated）: 完了したキャプチャの生成シーン数が0（全シーン skip）のとき、chain は完了時刻から設定 intervalSec（既定70秒）待ってから次を撮る（`[chain] all scenes skipped; waiting 70s`）。シーンが1枚でもあれば従来通り約1秒後。timer は従来通り。
 - テスト: testRecentPersonStore.test.ts（5件: 保存→新インスタンスで latestTestPerson、期限・上限での削除、ディレクトリ不可、アーカイブ復元フィクスチャ）、nativeOperator.test.ts に chain ペーシング1件。tsc クリーン、TS 全体 949 件中失敗は既知の2件のみ。反映には再起動が必要。
+
+### 2026-10-20 追記: History 用サムネイル（サーバー未再起動）
+- キャプチャ保存時（saveImageAsset / record 保存 / record-only フレーム）に `captures/thumbs/<拡張子なしの名前>.jpg`（幅320px・JPEG q75・約14KB、元は record ≈250KB / Gen ≈2MB）を裏で作る（server/captureThumbs.ts、FACE_DETECTOR_PYTHON の CPU venv の PIL、1プロセスずつ最大8枚/回、失敗ログは1回だけ、キャプチャもイベントループも止めない）。
+- `GET /api/events/timeline` と `/api/events/:id` の各行に `thumbUrls`（{now,a,b,c} → サムネURL か null）を追加。null の画像はバックグラウンドで生成キューに入る（キャプチャ中は待機、上限3000）。history.mjs はサムネを表示し、無ければ／読めなければ原寸に戻る。クリックの詳細は原寸のまま。
+- History に Window（直近 200/500/1000 件、200件ずつ読む）とページ数表示を追加。モバイル保持期限の削除は対応サムネも消す。
+- 既存 24k 枚の埋め戻し: `npx tsx scripts/backfill-thumbs.ts`（新しい順・1プロセスずつ・キャプチャ中は一時停止・500枚ごとに進捗・再実行で続きから、`--dry-run` で件数のみ）。未実行。
+- 公開ゲート（server/publicGate/*、未変更）は `/captures/thumbs/` を通さないが、表示ページはサムネを使わないので不要。テスト: captureThumbs.test.ts 4件、timeline.test.ts +1、history-model.test.mjs +1。tsc クリーン、TS 959 件中失敗は既知の2件のみ。反映には再起動が必要。
+
+### 2026-10-20 追記: カメラ入力の framing_drift は真陽性（コード変更なし・再起動不要）
+- 10-20 カメラ回の framing_drift 却下 57件を検証。NOW.jpg・却下PNG とも 1280x720、明るさ平均 100〜128、turbo の source-image の SHA は NOW と一致、display.png は却下PNGと一致（入力取り違え・サイズ/縦横比・暗さは原因でない）。
+- prepared-input.png（1408x768、左右21pxの複製パディングのみ）→ model-native.png でも同じ scale 0.897 / ずれが出る＝モデル自体が引き/縦パンしている。restore/letterbox 由来ではない。
+- 却下例は inliers 199〜1737、edgeIou 0.24〜0.55 → 推定変換で重ねると 0.36〜0.90 に上がる（変換が本物）。受理例は scale 0.97〜1.00・edgeIou 0.36〜0.88。重ね合わせ画像: speculative-memory_data/experiments/framing-check/*.png。
+- 起きやすい構図: 顔が15cm手前・上部の黒い遮蔽帯・天井向き・床見下ろし（TSC-003 の目線構図では起きない）。対策はチェック緩和ではなくプロンプト（「同じ画角・ズーム・チルト、四辺に写る内容を入力と同一に」）か、登録補正（逆変換で戻す）を別途検討。
+
+
+### 2026-10-20 追記: Presence / Tone をシーン別（A/B/C）に＋framing アンカー文（サーバー未再起動）
+- 設定: 全体の settings.presence / tone はそのまま、任意の上書き settings.scenes.<a|b|c>.presence / .tone（0..1、無し＝全体値を継承、settings.apply で null を送ると上書き解除）。operatorState で検証・revision 更新。
+- /api/generate body に scenePresence / sceneTone（{gen_a,gen_b,gen_c}、operatorGeneration は継承後の実効値を送る。presence / tone も互換のため継続）。sceneParams の presenceAt / toneAt / resolveScenePresence / resolveSceneTone で解決（キー欠落＝全体値）。
+- 使用箇所: プランナー（buildPresenceSection / buildToneSection: 帯が違うときだけ「For Scenario 2: ...」で分け、Tone の "applies to ALL scenarios" を該当シナリオに限定）、画像編集 composeEditInstruction（シーンごとの presence・tone、Amount of change 文）、/api/generate-image の sceneIndex、ref frames 判定（どれかのシーンが >0）、archive prompts.json params.scenePresence/sceneTone と README、capture-events の scenePresence/sceneTone（全体値と違うときのみ）、/logs の presence A/B/C・tone A/B/C チップ。
+- Control の WORLD PARAMETER: 全体スライダーはそのまま、「Per scene」チェックで A/B/C の PRESENCE/TONE スライダー（継承中は "·g"、横に実効値の要約）。チェックを外して Apply＝上書き解除。シナリオ実行中は scenes.* と同じく操作不可。
+- シナリオ CSV: presence / tone 行の target に A|B|C（空＝全体、従来どおり）。例 `6,presence,B,0.8`。preview skip / Stop 復帰（元が継承なら上書き削除）/ 競合ルールは他の settings と同じ。examples/SCN-SETTINGS-001.csv に1行追加。/m は未対応。
+- framing_drift 対策（プロンプトのみ先行）: rulebook v20 を作成（未有効化）。imagePrompt.framingAnchorRule を全テンプレート（通常・無人・compact・reference cast）に1回、遮蔽リード文の直後に置く。quality.longSpan のカメラ文は統合して削除。有効化: `node_modules\.bin\tsx.cmd scripts\rulebook-add-framing-anchor.ts --activate-existing`（ホットリロード、再起動不要）。
+- テスト: framingAnchor.test.ts（2）、sceneParams / operatorState / operatorScenarioSettings / operatorGeneration に追加、Python test_settings_actions に per-scene。tsc クリーン、TS 974 件中 既知の 2 件以外失敗なし、tdControl 77 件。サーバーは再起動していない（Task 1 は再起動で有効）。
 
 ## 1. 何を作っているか
 

@@ -1,3 +1,4 @@
+import { sceneNotes } from './sceneNotes';
 /**
  * One capture at a time: the server-side lifecycle of a capture -> generate ->
  * display run, keyed by captureId.
@@ -269,6 +270,7 @@ export class CaptureManager {
     const message =
       detail.error instanceof Error ? detail.error.message : String(detail.error ?? 'failed');
     console.log(`[capture] failed ${capture.captureId}: ${message}`);
+    sceneNotes.add(capture.captureId,'all','生成全体が失敗: '+message,'error');sceneNotes.end(capture.captureId,'failed');
     this.options.notify({
       type: 'generation.failed',
       captureId: capture.captureId,

@@ -113,7 +113,7 @@ test('empty room: the fallbacks write an object change instead of "remains exact
   assert.ok(isNoChangeSentence('Keep the scene exactly as in the input.'));
   const s = [mk('The person leans forward.'), mk('The person turns.'), mk('The person sits back.')].map((x) => ({ ...x, scene_now: WORKSHOP, foreground_object: WORKSHOP_FG }));
   const out = applySafeFallback(s, [0, 1, 2], [15, 30, -30]);
-  for (const x of out) assert.match(x.prediction_prompt, /^The black office chair (?:is turned|sits) /);
+  for (const x of out) assert.match(x.prediction_prompt, /^The black office chair (?:is turned|sits|is still turned|still sits) /); // G-26: the past scene is the reverse change
   for (const x of synthesizeEmptyRoom({ distances: [15, 30, -30], count: 3, scene: WORKSHOP, foregroundObject: WORKSHOP_FG })) {
     assert.ok(!isNoChangeSentence(x.prediction_prompt), x.prediction_prompt);
   }

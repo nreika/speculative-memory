@@ -1,6 +1,6 @@
 {
-  "version": 19,
-  "appliedAt": "2026-10-19T04:14:49.062Z",
+  "version": 20,
+  "appliedAt": "2026-10-20T07:46:04.790Z",
   "by": "user",
-  "reason": "motion fix 2026-10-19 (head/gaze may move without revealing a hidden face; held object moves with its hand; one object sentence)"
+  "reason": "framing anchor 2026-10-20 (framing_drift on camera input, prompt-only first)"
 }

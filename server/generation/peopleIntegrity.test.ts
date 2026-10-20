@@ -49,7 +49,7 @@ test('second attempt names the first defect (missing belongings / framing / hand
   assert.match(targetedCorrection({ ok:false, sourceCount:0, outputToSource:[-1], reason:'Expected 0 people, found 1' },{expectedPeople:0}),/No person may appear/);
 });
 
-test('two rejections skip the scene instead of failing the capture; errors still throw', async () => {
+test('two rejections skip the scene instead of failing the capture; undecidable skips too', async () => {
   const rejected: number[] = [];
   const result = await generateUniquePeople({
     generate: async attempt => 'bad'+attempt, inspect: async () => ({ ...belongingsVerdict }),
@@ -59,8 +59,10 @@ test('two rejections skip the scene instead of failing the capture; errors still
   assert.equal(result.image,undefined);
   assert.equal('defect' in result && result.defect,'missing_belongings');
   assert.deepEqual(rejected,[1,2]);
-  // An unknown verdict (inspection error) is an error, not a rejection: still a hard failure.
-  await assert.rejects(generateUniquePeople({ generate: async ()=>'x', inspect: async ()=>{throw new Error('offline');}, rejected:()=>{}, onExhausted:'skip' }),/no image published/);
+  // 2026-10-20: an undecidable verdict skips the scene too (the capture keeps the previous image); 'throw' mode still throws.
+  const unknown = await generateUniquePeople({ generate: async ()=>'x', inspect: async ()=>{throw new Error('offline');}, rejected:()=>{}, onExhausted:'skip' });
+  assert.equal(unknown.skipped,true);assert.equal('defect' in unknown && unknown.defect,'inspection_unavailable');assert.equal(unknown.image,undefined);
+  await assert.rejects(generateUniquePeople({ generate: async ()=>'x', inspect: async ()=>{throw new Error('offline');}, rejected:()=>{} }),/no image published/);
 });
 
 test('occupied path unchanged: identity rejection retries with the identity correction, default still throws', async () => {

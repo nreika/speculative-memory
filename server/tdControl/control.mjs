@@ -1,6 +1,47 @@
-import {localImagePath,coneGeometry,generatingScene,completedConeResult,availableConeScenes} from './timeline.mjs';
+import {localImagePath,coneGeometry,generatingScene,completedConeResult,availableConeScenes,skipReasons} from './timeline.mjs';
 const API='/api/td-control';
 const $=id=>document.getElementById(id);
+// Selection-safe text updates: polling re-renders every 2 s, and assigning textContent (even an identical
+// value) replaces the text node and collapses the user's selection. Skip unchanged writes, and while a
+// selection is inside the page defer writes to the selected element (max 15 s) so Ctrl+C still works.
+const SELECTION_HOLD_MS=15000, pendingText=new Map();
+let holdSince=0, holdTimer=null;
+{
+  const descriptor=Object.getOwnPropertyDescriptor(Node.prototype,'textContent');
+  const selectedRange=()=>{const s=document.getSelection&&document.getSelection();return s&&!s.isCollapsed&&s.rangeCount?s.getRangeAt(0):null;};
+  const holding=element=>{
+    const range=selectedRange();if(!range||!document.body.contains(element))return false;
+    if(!range.intersectsNode(element))return false;
+    if(!holdSince)holdSince=Date.now();
+    if(Date.now()-holdSince>SELECTION_HOLD_MS)return false;
+    clearTimeout(holdTimer);holdTimer=setTimeout(flushPendingText,SELECTION_HOLD_MS+50);
+    return true;
+  };
+  function flushPendingText(){
+    holdSince=0;clearTimeout(holdTimer);
+    for(const [element,value] of pendingText)descriptor.set.call(element,value);
+    pendingText.clear();
+  }
+  Object.defineProperty(Element.prototype,'textContent',{configurable:true,enumerable:true,get(){return descriptor.get.call(this);},set(value){
+    const text=String(value??'');
+    if(descriptor.get.call(this)===text){pendingText.delete(this);return;}
+    if(this.childElementCount===0&&holding(this)){pendingText.set(this,text);return;}
+    pendingText.delete(this);descriptor.set.call(this,text);
+  }});
+  document.addEventListener('selectionchange',()=>{if(!selectedRange()&&pendingText.size)flushPendingText();else if(!selectedRange())holdSince=0;});
+}
+function addCopyButton(target,label){
+  if(!target)return;
+  const button=document.createElement('button');button.type='button';button.className='copy-btn';button.textContent='copy';button.setAttribute('aria-label','Copy '+label);
+  let timer=null;
+  button.onclick=async()=>{
+    const text=target.innerText||target.textContent||'';
+    try{await navigator.clipboard.writeText(text);button.textContent='copied';}
+    catch{const range=document.createRange();range.selectNodeContents(target);const s=getSelection();s.removeAllRanges();s.addRange(range);try{document.execCommand('copy');button.textContent='copied';}catch{button.textContent='failed';}}
+    clearTimeout(timer);timer=setTimeout(()=>{button.textContent='copy';},1500);
+  };
+  target.insertAdjacentElement('afterend',button);
+}
 let latest=null, baseRevision=null, busy=false, online=false, epoch=0, routingDirty=false;
 let dirty=new Set(), polling=false, imagePolling=false, previewPolling=false, noticeTimer=null;
 let uncertain=false;
@@ -13,7 +54,7 @@ function markUncertain(error){if(error.indeterminate||error.name==='TimeoutError
 const scenes=['a','b','c'];
 const colors={a:'#ef9b4a',b:'#e877a9',c:'#6caef0'};
 let coneMode='result', displayedScenes=null, captureProgress=null, inputSelection=null;
-let coneScenes=null, coneRenderKey=null;
+let coneScenes=null, coneRenderKey=null, coneLastNow=null, sceneSkips={};
 let coneCompleted=null, conePolling=false;
 const personReferenceCatalog=new Map(),requestedPersonReferences=new Set();
 let personReferenceFetching=false,personReferenceRetryAt=0;
@@ -85,7 +126,7 @@ async function loadPersonReferenceMetadata(){
 for(const scene of scenes){
   const article=document.createElement('article');
   article.className='scene panel';article.dataset.scene=scene;article.style.setProperty('--scene',colors[scene]);
-  article.innerHTML=`<div class="scene-header"><h3>${scene.toUpperCase()}</h3><span id="scene-time-${scene}">—</span></div><div class="scene-visual"><img id="scene-image-${scene}" alt="Scene ${scene.toUpperCase()} generated result" hidden><span id="scene-waiting-${scene}">Waiting for an image</span></div><div class="scene-content"><span class="description-label">Generation instruction</span><p id="scene-caption-${scene}" class="scene-caption">No generation instruction yet.</p><label class="distance-label">Time distance <span class="field-note">Past − / Future +</span><div class="distance-field"><input type="number" min="-3600" max="3600" step="1" data-setting="scenes.${scene}.distanceSec" form="settings-form" aria-label="${scene.toUpperCase()} time distance"><span>sec</span></div></label><label>Instructions · Continuous <span class="field-note">Every generation</span><textarea data-setting="scenes.${scene}.continuous" form="settings-form" maxlength="4000" aria-label="${scene.toUpperCase()} continuous prompt" placeholder="Add a direction…"></textarea></label><label>Instructions · One shot <span class="field-note">Next generation</span><textarea data-setting="scenes.${scene}.oneShot" form="settings-form" maxlength="4000" aria-label="${scene.toUpperCase()} one shot prompt" placeholder="For the next image only…"></textarea></label><p class="scenario-prompt" id="scenario-prompt-${scene}"></p></div>`;
+  article.innerHTML=`<div class="scene-header"><h3>${scene.toUpperCase()}</h3><span id="scene-time-${scene}">—</span></div><div class="scene-visual"><img id="scene-image-${scene}" alt="Scene ${scene.toUpperCase()} generated result" hidden><span id="scene-waiting-${scene}">Waiting for an image</span></div><div class="scene-content"><span class="description-label">Generation instruction</span><p id="scene-caption-${scene}" class="scene-caption">No generation instruction yet.</p><div class="scene-notes" id="scene-notes-${scene}" aria-label="What happened in the last generation"></div><label class="distance-label">Time distance <span class="field-note">Past − / Future +</span><div class="distance-field"><input type="number" min="-3600" max="3600" step="1" data-setting="scenes.${scene}.distanceSec" form="settings-form" aria-label="${scene.toUpperCase()} time distance"><span>sec</span></div></label><label>Instructions · Continuous <span class="field-note">Every generation</span><textarea data-setting="scenes.${scene}.continuous" form="settings-form" maxlength="4000" aria-label="${scene.toUpperCase()} continuous prompt" placeholder="Add a direction…"></textarea></label><label>Instructions · One shot <span class="field-note">Next generation</span><textarea data-setting="scenes.${scene}.oneShot" form="settings-form" maxlength="4000" aria-label="${scene.toUpperCase()} one shot prompt" placeholder="For the next image only…"></textarea></label><p class="scenario-prompt" id="scenario-prompt-${scene}"></p></div>`;
   $('scene-cards').append(article);
   for(const [kind,key] of [['continuous','continuous'],['oneShot','oneShot']])article.querySelector(`[data-setting="scenes.${scene}.${key}"]`).closest('label').append(personReferenceRow(scene,kind));
   const indicator=document.createElement('span');indicator.className='generation-indicator';indicator.textContent='GENERATING';
@@ -127,9 +168,26 @@ function notice(message,error=false,kind='action'){
   $('notice').dataset.kind=kind;
   if(!error)noticeTimer=setTimeout(()=>{$('notice').hidden=true;},5500);
 }
+// Per-scene Presence / Tone (settings.scenes.<a|b|c>.presence/tone; absent = follow the global slider).
+// data-override names the global key; data-inherited = currently showing the global value; data-cleared = Apply sends null (remove the override).
+const sceneOverrideKeys=['presence','tone'];
+for(const key of sceneOverrideKeys)for(const scene of scenes){
+  const label=document.createElement('label');label.className='world-row range-label per-scene-row';
+  label.innerHTML=`${key.toUpperCase()} ${scene.toUpperCase()} <output id="scene-${scene}-${key}-value"></output><input data-setting="scenes.${scene}.${key}" data-override="${key}" data-inherited="1" form="settings-form" type="range" min="0" max="1" step="0.01" aria-label="${key} for scene ${scene.toUpperCase()}">`;
+  label.style.setProperty('--scene',colors[scene]);
+  $('per-scene-params').append(label);
+}
+function overrideInputs(){return [...document.querySelectorAll('[data-override]')];}
+let perSceneOpen=false;
+$('per-scene-toggle').addEventListener('change',event=>{
+  perSceneOpen=event.target.checked;$('per-scene-params').hidden=!event.target.checked;
+  if(event.target.checked){for(const el of overrideInputs())if(el.dataset.cleared){delete el.dataset.cleared;dirty.delete(el.dataset.setting);}}
+  else{if(!dirty.size)baseRevision=latest?.settingsRevision;for(const el of overrideInputs())if(get(latest?.settings,el.dataset.setting)!==undefined||dirty.has(el.dataset.setting)){el.dataset.cleared='1';el.dataset.inherited='1';dirty.add(el.dataset.setting);}}
+  rangeLabels();dirtyLabel();
+});
 function get(object,path){return path.split('.').reduce((o,k)=>o?.[k],object);}
 function set(object,path,value){const keys=path.split('.');let o=object;for(const k of keys.slice(0,-1))o=o[k]??=( {} );o[keys.at(-1)]=value;}
-function value(el){return el.dataset.json?JSON.parse(el.value||'[]'):el.type==='checkbox'?el.checked:(el.type==='number'||el.type==='range')?Number(el.value):el.value;}
+function value(el){return el.dataset.cleared?null:el.dataset.json?JSON.parse(el.value||'[]'):el.type==='checkbox'?el.checked:(el.type==='number'||el.type==='range')?Number(el.value):el.value;}
 function field(path){return document.querySelector(`[data-setting="${path}"]`);}
 function dirtyLabel(){
   $('apply').disabled=busy||!online||uncertain||!dirty.size;
@@ -137,17 +195,45 @@ function dirtyLabel(){
   $('reload-settings').hidden=!dirty.size;
   $('dirty-message').textContent=dirty.size?'Unsaved changes · Apply to save':'Settings are in sync';
 }
-function rangeLabels(){for(const key of ['presence','tone','emptyRoomPersonChance'])if(field(key))$(key+'-value').textContent=Number(field(key).value).toFixed(2);}
+function rangeLabels(){
+  for(const key of ['presence','tone','emptyRoomPersonChance'])if(field(key))$(key+'-value').textContent=Number(field(key).value).toFixed(2);
+  // Inherited per-scene sliders follow the (possibly unsaved) global slider; the summary shows the effective value per scene.
+  const summary=[];
+  for(const el of overrideInputs()){
+    const [,scene,key]=el.dataset.setting.split('.');
+    if(el.dataset.inherited&&field(key))el.value=field(key).value;
+    $(`scene-${scene}-${key}-value`).textContent=Number(el.value).toFixed(2)+(el.dataset.inherited?'·g':'');
+    $(`scene-${scene}-${key}-value`).title=el.dataset.inherited?'Follows the global slider':'Scene override';
+  }
+  for(const key of sceneOverrideKeys){const vals=scenes.map(scene=>Number(field(`scenes.${scene}.${key}`).value).toFixed(2));if(new Set(vals).size>1)summary.push(`${key[0].toUpperCase()} ${vals.join('/')}`);}
+  $('per-scene-effective').textContent=summary.length?summary.join(' · '):'A/B/C = global';
+}
 function renderProgress(){
   const scene=generatingScene(latest?.capture,captureProgress?.active);
   for(const card of document.querySelectorAll('.scene[data-scene]')){
     card.classList.toggle('is-generating',card.dataset.scene===scene);
+    card.classList.toggle('is-pending',card.dataset.scene!==scene&&sceneStaleState(card.dataset.scene)==='pending');
+    card.classList.toggle('is-previous',sceneStaleState(card.dataset.scene)==='previous');
     card.setAttribute('aria-busy',card.dataset.scene===scene?'true':'false');
   }
+}
+/** 'pending' = a generation is running and this panel still shows an earlier capture (frame blinks);
+ *  'previous' = generation ended and the panel kept the earlier image (skipped / rejected scene); null = current. */
+function sceneStaleState(scene){
+  const content=displayedScenes?.[scene]?.content;if(!content||typeof content.captureId!=='string')return null;
+  const generating=['requested','generating'].includes(latest?.capture?.phase);
+  const reference=generating&&latest.capture.captureId?latest.capture.captureId:displayedScenes?.now?.content?.captureId;
+  if(typeof reference!=='string'||!reference||content.captureId===reference)return null;
+  return generating?'pending':'previous';
+}
+function skipLabel(scene){
+  const reason=sceneSkips[scene];if(!reason)return 'previous';
+  return (reason.startsWith('rejected:')?'rejected '+reason.slice(9):'skip '+reason).replace(/_/g,' ');
 }
 document.addEventListener('input',event=>{
   const el=event.target.closest('[data-setting]');if(!el)return;
   if(!dirty.size)baseRevision=latest?.settingsRevision;
+  if(el.dataset.override){delete el.dataset.inherited;delete el.dataset.cleared;}
   dirty.add(el.dataset.setting);rangeLabels();dirtyLabel();renderCone();
 });
 document.addEventListener('change',event=>{
@@ -175,6 +261,7 @@ function updateButtons(){
     const key=el.dataset.setting;
     el.disabled=blocked||(scenarioOwns&&(key==='mode'||key==='scenarioPreview'||key.startsWith('scenes.')));
   }
+  $('per-scene-toggle').disabled=blocked||!!scenarioOwns;
   $('pause-scenario').disabled=blocked||!['running','paused'].includes(latest?.scenario?.state);
   $('stop-scenario').disabled=blocked||!scenarioOwns;
   $('select-input').disabled=blocked||(!latest?.replay?.active&&latest?.runtime!=='native');
@@ -214,10 +301,12 @@ function render(state){
   for(const el of document.querySelectorAll('[data-setting]')){
     const path=el.dataset.setting;if(dirty.has(path))continue;
     const x=get(state.settings,path);
+    if(el.dataset.override){delete el.dataset.cleared;if(x===undefined){el.dataset.inherited='1';el.value=get(state.settings,el.dataset.override);}else{delete el.dataset.inherited;el.value=x;}continue;}
     if(x===undefined)continue;
     if(el.dataset.json)el.value=JSON.stringify(x);else if(el.type==='checkbox')el.checked=!!x;else el.value=x;
   }
   if(!dirty.size)baseRevision=state.settingsRevision;
+  if(!overrideInputs().some(el=>dirty.has(el.dataset.setting))){const on=overrideInputs().some(el=>!el.dataset.inherited);$('per-scene-toggle').checked=on||perSceneOpen;$('per-scene-params').hidden=!$('per-scene-toggle').checked;}
   renderPersonReferences();
   rangeLabels();
   const replay=state.replay;
@@ -252,6 +341,8 @@ function render(state){
     $('generation-state').textContent='Scenario live · '+scenario.state;
     $('generation-detail').textContent=`${scenario.requestedGenerations||0} generation requests`+(scenario.lastGenerationSkipped?' · Skipped: '+scenario.lastGenerationSkipped:'')+(scenario.lastSettingsError?' · Settings: '+scenario.lastSettingsError:'');
   }
+  renderErrors(state);
+  renderSceneNotes(state);
   const generationError=!isGenerating&&(state.errors||[]).find(error=>error.operator==='native'&&error.message);
   if(generationError){
     $('generation-state').textContent='Generation failed';
@@ -379,18 +470,21 @@ async function refreshImages(){
           $('scene-waiting-'+scene).hidden=true;$('scene-caption-'+scene).textContent=content.caption;
           const distance=content.distanceSecSigned,known=typeof distance==='number'&&Number.isFinite(distance);
           document.querySelector(`[data-scene="${scene}"] h3`).textContent=scene.toUpperCase()+(known?' '+(distance<0?'PAST ':'FUTURE +')+distance+' sec':'');
-          $('scene-time-'+scene).textContent='GENERATED';
+          const stale=sceneStaleState(scene);
+          $('scene-time-'+scene).textContent=stale==='pending'?'PREVIOUS · generating':stale==='previous'?'PREVIOUS · '+skipLabel(scene):'GENERATED';
         }
       }
     }
-    renderCone();
+    renderProgress();renderCone();
   }catch{/* Generation settings remain usable when the image server is unavailable. */}
   finally{imagePolling=false;}
 }
 async function refreshConeResults(){
   if(conePolling)return;conePolling=true;
   try{
-    coneCompleted=completedConeResult(await json('/api/events?limit=20'),coneCompleted);
+    const rows=await json('/api/events?limit=20');
+    coneCompleted=completedConeResult(rows,coneCompleted);
+    sceneSkips=skipReasons(rows,displayedScenes?.now?.content?.captureId);
     renderCone();
   }catch{/* Keep the completed cone; archive reads must not block Each-image updates. */}
   finally{conePolling=false;}
@@ -407,6 +501,8 @@ async function refreshInputPreview(){
   }catch{$('input-preview').hidden=true;$('input-preview-label').textContent='Preview unavailable';}
   finally{previewPolling=false;}
 }
+for(const scene of scenes)addCopyButton($('scene-caption-'+scene),'scene '+scene+' instruction');
+addCopyButton($('scenario-format-list'),'format errors');addCopyButton($('scenario-instructions'),'scenario instructions');addCopyButton($('source-caption'),'source caption');addCopyButton($('history'),'history text');addCopyButton($('diagnostics'),'connection diagnostics');addCopyButton($('error-list'),'errors');
 connection(false,'Connecting to control…');refresh();refreshImages();refreshInputPreview();refreshConeResults();
 setInterval(refresh,2000);setInterval(refreshImages,3000);setInterval(refreshConeResults,3000);
 setInterval(refreshInputPreview,1000);
@@ -427,24 +523,61 @@ function svgNode(tag,attributes={},content){
   if(content!==undefined)node.textContent=content;
   return node;
 }
+function renderSceneNotes(state){
+  const notes=state.sceneNotes||{};const clock=at=>{const d=new Date(at);return Number.isFinite(d.getTime())?d.toLocaleTimeString('ja-JP',{hour12:false}):'';};
+  for(const scene of scenes){
+    const box=$('scene-notes-'+scene);if(!box)continue;
+    const blocks=[];
+    for(const [label,entry] of [['生成中',notes.running],['前回の生成',notes.finished]]){
+      if(!entry)continue;
+      const rows=[...(entry.notes?.all||[]),...(entry.notes?.[scene]||[])].sort((x,y)=>Date.parse(x.at)-Date.parse(y.at));
+      if(!rows.length&&label==='生成中')continue;
+      blocks.push({head:`${label} ${clock(entry.startedAt)}${entry.result==='failed'?' · 失敗':''}`,rows:rows.length?rows:[{at:entry.endedAt||entry.startedAt,kind:'info',text:'記録なし'}]});
+    }
+    const key=JSON.stringify(blocks);if(box.dataset.key===key)continue;box.dataset.key=key;box.replaceChildren();
+    for(const block of blocks){const h=document.createElement('div');h.className='scene-notes-head';h.textContent=block.head;box.append(h);
+      for(const row of block.rows){const line=document.createElement('div');line.className='scene-note is-'+row.kind;line.textContent=clock(row.at)+' '+row.text;box.append(line);}}
+  }
+}
+function renderErrors(state){
+  const rows=Array.isArray(state.warnings)?state.warnings:[];
+  const list=$('error-list');if(!list)return;
+  const key=JSON.stringify(rows.map(row=>[row.at,row.count,row.message]));
+  if(list.dataset.key===key)return;list.dataset.key=key;list.replaceChildren();
+  const clock=at=>{const d=new Date(at);return Number.isFinite(d.getTime())?d.toLocaleTimeString('ja-JP',{hour12:false}):'';};
+  for(const row of rows.slice(0,8)){
+    const item=document.createElement('li');item.className='error-row '+(row.kind==='generation'?'is-error':row.kind==='skip'?'is-skip':'is-warning');
+    item.textContent=clock(row.at)+'  '+row.message+(row.count>1?'  ×'+row.count:'');
+    list.append(item);
+  }
+  const latestAge=rows[0]?Date.now()-Date.parse(rows[0].at):Infinity;
+  $('error-summary').textContent=rows.length?`${rows.length} recent · newest ${clock(rows[0].at)}`:'No errors';
+  $('error-panel').classList.toggle('has-recent',latestAge<10*60*1000);
+}
 function renderCone(){
   const svg=$('cone');if(!svg||!latest)return;
   coneScenes=coneCompleted?.scenes||null;
-  // A first visit may arrive mid-batch or after a 1/2-image capture. Show available
-  // matching images without treating an unobserved, possibly cancelled batch as complete.
-  const visibleCone=coneScenes||availableConeScenes(displayedScenes);
-  const source=visibleCone?.now?.content;
-  const offsets={};
+  const generating=['requested','generating'].includes(latest.capture.phase);
+  // Each output keeps its own capture id and recorded distance. A scene that still shows an earlier
+  // capture stays where that capture put it (never "time unknown") and is marked instead.
+  const visibleCone=displayedScenes?.now?.content?{now:displayedScenes.now,a:displayedScenes.a,b:displayedScenes.b,c:displayedScenes.c}:coneScenes;
+  let source=visibleCone?.now?.content;
+  if(generating&&source&&latest.capture.captureId&&source.captureId===latest.capture.captureId&&coneLastNow)source=coneLastNow;
+  else if(!generating&&source)coneLastNow=source;
+  const offsets={},stale={};
+  const reference=generating&&latest.capture.captureId?latest.capture.captureId:source?.captureId;
   for(const scene of scenes){
     const content=visibleCone?.[scene]?.content;
-    offsets[scene]=coneMode==='settings'?Number(field('scenes.'+scene+'.distanceSec').value):source&&content?.captureId===source.captureId?content.distanceSecSigned:null;
+    const distance=content?.distanceSecSigned;
+    offsets[scene]=coneMode==='settings'?Number(field('scenes.'+scene+'.distanceSec').value):typeof distance==='number'&&Number.isFinite(distance)?distance:null;
+    stale[scene]=content&&reference&&content.captureId!==reference?(generating?'pending':'previous'):null;
   }
   const geometry=coneGeometry(offsets);
   $('cone-result').setAttribute('aria-pressed',coneMode==='result');
   $('cone-settings').setAttribute('aria-pressed',coneMode==='settings');
-  $('cone-status').textContent=coneMode==='settings'?'Next capture · configured offsets':(['requested','generating'].includes(latest.capture.phase)?'Generating · showing available results':coneScenes?'Displayed results · relative to source':'Available results · completion unconfirmed');
-  const renderKey=JSON.stringify([coneMode,source?.captureId,source?.imageUrl,offsets,
-    scenes.map(scene=>[visibleCone?.[scene]?.content?.captureId,visibleCone?.[scene]?.content?.imageUrl])]);
+  $('cone-status').textContent=coneMode==='settings'?'Next capture · configured offsets':generating?'Generating · blinking frames = previous capture':Object.values(stale).some(Boolean)?'Displayed results · marked scenes kept the previous image':coneScenes?'Displayed results · relative to source':'Available results · completion unconfirmed';
+  const renderKey=JSON.stringify([coneMode,source?.captureId,source?.imageUrl,offsets,stale,
+    scenes.map(scene=>[visibleCone?.[scene]?.content?.captureId,visibleCone?.[scene]?.content?.imageUrl,stale[scene]==='previous'?sceneSkips[scene]:null])]);
   if(renderKey===coneRenderKey)return;
   coneRenderKey=renderKey;
   svg.replaceChildren();
@@ -456,15 +589,18 @@ function renderCone(){
   }
   for(const point of geometry.points){
     const row=visibleCone?.[point.scene]?.content;
-    const matched=source&&row&&source.captureId===row.captureId;
+    const state=coneMode==='result'?stale[point.scene]:null;
     const x=point.x,y={a:28,b:82,c:136}[point.scene],color=colors[point.scene];
-    svg.append(svgNode('line',{x1:500,y1:82,x2:x,y2:y,stroke:color,'stroke-width':2,'stroke-dasharray':coneMode==='settings'?'4 4':'none',opacity:'.8'}));
+    svg.append(svgNode('line',{x1:500,y1:82,x2:x,y2:y,stroke:color,'stroke-width':2,'stroke-dasharray':coneMode==='settings'||state?'4 4':'none',opacity:state?'.45':'.8'}));
     svg.append(svgNode('line',{x1:point.axisX,y1:184,x2:x,y2:y+26,stroke:color,'stroke-width':'.7','stroke-dasharray':'2 4',opacity:'.28'}));
-    svg.append(svgNode('rect',{x:x-40,y:y-22,width:80,height:44,rx:2,fill:'#0d1113',stroke:color,'stroke-width':1.3}));
-    if(coneMode==='result'&&matched){
-      try{svg.append(svgNode('image',{href:localImagePath(row.imageUrl),x:x-39,y:y-21,width:78,height:42,preserveAspectRatio:'xMidYMid meet'}));}catch{}
+    const frame=svgNode('rect',{x:x-40,y:y-22,width:80,height:44,rx:2,fill:'#0d1113',stroke:color,'stroke-width':1.3});
+    if(state==='pending')frame.append(svgNode('animate',{attributeName:'stroke-width',values:'1.3;5;1.3',dur:'0.95s',repeatCount:'indefinite'}));
+    svg.append(frame);
+    if(coneMode==='result'&&row){
+      try{svg.append(svgNode('image',{href:localImagePath(row.imageUrl),x:x-39,y:y-21,width:78,height:42,preserveAspectRatio:'xMidYMid meet',opacity:state==='previous'?'.6':'1'}));}catch{}
     }else svg.append(svgNode('text',{x,y:y+5,fill:color,'text-anchor':'middle','font-size':17},point.scene.toUpperCase()));
-    svg.append(svgNode('text',{x,y:y+35,fill:color,'text-anchor':'middle','font-size':11},point.scene.toUpperCase()+'  '+(coneMode==='result'&&row&&!matched?'previous capture':point.label)));
+    const mark=state==='pending'?' · previous':state==='previous'?' · '+skipLabel(point.scene):'';
+    svg.append(svgNode('text',{x,y:y+35,fill:color,'text-anchor':'middle','font-size':11},point.scene.toUpperCase()+'  '+point.label+mark));
   }
   svg.append(svgNode('rect',{x:458,y:57,width:84,height:50,rx:2,fill:'#101518',stroke:'#b9c4c7'}));
   if(coneMode==='result'&&source){try{svg.append(svgNode('image',{href:localImagePath(source.imageUrl),x:459,y:58,width:82,height:48,preserveAspectRatio:'xMidYMid meet'}));}catch{}}

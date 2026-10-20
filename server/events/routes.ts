@@ -7,6 +7,37 @@ export interface EventRoutesOptions {
   /** Directory holding generation archives (<root>/<date>/<generationId>/...), for thumbnails of old captures. */
   archiveRoot?: string;
   viewerPath?: string;
+  /** History thumbnails: known thumbs become `thumbUrls`; missing ones are queued in the background. */
+  thumbs?: { thumbUrl(imageUrl: unknown): string | null; requestMissing(imageUrl: unknown): void };
+  /** G-27 scenario CSV runs; the timeline response carries `scenarioRuns` so History can draw each run's range. */
+  scenarioRuns?: { list(): Array<{runId:string;scenarioId:string;file:string;sha256:string;startedAt:string;endedAt:string|null;endReason:string|null;cuesApplied:number}> };
+}
+
+/** Compact run rows for the timeline (sidecar details come from /api/scenario-runs/:runId). */
+export function timelineScenarioRuns(source: EventRoutesOptions['scenarioRuns']) {
+  if (!source) return [];
+  try {
+    return source.list().slice(-500).map((r) => ({ runId: r.runId, scenarioId: r.scenarioId, file: r.file, sha256: r.sha256, startedAt: r.startedAt, endedAt: r.endedAt ?? null, endReason: r.endReason ?? null, cuesApplied: r.cuesApplied ?? 0 }));
+  } catch {
+    return [];
+  }
+}
+
+/** Adds `thumbUrls` ({now,a,b,c} -> '/captures/thumbs/<name>.jpg' | null) next to each event's `images`. */
+export function withThumbUrls<T extends { images?: unknown }>(events: T[], thumbs: EventRoutesOptions['thumbs']): Array<T & { thumbUrls?: Record<string, string | null> }> {
+  if (!thumbs) return events;
+  return events.map((event) => {
+    const images = event.images;
+    if (!images || typeof images !== 'object') return event;
+    const thumbUrls: Record<string, string | null> = {};
+    for (const [key, url] of Object.entries(images as Record<string, unknown>)) {
+      if (typeof url !== 'string') continue;
+      const thumb = thumbs.thumbUrl(url);
+      if (!thumb) thumbs.requestMissing(url);
+      thumbUrls[key] = thumb;
+    }
+    return { ...event, thumbUrls };
+  });
 }
 
 const flag = (v: unknown) => v !== undefined && v !== '0' && v !== 'false';
@@ -54,14 +85,14 @@ export function registerEventRoutes(app: Express, store: CaptureEventStore, opts
     res.setHeader('Cache-Control','no-store');
     const q=req.query;
     if(Object.keys(q).some(k=>!['limit','cursor'].includes(k))||q.limit!==undefined&&(typeof q.limit!=='string'||!/^\d+$/.test(q.limit))||q.cursor!==undefined&&typeof q.cursor!=='string')return res.status(400).json({error:'Invalid timeline query'});
-    try {res.json(store.timeline({...(q.limit!==undefined?{limit:Number(q.limit)}:{}),...(q.cursor!==undefined?{cursor:q.cursor as string}:{})}));}
+    try {const page=store.timeline({...(q.limit!==undefined?{limit:Number(q.limit)}:{}),...(q.cursor!==undefined?{cursor:q.cursor as string}:{})});const body=opts.thumbs?{...page,events:withThumbUrls(page.events,opts.thumbs)}:page;res.json(opts.scenarioRuns?{...body,scenarioRuns:timelineScenarioRuns(opts.scenarioRuns)}:body);}
     catch(error){if((error as any)?.status===400)return res.status(400).json({error:(error as Error).message});res.status(500).json({error:'Timeline unavailable'});}
   });
 
   app.get('/api/events/:captureId', (req, res) => {
     const event = store.get(req.params.captureId);
     if (!event) return res.status(404).json({ error: 'unknown captureId' });
-    res.json({ ...event, prompts: readPrompts(event.archiveDir) });
+    res.json({ ...withThumbUrls([event], opts.thumbs)[0], prompts: readPrompts(event.archiveDir) });
   });
 
   // Thumbnail fallback for captures whose /captures image is gone or never recorded (backfilled rows).

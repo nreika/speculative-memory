@@ -57,3 +57,14 @@ test('timeline route is registered ahead of captureId, validates only limit/curs
   assert.ok(gets.has('/api/events'));
  }finally{f.close();}
 });
+test('timeline adds thumbUrls per image: URL when the thumb exists, null (and queued) when missing',()=>{
+ const f=fixture([event('with-images',start,{images:{now:'/captures/record_1.jpg',a:'/captures/Gen_a_1.png'}} as any),event('no-images')]);try{
+  const gets=new Map<string,Function>(),requested:string[]=[];const thumbs={thumbUrl:(u:unknown)=>u==='/captures/record_1.jpg'?'/captures/thumbs/record_1.jpg':null,requestMissing:(u:unknown)=>{requested.push(String(u));}};
+  registerEventRoutes({get:(route:string,fn:Function)=>gets.set(route,fn),post:()=>{}} as any,f.store,{thumbs});
+  let body:any;const res:any={setHeader:()=>{},status:()=>res,json:(v:any)=>{body=v;return res;}};gets.get('/api/events/timeline')!({query:{limit:'5'}},res);
+  const row=body.events.find((e:any)=>e.captureId==='with-images');assert.deepEqual(row.thumbUrls,{now:'/captures/thumbs/record_1.jpg',a:null});assert.deepEqual(requested,['/captures/Gen_a_1.png']);
+  assert.equal(body.events.find((e:any)=>e.captureId==='no-images').thumbUrls,undefined);assert.equal(body.schema,1);
+  gets.get('/api/events/:captureId')!({params:{captureId:'with-images'}},res);assert.deepEqual(body.thumbUrls,{now:'/captures/thumbs/record_1.jpg',a:null});
+  assert.ok(!('thumbUrls' in f.store.get('with-images')!));
+ }finally{f.close();}
+});

@@ -313,3 +313,93 @@ test('input.select while idle applies immediately and persists',async()=>{
   await new Promise(r=>setTimeout(r,30));assert.equal(await selectionFile(f.directory),'TSC-002');
  }finally{await f.close();}
 });
+
+const outputStore=()=>{let revision=0;let outputs:any[]=[1,2,3].map(n=>({id:'screen-'+n,label:'Output '+n,source:(['now','a','b'] as const)[n-1],delaySec:0,scene:'any',visible:true,labels:true,subtitles:true,fade:false,fadeMode:'original',faceBlur:{enabled:false,strengthPx:12}}));
+ return{get outputs(){return structuredClone(outputs);},configuration:async()=>({revision:String(revision),outputs:structuredClone(outputs)}),update:async(raw:any)=>{assert.equal(raw.baseRevision,String(revision));outputs=structuredClone(raw.outputs);revision++;return{revision:String(revision),outputs:structuredClone(outputs)};},setScenarioPreview:async()=>{},clearScenarioPreview:()=>{}};};
+const liveSettings=async(op:Awaited<ReturnType<typeof createNativeOperator>>,id:string,data:Record<string,unknown>)=>{const s=await op.state.snapshot();return op.state.action({action:'settings.apply',requestId:id,baseRevision:s.settingsRevision,data});};
+
+test('a live CSV that sets mode itself drives auto captures during playback, tagged with the run; Stop ends them',async()=>{
+ const f=await fixture({checkPersonReferences:async()=>[]});try{
+  const csv='seconds,action,target,value\n0,scenario,,AUTO-NATIVE\n0,interval_sec,,30\n0,mode,,chain\n0,resume,,\n120,end,,\n';
+  await fs.writeFile(path.join(f.directory,'scenarios','AUTO.csv'),csv);
+  await liveSettings(f.operator,'live-auto',{scenarioPreview:false});
+  assert.equal((await action(f.operator,'scenario.load','load-auto',{file:'AUTO.csv'})).body.ok,true);
+  assert.equal((await action(f.operator,'scenario.play','play-auto')).body.ok,true);
+  assert.equal(f.operator.scenario.autoCaptureMode(),'chain');
+  const tag=f.operator.scenarioRunTag()!;assert.equal(tag.scenarioId,'AUTO-NATIVE');assert.equal(tag.csvSha,createHash('sha256').update(csv).digest('hex'));assert.equal(tag.runId,f.operator.scenario.status().runId);
+
+  await waitFor(()=>f.invocations>=1,4000);
+  assert.equal(f.bodies[0].executionSource,'chain');
+  const manual=await action(f.operator,'generation.generate','manual-in-auto');assert.equal(manual.status,409,'manual Generate stays blocked while the scenario owns playback');
+  await waitFor(()=>(f.operator.scenarioRuns.list().at(-1)?.captureIds.length??0)>=1,2000);
+  assert.equal((await action(f.operator,'scenario.stop','stop-auto')).body.ok,true);
+  assert.equal(f.operator.scenarioRunTag(),undefined);
+  const count=f.invocations;await new Promise(r=>setTimeout(r,1500));assert.equal(f.invocations,count,'no auto capture after Stop (hold and mode restored)');
+  const run=f.operator.scenarioRuns.list().at(-1)!;assert.equal(run.endReason,'stop');assert.ok(run.captureIds.length>=1);
+ }finally{await f.close();}
+});
+test('a live CSV without a mode cue never auto-captures (generate rows only)',async()=>{
+ const f=await fixture({checkPersonReferences:async()=>[]});try{
+  await fs.writeFile(path.join(f.directory,'scenarios','NOMODE.csv'),'seconds,action,target,value\n0,scenario,,NOMODE\n0,resume,,\n120,end,,\n');
+  await liveSettings(f.operator,'chain-before',{mode:'chain',intervalSec:5,scenarioPreview:false});
+  assert.equal((await action(f.operator,'scenario.load','load-nomode',{file:'NOMODE.csv'})).body.ok,true);
+  assert.equal((await action(f.operator,'scenario.play','play-nomode')).body.ok,true);
+  assert.equal(f.operator.scenario.autoCaptureMode(),undefined);
+  await new Promise(r=>setTimeout(r,1600));assert.equal(f.invocations,0);
+  await action(f.operator,'scenario.stop','stop-nomode');
+ }finally{await f.close();}
+});
+test('natural end restores outputs and settings, enables generation (end policy), archives the CSV and reloads the previous scenario',async()=>{
+ const store=outputStore(),{createOperatorScenarioOutputs}=await import('./operatorScenarioOutputs');
+ const f=await fixture({checkPersonReferences:async()=>[],outputMapping:createOperatorScenarioOutputs(store as any),readOutputIds:()=>['screen-1','screen-2','screen-3']});try{
+  const csv='seconds,action,target,value\n0,scenario,,END-NATIVE\n0,distance,A,60\n0,mode,,manual\n0,resume,,\n0,output_source,screen-2,c\n0,output_source,screen-3,a\n1,end,,\n';
+  await fs.writeFile(path.join(f.directory,'scenarios','END.csv'),csv);
+  await liveSettings(f.operator,'live-end',{scenarioPreview:false});
+  const before=await f.operator.state.snapshot();assert.equal(before.submissionHold,true);
+  assert.equal((await action(f.operator,'scenario.load','load-end',{file:'END.csv'})).body.ok,true);
+  assert.equal((await action(f.operator,'scenario.play','play-end')).body.ok,true);
+  const runId=f.operator.scenario.status().runId;
+  assert.equal((await f.operator.state.snapshot()).submissionHold,false);assert.deepEqual(store.outputs.map(o=>o.source),['now','c','a']);
+  // Edit the library CSV during the run: the archive keeps the text that was played.
+  await fs.writeFile(path.join(f.directory,'scenarios','END.csv'),csv.replace('60','90'));
+  await waitFor(()=>f.operator.scenario.status().file==='SCN-001.csv',5000);await f.operator.whenReloaded();
+  const st=f.operator.scenario.status();assert.equal(st.state,'ready');assert.equal(st.ownsLayout,false);assert.equal(st.scenarioId,'SCN-001');
+  const after=await f.operator.state.snapshot();assert.equal(after.submissionHold,false,'end policy: generation enabled after a natural end');assert.equal(after.settings.scenes.a.distanceSec,15);assert.equal(after.settings.mode,before.settings.mode);
+  assert.deepEqual(store.outputs.map(o=>o.source),['now','a','b']);
+  const run=f.operator.scenarioRuns.get(runId)!;assert.equal(run.endReason,'end');assert.equal(run.scenarioId,'END-NATIVE');assert.equal(run.file,'END.csv');assert.equal(run.sha256,createHash('sha256').update(csv).digest('hex'));
+  assert.equal(run.cuesApplied,5);assert.equal(run.outputsChanged.length,2);assert.ok(run.restored!.includes('outputs'),String(run.restored));assert.ok(run.restored!.includes('submissionHold=false (end policy: enabled)'),String(run.restored));assert.ok(run.restored!.some(r=>r.startsWith('scenes.a.distanceSec=')),String(run.restored));
+  assert.equal(f.operator.scenarioRuns.readCsv(runId),csv);
+  const sidecar=JSON.parse(await fs.readFile(path.join(f.directory,'logs','scenario-runs',run.csvFile.replace(/\.csv$/,'.json')),'utf8'));assert.equal(sidecar.endReason,'end');assert.ok(sidecar.endedAt);
+  const rows=(await fs.readFile(path.join(f.directory,'logs','scenario-runs.jsonl'),'utf8')).trim().split('\n').map(l=>JSON.parse(l)).filter(r=>r.runId===runId);assert.equal(rows.length,2);assert.equal(rows[0].endedAt,null);
+  const events=(await fs.readFile(path.join(f.directory,'scenario-events.jsonl'),'utf8')).trim().split('\n').map(l=>JSON.parse(l)).filter(r=>r.runId===runId).map(r=>r.event);
+  for(const name of ['run.completed','restore.layout','restore.outputs','restore.setting','restore.hold','run.archived','scenario.reloaded'])assert.ok(events.includes(name),name);
+ }finally{await f.close();}
+});
+test('live frame recording error is set on failure and cleared by the next successful recording',async()=>{
+ let n=0,fail=true;const recorded:any[]=[];
+ const camFrame=()=>{n++;const b=Buffer.from('camera frame '+n),h=createHash('sha256').update(b).digest('hex');return{...frame(),image:'data:image/jpeg;base64,'+b.toString('base64'),sha256:h,suggestedCaptureId:'camera-1792322515117-abcdef12',sourceParams:{source:'live-camera',inputKind:'live-camera',sourceScope:'camera:main',capturedAt:new Date(Date.now()+n).toISOString()}};};
+ const input:OperatorInputClient={readState:async()=>cameraState() as any,readPreview:async()=>{throw Error('unused');},select:async()=>{throw Error('unused');},readFrame:async()=>camFrame()};
+ const f=await fixture({input,recordFrame:async(body:any)=>{if(fail)throw Error('disk full');recorded.push(body);return{};}});try{
+  await liveSettings(f.operator,'manual-mode',{mode:'manual'});
+  assert.equal((await action(f.operator,'generation.resume','resume-rec')).body.ok,true);
+  const errors=async()=>((await f.operator.state.snapshot()) as any).errors.filter((e:any)=>e.operator==='native-recording').map((e:any)=>e.message);
+  const start=Date.now();while(!(await errors()).length&&Date.now()-start<4000)await new Promise(r=>setTimeout(r,100));
+  assert.match((await errors())[0],/^Live frame recording failed: disk full/);
+  fail=false;await waitFor(()=>recorded.length>=1,4000);
+  assert.deepEqual(await errors(),[]);
+ }finally{await f.close();}
+});
+test('natural end stays paused when the CSV last hold cue was pause; Stop restores the pre-scenario hold',async()=>{
+ const f=await fixture({checkPersonReferences:async()=>[]});try{
+  await liveSettings(f.operator,'live-pause-end',{scenarioPreview:false});
+  await fs.writeFile(path.join(f.directory,'scenarios','PEND.csv'),'seconds,action,target,value\n0,scenario,,PEND\n0,resume,,\n0,pause,,\n1,end,,\n');
+  assert.equal((await action(f.operator,'scenario.load','load-pend',{file:'PEND.csv'})).body.ok,true);
+  assert.equal((await action(f.operator,'scenario.play','play-pend')).body.ok,true);const runId=f.operator.scenario.status().runId;
+  await waitFor(()=>f.operator.scenario.status().file==='SCN-001.csv',5000);await f.operator.whenReloaded();
+  assert.equal((await f.operator.state.snapshot()).submissionHold,true);assert.ok(f.operator.scenarioRuns.get(runId)!.restored!.includes('submissionHold=true (end policy: paused by CSV)'));
+  await fs.writeFile(path.join(f.directory,'scenarios','RSTOP.csv'),'seconds,action,target,value\n0,scenario,,RSTOP\n0,resume,,\n60,end,,\n');
+  assert.equal((await action(f.operator,'scenario.load','load-rstop',{file:'RSTOP.csv'})).body.ok,true);
+  assert.equal((await action(f.operator,'scenario.play','play-rstop')).body.ok,true);assert.equal((await f.operator.state.snapshot()).submissionHold,false);
+  assert.equal((await action(f.operator,'scenario.stop','stop-rstop')).body.ok,true);assert.equal((await f.operator.state.snapshot()).submissionHold,true,'Stop restores the pre-scenario (paused) hold');
+ }finally{await f.close();}
+});

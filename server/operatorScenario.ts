@@ -88,6 +88,8 @@ export interface OperatorScenarioOptions {
  setLayout:(layout:Layout)=>void|Promise<void>;
  generate:(request:{requestId:string;source:'scenario'})=>Promise<unknown>;
  event?:(row:Record<string,unknown>)=>void;
+ /** A run released ownership: natural end (same restore as Stop) or Stop. Called after layout/outputs/settings restore. */
+ finished?:(info:{reason:'end'|'stop';runId:string;scenarioId:string;previewOnly:boolean;cueIds:string[];settingsCues:unknown[];restored:string[];restoreErrors:string[]})=>void|Promise<void>;
 }
 /** One monotonic Node clock. A cue is attempted once, never silently retried. */
 export function createOperatorScenario(options:OperatorScenarioOptions){
@@ -101,6 +103,8 @@ export function createOperatorScenario(options:OperatorScenarioOptions){
  const generations:{cueId:string;captureId?:string;skipped?:string;status:string}[]=[];
  type SettingsRow={cueId:string;atSec:number;change:string;status:'applied'|'skipped'|'failed';skipped?:string;error?:string};
  const settingsRows:SettingsRow[]=[];let lastSettingsError='',settingsOwned=false;
+ // mode cue applied live by this run (timer|chain): the native scheduler then runs auto captures during playback.
+ let autoMode:'timer'|'chain'|undefined;
  const hasSettings=()=>!!plan?.cues.some(c=>c.settings!==undefined||c.hold!==undefined);
  const record=(row:SettingsRow)=>{settingsRows.push(row);if(settingsRows.length>200)settingsRows.splice(0,settingsRows.length-200);};
  /** Restores only items this run changed; conflicts are reported in lastSettingsError, never overwritten. */
@@ -109,6 +113,18 @@ export function createOperatorScenario(options:OperatorScenarioOptions){
   let errors:string[];try{errors=await options.settings.stop();}catch(error){errors=[String((error as Error).message)];}
   if(errors.length){lastSettingsError=`Restore on ${reason}: `+errors.join('; ');emit('settings.restore.failed',{reason,errors});}else emit('settings.restored',{reason});
   return errors;
+ }
+ /** Shared by Stop and natural end: layout baseline, output mapping, then settings/hold; each restored item is logged. */
+ async function release(reason:'end'|'stop',wasOwned=owned){
+  const cueIds=[...applied],restored:string[]=[],restoreErrors:string[]=[];owned=false;autoMode=undefined;reset();
+  if(baseline){const previous=baseline;baseline=undefined;await options.setLayout(previous);restored.push('layout='+previous.join('|'));emit('restore.layout',{reason,layout:previous});}
+  let outputError:unknown;
+  try{if(options.outputMapping){await options.outputMapping.stop();if(wasOwned&&plan?.cues.some(c=>c.outputs)){restored.push('outputs');emit('restore.outputs',{reason});}}}
+  catch(error){lastOutputError=String((error as Error).message);emit('output.mapping.failed',{reason,error:lastOutputError});outputError=error;restoreErrors.push('outputs: '+lastOutputError);}
+  const hadSettings=settingsOwned,settingsErrors=await restoreSettings(reason);restoreErrors.push(...settingsErrors);
+  if(hadSettings&&!settingsErrors.length)restored.push('settings');
+  if(wasOwned&&runId)try{await options.finished?.({reason,runId,scenarioId:plan?.id??'',previewOnly:preview,cueIds,settingsCues:structuredClone(settingsRows),restored,restoreErrors});}catch(error){emit('run.finished.failed',{reason,error:String((error as Error).message)});}
+  return {outputError,settingsErrors};
  }
  const time=()=>elapsed+(state==='running'?Math.max(0,now()-anchor):0);
  const emit=(event:string,extra:Record<string,unknown>={})=>options.event?.({event,runId,scenarioId:plan?.id,elapsedSec:time(),previewOnly:preview,...extra});
@@ -134,7 +150,7 @@ export function createOperatorScenario(options:OperatorScenarioOptions){
     if(cue.settings!==undefined||cue.hold!==undefined){
      const change={settings:cue.settings,hold:cue.hold},row:SettingsRow={cueId:cue.id,atSec:cue.atSec,change:describeScenarioSettingsChange(change),status:'applied'};
      if(preview){row.status='skipped';row.skipped='preview';emit('settings.skipped',{cueId:cue.id,change:row.change,reason:'preview'});}
-     else try{if(!options.settings||!settingsOwned)throw Error('Scenario settings control is unavailable');await options.settings.apply(change);emit('settings.applied',{cueId:cue.id,change:row.change});}
+     else try{if(!options.settings||!settingsOwned)throw Error('Scenario settings control is unavailable');await options.settings.apply(change);emit('settings.applied',{cueId:cue.id,change:row.change});const m=(cue.settings as {mode?:string}|undefined)?.mode;if(m!==undefined)autoMode=m==='timer'||m==='chain'?m:undefined;}
      catch(error){row.status='failed';row.error=String((error as Error).message);lastSettingsError=`${cue.id} (${row.change}): ${row.error}`;emit('settings.failed',{cueId:cue.id,change:row.change,error:row.error});}
      record(row);
     }
@@ -155,16 +171,21 @@ export function createOperatorScenario(options:OperatorScenarioOptions){
       }).catch(error=>{row.status='skipped';row.skipped=String(error?.message??error);emit('generation.skipped',{...identity,cueId:cue.id,reason:row.skipped});});
      }
    }
-   if(!plan.loop&&full>=plan.durationSec&&state==='running'){elapsed=plan.durationSec;state='completed';emit('run.completed');await restoreSettings('end');}
+   if(!plan.loop&&full>=plan.durationSec&&state==='running'){
+    elapsed=plan.durationSec;state='completed';emit('run.completed');
+    // Natural end performs the same restore as Stop (layout, output mapping, settings + hold); failures are reported, not thrown.
+    const result=await release('end');
+    if(result.outputError){lastOutputError=String((result.outputError as Error).message);}
+   }
   }finally{processing=false;}
  }
  return {
   /** Keeps the last full-file check visible until the next clean load clears it; the loaded plan is untouched. */
   recordFormat(checkedFile:string,result:{formatErrors?:ScenarioFormatIssue[];formatWarnings?:ScenarioFormatIssue[]}){format={formatErrors:structuredClone(result.formatErrors??[]),formatWarnings:structuredClone(result.formatWarnings??[]),formatCheckedAt:new Date().toISOString(),formatFile:checkedFile};},
   load(next:OperatorPlan,nextFile:string,formatWarnings:ScenarioFormatIssue[]=[]){if(owned)throw Error('Stop the scenario before loading');plan=structuredClone(next);file=nextFile;format={formatErrors:[],formatWarnings:structuredClone(formatWarnings),formatCheckedAt:new Date().toISOString(),formatFile:nextFile};state='ready';elapsed=0;runId='';lastOutputError='';lastSettingsError='';settingsRows.length=0;generations.length=0;reset();},
-  async play(dry:boolean,layout:Layout){if(!plan)throw Object.assign(Error('Load a scenario first'),{statusCode:409});if(processing)throw Object.assign(Error('Scenario is updating; retry'),{statusCode:409});const nextRunId=randomUUID().replaceAll('-','');if(plan.cues.some(c=>c.outputs)){if(!options.outputMapping)throw Error('Scenario output mapping is unavailable');await options.outputMapping.begin({preview:dry,runId:nextRunId});}if(!dry&&hasSettings()){if(!options.settings)throw Error('Scenario settings control is unavailable');await options.settings.begin({runId:nextRunId});settingsOwned=true;}baseline??=[...layout];owned=true;preview=dry;runId=nextRunId;lastOutputError='';lastSettingsError='';settingsRows.length=0;state='running';elapsed=0;anchor=now();cycle=0;reset();generations.length=0;emit('run.started');await tick();},
+  async play(dry:boolean,layout:Layout){if(!plan)throw Object.assign(Error('Load a scenario first'),{statusCode:409});if(processing)throw Object.assign(Error('Scenario is updating; retry'),{statusCode:409});const nextRunId=randomUUID().replaceAll('-','');if(plan.cues.some(c=>c.outputs)){if(!options.outputMapping)throw Error('Scenario output mapping is unavailable');await options.outputMapping.begin({preview:dry,runId:nextRunId});}if(!dry&&hasSettings()){if(!options.settings)throw Error('Scenario settings control is unavailable');await options.settings.begin({runId:nextRunId});settingsOwned=true;}autoMode=undefined;baseline??=[...layout];owned=true;preview=dry;runId=nextRunId;lastOutputError='';lastSettingsError='';settingsRows.length=0;state='running';elapsed=0;anchor=now();cycle=0;reset();generations.length=0;emit('run.started');await tick();},
   pause(){if(state==='running'){elapsed=time();state='paused';emit('run.paused');}else if(state==='paused'){anchor=now();state='running';emit('run.resumed');}},
-  async stop(){elapsed=time();state='stopped';owned=false;emit('run.stopped');reset();if(baseline){const previous=baseline;baseline=undefined;await options.setLayout(previous);}let outputError:unknown;try{await options.outputMapping?.stop();}catch(error){lastOutputError=String((error as Error).message);emit('output.mapping.failed',{error:lastOutputError});outputError=error;}const settingsErrors=await restoreSettings('stop');if(outputError)throw outputError;if(settingsErrors.length)throw Object.assign(Error(lastSettingsError),{statusCode:409});},
+  async stop(){const wasOwned=owned;elapsed=time();state='stopped';emit('run.stopped');const {outputError,settingsErrors}=await release('stop',wasOwned);if(outputError)throw outputError;if(settingsErrors.length)throw Object.assign(Error(lastSettingsError),{statusCode:409});},
   tick,snapshot,
   captureSnapshot(){
    for(const scene of sceneKeys)if(modes[scene]==='asset_only'&&!images[scene]?.length)throw Object.assign(Error('asset_only requires an active image element for '+scene),{statusCode:400});
@@ -172,6 +193,8 @@ export function createOperatorScenario(options:OperatorScenarioOptions){
   },
   acknowledge(receipt:{runId:string;tokens:string[]}){if(receipt.runId===runId)for(const token of receipt.tokens)pending.delete(token);},
   canGenerate(){return owned&&state==='running'&&!preview;},
+  /** timer|chain when this live run set the mode itself (CSV mode cue) and is running; otherwise undefined. */
+  autoCaptureMode(){return owned&&state==='running'&&!preview?autoMode:undefined;},
   ownsLayout(){return owned;},
   status(){return {state,status:state,previewOnly:preview,scenarioId:plan?.id??'',runId,elapsedSec:time(),durationSec:plan?.durationSec??0,ownsLayout:owned,file,layout:currentLayout??null,prompts:Object.fromEntries(Object.entries(snapshot().prompts).map(([key,value])=>['gen_'+key,value])),cueIds:[...applied],instructions:plan?.participantInstructions??'',requestedGenerations:generations.filter(g=>g.status!=='skipped').length,skippedGenerations:generations.filter(g=>g.status==='skipped').length,lastGenerationReason:generations.at(-1)?.skipped??'',lastGenerationSkipped:generations.at(-1)?.skipped??'',lastOutputError,generationCues:structuredClone(generations),appliedSettings:settingsRows.filter(r=>r.status==='applied').length,skippedSettings:settingsRows.filter(r=>r.status==='skipped').length,failedSettings:settingsRows.filter(r=>r.status==='failed').length,lastSettingsSkipped:settingsRows.at(-1)?.skipped??'',lastSettingsError,settingsCues:structuredClone(settingsRows),...structuredClone(format)};}
  };

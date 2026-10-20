@@ -71,24 +71,36 @@ test('unknown offsets stay unknown and first-visit provisional data never mixes 
   assert.equal(provisional.b,null);assert.equal(provisional.c,null);
 });
 
-test('SVG nodes persist through polls, Each progress and errors, then update once on completed result',()=>{
-  const source=fs.readFileSync(new URL('./control.mjs',import.meta.url),'utf8');let resets=0;
-  const elements={cone:{replaceChildren(){resets++;},append(){}},'cone-result':{setAttribute(){}},'cone-settings':{setAttribute(){}},'cone-status':{}};
+test('generation keeps previous scenes at their recorded distance, blinking, and marks skipped ones afterwards',()=>{
+  const source=fs.readFileSync(new URL('./control.mjs',import.meta.url),'utf8');let resets=0;const texts=[],animations=[];
+  const elements={cone:{replaceChildren(){resets++;texts.length=0;animations.length=0;},append(){}},'cone-result':{setAttribute(){}},'cone-settings':{setAttribute(){}},'cone-status':{}};
   const completed=completedConeResult([old]);
-  const context={availableConeScenes,coneGeometry,localImagePath,JSON,
-    $:id=>elements[id],svgNode:()=>({}),field:()=>({value:99}),
-    scenes:['a','b','c'],colors:{a:'orange',b:'pink',c:'blue'},
-    latest:{capture:{phase:'idle'},errors:[]},captureProgress:null,
-    displayedScenes:completed.scenes,coneMode:'result',coneScenes:null,coneRenderKey:null,coneCompleted:completed};
-  vm.runInNewContext(source.slice(source.indexOf('function renderCone(){'))+';this.renderCone=renderCone',context);
+  const context={availableConeScenes,coneGeometry,localImagePath,JSON,Number,Object,
+    $:id=>elements[id],
+    svgNode:(tag,attrs,content)=>{if(tag==='text')texts.push(content);if(tag==='animate')animations.push(attrs);return {append(child){if(child)animations.push(child);}};},
+    field:()=>({value:99}),scenes:['a','b','c'],colors:{a:'orange',b:'pink',c:'blue'},
+    latest:{capture:{phase:'idle',captureId:''},errors:[]},captureProgress:null,
+    displayedScenes:completed.scenes,coneMode:'result',coneScenes:null,coneRenderKey:null,coneCompleted:completed,coneLastNow:null,sceneSkips:{}};
+  const body=source.slice(source.indexOf('function sceneStaleState('),source.indexOf('document.addEventListener',source.indexOf('function sceneStaleState(')));
+  vm.runInNewContext(body+source.slice(source.indexOf('function renderCone(){'))+';this.renderCone=renderCone',context);
   context.renderCone();assert.equal(resets,1);
-  context.latest.capture.phase='generating';context.displayedScenes=completedConeResult([fresh]).scenes;
-  context.renderCone();assert.equal(resets,1);assert.equal(context.coneScenes.now.content.captureId,'old');
-  context.coneMode='settings';context.renderCone();assert.equal(resets,2);
-  context.coneMode='result';context.renderCone();assert.equal(resets,3);
-  assert.equal(context.coneScenes.a.content.distanceSecSigned,15);
-  context.latest.capture.phase='idle';context.latest.errors=[{operator:'native',message:'failed'}];
-  context.renderCone();assert.equal(resets,3);
-  context.coneCompleted=completedConeResult([fresh]);context.renderCone();assert.equal(resets,4);
-  context.coneCompleted=structuredClone(context.coneCompleted);context.renderCone();assert.equal(resets,4);
+  assert.ok(texts.some(t=>/^A\s+\+15 sec$/.test(t)),texts.join('|'));
+  // A new capture starts: NOW changes, A/B/C still belong to "old". Distances stay known, frames blink.
+  const freshScenes=completedConeResult([fresh]).scenes;
+  context.latest.capture={phase:'generating',captureId:'fresh'};
+  context.displayedScenes={...completed.scenes,now:freshScenes.now};
+  context.renderCone();assert.equal(resets,2);
+  assert.ok(!texts.some(t=>/time unknown/.test(t)),texts.join('|'));
+  assert.ok(texts.some(t=>/^A\s+\+15 sec · previous$/.test(t)),texts.join('|'));
+  assert.equal(animations.filter(a=>a.attributeName==='stroke-width').length,3);
+  // A arrives: A stops blinking, B/C still blink.
+  context.displayedScenes={...context.displayedScenes,a:freshScenes.a};
+  context.renderCone();assert.equal(animations.filter(a=>a.attributeName==='stroke-width').length,2);
+  // Generation ends with B/C skipped: no blink, small marker with the reason.
+  context.latest.capture={phase:'idle',captureId:''};context.sceneSkips={b:'chance',c:'rejected:identity'};
+  context.renderCone();assert.equal(animations.length,0);
+  assert.ok(texts.some(t=>/^B\s+\+30 sec · skip chance$/.test(t)),texts.join('|'));
+  assert.ok(texts.some(t=>/^C\s+−30 sec · rejected identity$/.test(t)),texts.join('|'));
+  // Unchanged polls do not rebuild the SVG.
+  const before=resets;context.renderCone();assert.equal(resets,before);
 });

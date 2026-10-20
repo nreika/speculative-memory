@@ -91,7 +91,7 @@ export type UniquePeopleResult =
 /**
  * Generate, inspect, retry once with a correction naming the defect. A rejected image is never returned.
  * onExhausted "skip" (production scene loop, 2026-10-19): after the last REJECTION (ok:false) return a skip result so the
- * capture continues without this scene; an unknown verdict (inspection error/unavailable, ok:null) still throws.
+ * capture continues without this scene; an unknown verdict (ok:null) skips as 'inspection_unavailable'. onExhausted 'throw' still throws.
  */
 export async function generateUniquePeople(args: {
   generate: (attempt: number, correction: string) => Promise<string>;
@@ -120,5 +120,7 @@ export async function generateUniquePeople(args: {
     last = verdict;
   }
   if (args.onExhausted === 'skip' && last?.ok === false) return { skipped: true, defect: rejectionDefect(last), verdict: last, attempts: limit };
+  // 2026-10-20: an inspection that cannot decide (ok:null) skips the scene too; the capture keeps the previous image instead of failing.
+  if (args.onExhausted === 'skip' && last) return { skipped: true, defect: 'inspection_unavailable', verdict: last, attempts: limit };
   throw new Error(`Person identity check failed after ${limit} attempts; no image published`);
 }

@@ -17,6 +17,12 @@ export interface SceneParams {
   presence: number;
   tone: number;
   /**
+   * Per-scene presence / tone, order gen_a, gen_b, gen_c (0..1 each). Set by normalizeSceneParams when the request carries
+   * scenePresence / sceneTone; a scene the request does not override inherits the global value. Read via presenceAt / toneAt.
+   */
+  scenePresence?: number[];
+  sceneTone?: number[];
+  /**
    * G-25 0..1: chance that a recently seen person (<= 10 min) is drawn from behind in an unoccupied scene
    * (per scene, reproducible roll). Control panel "Empty-room person"; default 0.3.
    */
@@ -104,6 +110,45 @@ export const clampUnit = (value: unknown, fallback: number): number => {
   return Math.min(1, Math.max(0, n));
 };
 
+export const SCENE_KEYS = ["gen_a", "gen_b", "gen_c"] as const;
+export type SceneKey = (typeof SCENE_KEYS)[number];
+
+/**
+ * Per-scene 0..1 override from a request: a map { gen_a?, gen_b?, gen_c? } (or a 3-item array, null = inherit).
+ * Each scene without a valid number inherits `fallback` (the global value). Always returns 3 clamped values.
+ */
+export function parseSceneUnitMap(raw: unknown, fallback: number): number[] {
+  const pick = (i: number): unknown =>
+    Array.isArray(raw) ? raw[i] : raw && typeof raw === "object" ? (raw as Record<string, unknown>)[SCENE_KEYS[i]] : undefined;
+  return SCENE_KEYS.map((_, i) => clampUnit(pick(i), fallback));
+}
+
+const sceneUnitList = (list: number[] | undefined, fallback: number, count: number): number[] =>
+  Array.from({ length: count }, (_, i) => {
+    const v = list?.[Math.min(i, SCENE_DISTANCE_COUNT - 1)];
+    return typeof v === "number" && Number.isFinite(v) ? Math.min(1, Math.max(0, v)) : fallback;
+  });
+
+/** Presence of each of `count` scenarios (absent override = global presence; index >= 2 reuses the third). */
+export const resolveScenePresence = (p: Pick<SceneParams, "presence" | "scenePresence">, count = SCENE_DISTANCE_COUNT): number[] =>
+  sceneUnitList(p.scenePresence, p.presence, count);
+
+/** Tone of each of `count` scenarios (absent override = global tone). */
+export const resolveSceneTone = (p: Pick<SceneParams, "tone" | "sceneTone">, count = SCENE_DISTANCE_COUNT): number[] =>
+  sceneUnitList(p.sceneTone, p.tone, count);
+
+/** Presence of scenario `index` (0 = gen_a). */
+export const presenceAt = (p: Pick<SceneParams, "presence" | "scenePresence">, index: number): number =>
+  resolveScenePresence(p, Math.max(index + 1, SCENE_DISTANCE_COUNT))[Math.max(0, index)];
+
+/** Tone of scenario `index` (0 = gen_a). */
+export const toneAt = (p: Pick<SceneParams, "tone" | "sceneTone">, index: number): number =>
+  resolveSceneTone(p, Math.max(index + 1, SCENE_DISTANCE_COUNT))[Math.max(0, index)];
+
+/** { gen_a, gen_b, gen_c } record of a 3-value list (for logs / archive / request bodies). */
+export const sceneRecord = (values: number[]): Record<SceneKey, number> =>
+  ({ gen_a: values[0], gen_b: values[1], gen_c: values[2] }) as Record<SceneKey, number>;
+
 /**
  * Clamp + default. Accepts a request body (or any object); a missing or
  * invalid field falls back to `defaults` so old clients keep working.
@@ -118,11 +163,16 @@ export function normalizeSceneParams(raw: unknown, defaults: Partial<SceneParams
     (readNumber(src.futureDistanceSec) !== undefined
       ? fallbackSceneDistances(futureDistanceSec)
       : parseSceneDistances(defaults.sceneDistancesSec) ?? fallbackSceneDistances(futureDistanceSec));
+  const presence = clampUnit(src.presence, base.presence);
+  const tone = clampUnit(src.tone, base.tone);
   return {
     futureDistanceSec,
     sceneDistancesSec,
-    presence: clampUnit(src.presence, base.presence),
-    tone: clampUnit(src.tone, base.tone),
+    presence,
+    tone,
+    // Only when the request carries the map: absent = every scene inherits the global value (resolveScenePresence/Tone).
+    ...(src.scenePresence != null ? { scenePresence: parseSceneUnitMap(src.scenePresence, presence) } : {}),
+    ...(src.sceneTone != null ? { sceneTone: parseSceneUnitMap(src.sceneTone, tone) } : {}),
     emptyRoomPersonChance: clampUnit(src.emptyRoomPersonChance, base.emptyRoomPersonChance ?? 0.3),
   };
 }
@@ -174,4 +224,10 @@ export const presenceAllowsNewPerson = (_presence: number): boolean => false;
 /** Compact one-line description for logs. */
 export const describeSceneParams = (p: SceneParams): string =>
   `distances=[${resolveSceneDistances(p).map(formatSignedDistanceShort).join(", ")}] (gen_a, gen_b, gen_c) ` +
-  `presence=${p.presence.toFixed(2)} tone=${p.tone.toFixed(2)}`;
+  `presence=${p.presence.toFixed(2)} tone=${p.tone.toFixed(2)}` +
+  perSceneSuffix("presence", resolveScenePresence(p), p.presence) +
+  perSceneSuffix("tone", resolveSceneTone(p), p.tone);
+
+/** " presence[A,B,C]=0.30/0.80/0.30" when any scene differs from the global value, else "". */
+const perSceneSuffix = (name: string, values: number[], global: number): string =>
+  values.some((v) => v !== global) ? ` ${name}[A,B,C]=${values.map((v) => v.toFixed(2)).join("/")}` : "";

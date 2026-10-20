@@ -461,3 +461,43 @@ test('normalizeSceneParams: emptyRoomPersonChance clamps to 0..1 like presence/t
   assert.equal(normalizeSceneParams({ emptyRoomPersonChance: '0.5' }).emptyRoomPersonChance, 0.5);
   assert.equal(normalizeSceneParams({ emptyRoomPersonChance: 'x' }).emptyRoomPersonChance, 0.3);
 });
+
+test('per-scene presence/tone: map or array overrides, missing scenes inherit the global value, clamped', async () => {
+  const { presenceAt, toneAt, resolveScenePresence, resolveSceneTone, parseSceneUnitMap } = await import('./sceneParams');
+  const p = normalizeSceneParams({ presence: 0.3, tone: 0.6, scenePresence: { gen_b: 0.8 }, sceneTone: [null, 2, '0.1'] });
+  assert.deepEqual(p.scenePresence, [0.3, 0.8, 0.3]);
+  assert.deepEqual(p.sceneTone, [0.6, 1, 0.1]);
+  assert.equal(presenceAt(p, 1), 0.8);
+  assert.equal(toneAt(p, 2), 0.1);
+  assert.equal(toneAt(p, 5), 0.1, 'index beyond the third reuses the third');
+  // No map in the request: no override fields, every scene = global.
+  const g = normalizeSceneParams({ presence: 0.4, tone: 0.2 });
+  assert.equal(g.scenePresence, undefined);
+  assert.deepEqual(resolveScenePresence(g), [0.4, 0.4, 0.4]);
+  assert.deepEqual(resolveSceneTone(g, 2), [0.2, 0.2]);
+  assert.deepEqual(parseSceneUnitMap({ gen_a: 'x', gen_c: -1 }, 0.5), [0.5, 0.5, 0]);
+  assert.match(describeSceneParams(p), /presence\[A,B,C\]=0\.30\/0\.80\/0\.30 tone\[A,B,C\]=0\.60\/1\.00\/0\.10/);
+  assert.doesNotMatch(describeSceneParams(g), /\[A,B,C\]/);
+});
+
+test('planner prompt: per-scene presence/tone become one sentence per band, naming the scenarios', () => {
+  const same = buildScenarioPredictionPrompt(null, 3, undefined, { futureDistanceSec: 30, presence: 0.3, tone: 0.3, scenePresence: [0.3, 0.3, 0.3], sceneTone: [0.3, 0.35, 0.3] });
+  const plain = buildScenarioPredictionPrompt(null, 3, undefined, { futureDistanceSec: 30, presence: 0.3, tone: 0.3 });
+  assert.equal(same, plain, 'scenes on the same band keep the old single sentences');
+  const p = buildScenarioPredictionPrompt(null, 3, undefined, {
+    futureDistanceSec: 30, sceneDistancesSec: [30, 30, -30], presence: 0.3, tone: 0.3, scenePresence: [0.3, 0.9, 0.3], sceneTone: [0, 0.3, 1],
+  });
+  assert.match(p, /For Scenarios 1 and 3: People: nobody new appears\. People who are visible move slightly/);
+  assert.match(p, /For Scenario 2: People: nobody new appears\. People who are visible may move a lot/);
+  assert.match(p, /For Scenario 1: Tone \(applies ONLY to Scenario 1; the other scenarios follow their own Tone sentence/);
+  assert.match(p, /For Scenario 2: Tone \(applies ONLY to Scenario 2;[^\n]*TONE LOW = QUIET/);
+  assert.match(p, /For Scenario 3: Tone \(applies ONLY to Scenario 3;[^\n]*DRAMATIC/);
+  assert.doesNotMatch(p, /applies to ALL scenarios/);
+});
+
+test('image edit: per-scene presence/tone reach composeEditInstruction for each scene', () => {
+  const params = readSceneParams({ presence: 0.3, tone: 0.3, sceneTone: { gen_c: 1 } });
+  const calmC = composeEditInstruction({ predictionPrompt: 'She looks up.', presence: 0.3, tone: params.sceneTone![0] });
+  const dramaticC = composeEditInstruction({ predictionPrompt: 'She looks up.', presence: 0.3, tone: params.sceneTone![2] });
+  assert.notEqual(calmC, dramaticC);
+});

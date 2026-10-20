@@ -37,9 +37,27 @@ export interface ArchiveContext {
   /** Actual per-step backends ('local' | 'gemini'), after any fallback. */
   vlmBackend?: string;
   imageBackend?: string;
-  params: { sceneDistancesSec: number[]; presence: number; tone: number; imageCount: number };
+  params: {
+    sceneDistancesSec: number[];
+    presence: number;
+    tone: number;
+    /** Effective per-scene presence / tone (global value where the scene has no override). Older archives lack them. */
+    scenePresence?: Record<string, number>;
+    sceneTone?: Record<string, number>;
+    imageCount: number;
+  };
   /** Rulebook version in force for this generation (rulebook/active.json). */
   rulebookVersion?: number | null;
+}
+
+/** " (シーン別 presence A/B/C 0.3/0.8/0.3 ...)" when a scene overrides the global presence / tone, else "". */
+function perSceneLine(p: ArchiveContext['params']): string {
+  const part = (name: string, rec: Record<string, number> | undefined, global: number) => {
+    const vals = ['gen_a', 'gen_b', 'gen_c'].map((k) => rec?.[k]);
+    return vals.some((v) => typeof v === 'number' && v !== global) ? `${name} A/B/C ${vals.map((v) => v ?? global).join('/')}` : '';
+  };
+  const parts = [part('presence', p.scenePresence, p.presence), part('tone', p.sceneTone, p.tone)].filter(Boolean);
+  return parts.length ? ` (シーン別 ${parts.join(' / ')})` : '';
 }
 
 export interface ArchiveScene {
@@ -325,7 +343,7 @@ export class GenerationArchive {
       `生成ID: ${this.ctx.generationId}`,
       `撮影ID: ${this.ctx.captureId} / 入力元: ${this.ctx.source} / 状態: ${this.doc.status}`,
       `バックエンド: ${this.ctx.backend} / 認識(VLM): ${this.ctx.vlmBackend ?? '?'} ${this.ctx.vlmModel} / 画像生成: ${this.ctx.imageBackend ?? '?'} ${this.ctx.imageModel}`,
-      `距離: ${this.ctx.params.sceneDistancesSec.map(fmt).join(', ')} / presence ${this.ctx.params.presence} / tone ${this.ctx.params.tone}`,
+      `距離: ${this.ctx.params.sceneDistancesSec.map(fmt).join(', ')} / presence ${this.ctx.params.presence} / tone ${this.ctx.params.tone}` + perSceneLine(this.ctx.params),
       '',
       `${this.sourceFile ?? this.name('NOW.jpg')} = 元画像(NOW)`,
       '',

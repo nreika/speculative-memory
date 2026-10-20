@@ -3,7 +3,7 @@ import type {OperatorSettings,OperatorSettingsSnapshot} from './operatorState';
 /** One control-panel setting per scenario cue, shaped exactly like a settings.apply patch. */
 export type ScenarioSettingsPatch=
  {mode:'manual'|'timer'|'chain'}|{intervalSec:number}|{presence:number}|{tone:number}|{emptyRoomPersonChance:number}|
- {scenes:Partial<Record<'a'|'b'|'c',{distanceSec?:number;continuousPersonReferenceIds?:string[];oneShotPersonReferenceIds?:string[]}>>};
+ {scenes:Partial<Record<'a'|'b'|'c',{distanceSec?:number;continuousPersonReferenceIds?:string[];oneShotPersonReferenceIds?:string[];presence?:number;tone?:number}>>};
 export type ScenarioHold='pause'|'resume';
 export interface ScenarioSettingsChange{settings?:ScenarioSettingsPatch;hold?:ScenarioHold}
 const plain=(v:unknown):v is Record<string,any>=>!!v&&typeof v==='object'&&!Array.isArray(v);
@@ -22,7 +22,7 @@ export function validateScenarioSettingsChange(raw:ScenarioSettingsChange):Scena
   if(!plain(value)||Object.keys(value).length!==1||!['a','b','c'].includes(Object.keys(value)[0]))throw Error('Invalid scenario scene setting');
   const row=Object.values(value)[0];if(!plain(row)||Object.keys(row).length!==1)throw Error('Invalid scenario scene setting');
   const [field,item]=Object.entries(row)[0];
-  if(field==='distanceSec')finite(item,field);
+  if(field==='distanceSec'||field==='presence'||field==='tone')finite(item,field);
   else if(field==='continuousPersonReferenceIds'||field==='oneShotPersonReferenceIds')personReferenceIds(item);
   else throw Error('Invalid scenario scene setting');
  }else throw Error('Invalid scenario setting');
@@ -79,7 +79,7 @@ export function createOperatorScenarioSettings(options:{state:StatePort;checkPer
    if(!active)return [] as string[];const run=active;active=undefined;const errors:string[]=[];
    if(run.written.size){
     const current=(await options.state.readSettingsSnapshot()).settings,restore:[string,unknown][]=[];
-    for(const [item,written]of run.written){const now=read(current,item),original=read(run.baseline,item);if(!same(now,written))errors.push(`${item} changed after the scenario set it; not restored`);else if(!same(now,original))restore.push([item,original]);}
+    for(const [item,written]of run.written){const now=read(current,item),original=read(run.baseline,item);if(!same(now,written))errors.push(`${item} changed after the scenario set it; not restored`);else if(!same(now,original))restore.push([item,original===undefined&&/^scenes\.[abc]\.(presence|tone)$/.test(item)?null:original]);}
     if(restore.length){
      try{await apply(run,patchOf(restore),'restore');}
      catch{for(const entry of restore){try{await apply(run,patchOf([entry]),'restore');}catch(error){errors.push(`${entry[0]} not restored: ${(error as Error).message}`);}}}

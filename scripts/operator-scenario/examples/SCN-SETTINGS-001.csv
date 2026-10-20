@@ -3,6 +3,7 @@ seconds,action,target,value
 0,instructions,,"Control-panel settings only; no generate rows"
 0,distance,A,10
 4,presence,,0.5
+6,presence,B,0.8
 8,tone,,0.3
 10,empty_person,,0.5
 12,pause,,

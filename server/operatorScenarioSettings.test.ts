@@ -63,3 +63,9 @@ test('empty_person cue (emptyRoomPersonChance) applies live through settings.app
  await f.settings.begin({runId:'erp2'});await f.settings.apply({settings:{emptyRoomPersonChance:.9}});await f.manual({emptyRoomPersonChance:.1});
  const errors=await f.settings.stop();assert.match(errors.join(),/emptyRoomPersonChance changed after the scenario set it; not restored/);assert.equal((await f.state.readSettings()).emptyRoomPersonChance,.1);
 }finally{await f.close();}});
+test('per-scene presence/tone cue (CSV target A|B|C) applies through settings.apply; Stop removes an override that did not exist before',async()=>{const f=await fixture();try{
+ assert.throws(()=>validateScenarioSettingsChange({settings:{scenes:{b:{presence:1.2}}}}));assert.throws(()=>validateScenarioSettingsChange({settings:{scenes:{b:{tone:-0.1}}}}));
+ await f.settings.begin({runId:'pst1'});await f.settings.apply({settings:{scenes:{b:{presence:.8}}}});await f.settings.apply({settings:{scenes:{c:{tone:.2}}}});
+ const mid=(await f.state.readSettings()).scenes;assert.equal(mid.b.presence,.8);assert.equal(mid.c.tone,.2);
+ assert.deepEqual(await f.settings.stop(),[]);const after=(await f.state.readSettings()).scenes;assert.equal(after.b.presence,undefined);assert.equal(after.c.tone,undefined);assert.equal(after.b.distanceSec,30);
+}finally{await f.close();}});

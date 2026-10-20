@@ -68,3 +68,9 @@
 - extraConstraints のほぼ同文 5 文（物を足さない）を 1 文に統合。照明・ホワイトバランス・人数・同一性・持ち物の制約は変更なし。
 - 書き出しのみ（未有効化）。有効化: scripts/rulebook-add-motion-v19.ts --activate-existing
 - 自動改善の検証・ロールバック対象外（ユーザー判断のため）。
+
+## v20 — 2026-10-20T07:40:38.284Z（framing_drift 対策・プロンプトのみ先行）
+- 元: v19。全シーンの画像プロンプトに固定文 imagePrompt.framingAnchorRule を追加（「入力と同じ画角・ズーム・チルト・カメラ位置。四辺に接する内容はそのまま。構図変更・クロップ・ズームをしない」）。遮蔽時は既存の obstructedLeadRule が先頭のまま、その直後に置く。
+- quality.longSpan のカメラ文（identical camera position, zoom and viewpoint / Do not zoom, shift or re-compose the view）はこの文に統合して削除（重複させない）。
+- 書き出しのみ（未有効化）。有効化: node_modules\.bin\tsx.cmd scripts\rulebook-add-framing-anchor.ts --activate-existing
+- 自動改善の検証・ロールバック対象外（ユーザー判断のため）。

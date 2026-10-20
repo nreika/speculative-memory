@@ -11,11 +11,13 @@ import {createBrowserOutputSources} from './server/browserOutputSources';
 import {createBrowserOutputAssets} from './server/browserOutputAssets';
 import {createBrowserOutputRecordings} from './server/browserOutputRecordings';
 import {createBrowserOutputThumbnails} from './server/browserOutputThumbnails';
+import {createCaptureThumbs} from './server/captureThumbs';
 import {createBrowserFaceBoxes} from './server/browserFaceBoxes';
 import {createBrowserFacePresentation} from './server/browserFacePresentation';
 import {browserOutputCurrent} from './server/browserOutputCurrent';
 import {installTdBrowserControl} from './server/tdControl/node-proxy.mjs';
 import {createNativeOperator} from './server/nativeOperator';
+import {createScenarioRunArchive,registerScenarioRunRoutes} from './server/scenarioRunArchive';
 import {createOperatorScenarioOutputs} from './server/operatorScenarioOutputs';
 import {EventEmitter} from 'node:events';
 import {createHash} from 'node:crypto';
@@ -81,6 +83,7 @@ import {
   saveRefFrame,
   loadRefFrameDataUrls,
   resetRefFrames,
+  resizeToMaxPx,
   type RefFrameChoice,
 } from './server/history/refFrames';
 import {
@@ -97,6 +100,11 @@ import {
   formatSignedDistanceShort,
   resolveSceneDistances,
   sceneDistanceAt,
+  presenceAt,
+  toneAt,
+  resolveScenePresence,
+  resolveSceneTone,
+  sceneRecord,
 } from './services/sceneParams';
 import { nowContentText, scenarioContentText } from './services/promptBuilder';
 import {
@@ -116,12 +124,16 @@ import {inspectCountedImage} from './server/generation/countInspection';
 import { detectPeople, extraPeopleVerdict } from './server/generation/lightPeopleDetector';
 import { appendQaRow } from './server/qa/localJudge';
 import { withJapaneseSpan } from './server/generation/spanFix';
+import { buildStateLedger, judgePastContinuity, stateLedgerNote, type PastHistoryRow } from './server/generation/pastScene';
 import { getCostTracker } from './server/usage/costTracker';
 import { buildPublicUrl, resolveNotifyHost, resolvePublicBaseUrl } from './server/network/notifyTarget';
 import { registerPresenceRoutes } from './server/presence/routes';
 import { registerHealthRoutes } from './server/health/routes';
 import { getComfyWatchdog } from './server/generation/comfyWatchdog';
 import { obstructedSince, withObstructionNote } from './server/events/obstruction';
+import { operatorWarnings } from './server/operatorWarnings';
+import { sceneNotes } from './server/sceneNotes';
+import { toneMismatch, rewriteForTone, forceToneWording } from './server/generation/toneEnforce';
 import { CaptureEventStore, captureBatchCounts, captureExecutionSource, captureInputIdentity, type CaptureEvent as CaptureEventRow } from './server/events/captureEvents';
 import { registerEventRoutes } from './server/events/routes';
 import { QaService } from './server/qa/qaService';
@@ -297,6 +309,9 @@ async function startServer() {
   if (!fs.existsSync(capturesDir)) {
     fs.mkdirSync(capturesDir);
   }
+  // History thumbnails (captures/thumbs/<name>.jpg): written in the background after each capture image.
+  // On-miss jobs for old history rows wait while a capture is active (captureManager is declared below; read lazily).
+  const captureThumbs = createCaptureThumbs({ capturesDir, busy: () => !!captureManager.snapshot().active });
 
   const latestMetaPath = path.join(capturesDir, 'latest.json');
   const latestScenesMetaPath = path.join(capturesDir, 'latest_scenes.json');
@@ -606,6 +621,7 @@ async function startServer() {
   const saveImageAsset = (filename: string, buffer: Buffer): SavedImageAsset => {
     const asset = buildSavedImageAsset(filename, buffer);
     fs.writeFileSync(asset.absolutePath, buffer);
+    captureThumbs.enqueue(asset.absolutePath);
     return asset;
   };
   const ensureSourceImageSaved = (sourceImage: unknown, captureId: string): SavedImageAsset | null => {
@@ -621,6 +637,7 @@ async function startServer() {
 
     const asset = buildSavedImageAsset(buildSavedFilename('record', extension), buffer);
     fs.writeFileSync(asset.absolutePath, buffer);
+    captureThumbs.enqueue(asset.absolutePath);
     console.log(`Saved source image to: ${asset.absolutePath}`);
     sourceImageAssetsByCaptureId.set(captureId, asset);
 
@@ -872,7 +889,10 @@ async function startServer() {
     () => new Date(),
     () => comfyWatchdog.status().alert
   );
-  registerEventRoutes(app, captureEvents, { archiveRoot: archiveRootDir() });
+  // G-27: exact CSV copy of every live scenario run (logs/scenario-runs/ + logs/scenario-runs.jsonl); History draws the run ranges.
+  const scenarioRuns = createScenarioRunArchive({ logsDirectory: path.join(process.cwd(), 'logs') });
+  registerScenarioRunRoutes(app, scenarioRuns);
+  registerEventRoutes(app, captureEvents, { archiveRoot: archiveRootDir(), thumbs: captureThumbs, scenarioRuns });
   // Read-only screen output. Content comes from an explicit complete archive registry, never latest.json.
   const browserSettings=process.env.BROWSER_DISPLAY_SETTINGS_FILE;
   const browserContents=process.env.BROWSER_DISPLAY_CONTENTS_FILE;
@@ -929,7 +949,8 @@ async function startServer() {
   try {
     const privateOutputRoot=path.dirname(path.resolve(archiveRootDir()));
     const outputAssets=createBrowserOutputAssets({directory:path.join(privateOutputRoot,'browser-output-assets'),repositoryRoot:process.cwd()});
-    personReferenceAssets=createScenePersonReferenceAssets({assets:outputAssets,directory:path.join(privateOutputRoot,'scene-person-reference-observations'),modelKey:vlmConfig.model+':'+createHash('sha256').update(JSON.stringify([DESCRIBE_PROMPT,DESCRIBE_SCHEMA])).digest('hex'),describe:async(imageDataUrl,signal)=>{const result=await describePeople(imageDataUrl,{signal});if(!result.ok)throw Error('Reference person observation unavailable');return {people:result.people};}});
+    personReferenceAssets=createScenePersonReferenceAssets({assets:outputAssets,directory:path.join(privateOutputRoot,'scene-person-reference-observations'),modelKey:vlmConfig.model+':'+createHash('sha256').update(JSON.stringify([DESCRIBE_PROMPT,DESCRIBE_SCHEMA])).digest('hex'),describe:async(imageDataUrl,signal)=>{// Phone photos (e.g. 4000x3000) are rejected by Ollama; describe a 1280px copy instead.
+const m=/^data:image\/[a-z]+;base64,(.+)$/i.exec(imageDataUrl);const small=m?'data:image/jpeg;base64,'+(await resizeToMaxPx(Buffer.from(m[1],'base64'),1280)).toString('base64'):imageDataUrl;const result=await describePeople(small,{signal});if(!result.ok)throw Error('Reference person observation unavailable');return {people:result.people};}});
     registerScenePersonReferenceRoutes(app,{service:personReferenceAssets,allowedHosts:new Set(process.env.TD_CONTROL_ALLOWED_HOSTS?.split(',').map(host=>host.trim()).filter(Boolean)??['localhost:3000','127.0.0.1:3000'])});
     const resolvePresentationImage=async(imageUrl:string)=>{
       if(imageUrl.startsWith('/captures/browser-output-assets/'))return (await outputAssets.resolve(imageUrl))?.absolutePath??null;
@@ -1326,6 +1347,7 @@ async function startServer() {
       const filename = recordingFilename(formatTokyoTimestampForFilename(), extension);
       const asset = buildSavedImageAsset(filename, buffer);
       fs.writeFileSync(asset.absolutePath, buffer, { flag: 'wx' });
+      captureThumbs.enqueue(asset.absolutePath);
       const savedAt = new Date().toISOString();
       fs.appendFileSync(path.join(process.cwd(), 'logs', 'recordings.jsonl'), JSON.stringify({ savedAt, ...recordingMetadata(req.body), filename, url: asset.url, size: asset.size }) + '\n');
       console.log(`Saved record-only frame to: ${asset.absolutePath}`);
@@ -1461,8 +1483,8 @@ async function startServer() {
         seed: Number.isFinite(seed) ? Number(seed) : undefined,
         filenamePrefix: 'SpecMem/gen',
         captureId,
-        presence: sceneParams.presence,
-        tone: sceneParams.tone,
+        presence: bodySceneIndex !== null && bodySceneIndex >= 0 ? presenceAt(sceneParams, bodySceneIndex) : sceneParams.presence,
+        tone: bodySceneIndex !== null && bodySceneIndex >= 0 ? toneAt(sceneParams, bodySceneIndex) : sceneParams.tone,
         distanceSec: sceneDistance,
         clock:
           timeDirection === 'future' || timeDirection === 'past' || bodySceneIndex !== null
@@ -1598,6 +1620,8 @@ async function startServer() {
       batchLogVersion:1,requestedCount:count,savedCount:0,publishedCount:0,
       executionSource:captureExecutionSource(req.body?.executionSource),
       inputIdentity:captureInputIdentity(req.body,isTest),
+      // Native operator captures started while a live CSV run owns playback carry that run (G-27 History ranges).
+      ...(req.body?.executionSource!==undefined&&nativeOperator?.scenarioRunTag()?{scenarioRun:nativeOperator.scenarioRunTag()}:{}),
       browserFollow:{testSceneId:historyContext.echo.testSceneId,testRunId:historyContext.echo.testRunId,scope:historyContext.scope.key,sourceRecordedAtMs:null,updateMode:captureDisplayTiming,...(!isTest&&source==='td-native'&&recordingMetadata({source:'live-camera',sourceScope:req.body?.sourceScope}).sourceScope?{cameraScope:recordingMetadata({source:'live-camera',sourceScope:req.body?.sourceScope}).sourceScope!}:{})},
       vlmBackend: backends.vlm,
       vlmModel: vlmModelUsed,
@@ -1607,6 +1631,11 @@ async function startServer() {
     evt.rulebookVersion = rbVersion;
     evt.presence = sceneParams.presence;
     evt.tone = sceneParams.tone;
+    // Per-scene overrides (order gen_a, gen_b, gen_c); recorded only when a scene differs from the global value.
+    const scenePresenceList = resolveScenePresence(sceneParams, count);
+    const sceneToneList = resolveSceneTone(sceneParams, count);
+    if (scenePresenceList.some((v) => v !== sceneParams.presence)) evt.scenePresence = scenePresenceList;
+    if (sceneToneList.some((v) => v !== sceneParams.tone)) evt.sceneTone = sceneToneList;
     let evtStage = 'setup';
     const mobileCaptureFiles: string[] = [];
     const setStage = (stage: string) => {
@@ -1620,6 +1649,7 @@ async function startServer() {
     };
     captureEvents.write(evt);
     console.log(`generate: capture ${captureId} controls ${describeSceneParams(sceneParams)}`);
+    sceneNotes.start(captureId);
     const signal = requestSignal(res, captureId, capture.signal, cm);
     const ensureActive = () => {
       if (!cm.isActive(captureId)) {
@@ -1653,6 +1683,8 @@ async function startServer() {
               sceneDistancesSec: sceneDistances,
               presence: sceneParams.presence,
               tone: sceneParams.tone,
+              scenePresence: sceneRecord(resolveScenePresence(sceneParams)),
+              sceneTone: sceneRecord(resolveSceneTone(sceneParams)),
               imageCount: count,
             },
           });
@@ -1743,8 +1775,13 @@ async function startServer() {
       const described = await describePeople(image, { signal });
       evt.detectDescribeMs = described.elapsedMs;
       const people = described.people;
-      if(resolvedPersonReferences&&!described.ok)throw Error('Original source observation is required before adding reference people');
-      const observedPersonReferences=resolvedPersonReferences?await personReferenceAssets!.observe(resolvedPersonReferences,signal):undefined;
+      // A reference person that cannot be observed must not stop the whole capture: generate without it and say so.
+      let observedPersonReferences:Awaited<ReturnType<NonNullable<typeof personReferenceAssets>['observe']>>|undefined;
+      if(resolvedPersonReferences&&!described.ok){console.warn('[person-ref] source observation unavailable; generating without reference people');operatorWarnings.push('person-ref','カメラ画像の人物を読み取れなかったため、参照人物なしで生成しました',captureId);sceneNotes.add(captureId,'all','カメラ画像の人物を読み取れず、参照人物なしで生成','warn');}
+      else if(resolvedPersonReferences){
+        try{observedPersonReferences=await personReferenceAssets!.observe(resolvedPersonReferences,signal);}
+        catch(error){if(signal?.aborted)throw error;console.warn('[person-ref] '+String((error as Error).message)+'; generating without reference people');operatorWarnings.push('person-ref','参照画像を読み取れなかったため、参照人物なしで生成しました ('+String((error as Error).message)+')',captureId);sceneNotes.add(captureId,'all','参照画像を読み取れず、参照人物なしで生成 ('+String((error as Error).message)+')','warn');}
+      }
       if (typeof described.obstructed === 'boolean') {
         evt.obstructed = described.obstructed;
         evt.obstructedBy = described.obstructedBy || undefined;
@@ -1766,6 +1803,20 @@ async function startServer() {
       console.log(`[guard] detector+describe person=${detect.person} people=${people.length} ${detect.elapsedMs}ms done_reason=${described.doneReason ?? '-'}${detect.error ? ' error=' + detect.error + ' raw=' + (described.rawHead ?? '').slice(0, 120) : ''}`);
       ensureActive();
 
+      // G-26: compact STATE LEDGER from history (live rows, or this test loop's replayed rows) -> planner note; past verdict.
+      const ledgerRows: PastHistoryRow[] = useHistory
+        ? historyItems
+        : historyContext.scope.kind === 'test'
+          ? testHistory.snapshot(historyContext.scope).observations.map((r) => ({ time: r.replayedAt, detectorPerson: r.detectorPerson, observation: r.observation, people: r.people as PastHistoryRow['people'] }))
+          : [];
+      const stateLedger = buildStateLedger({ history: ledgerRows, people });
+      const pastSpans = sceneDistances.filter((d) => d < 0);
+      const pastSpan = pastSpans.length ? Math.max(...pastSpans) : undefined;
+      const pastContinuity = pastSpan !== undefined ? judgePastContinuity({ ledger: stateLedger, people, spanSec: pastSpan }) : undefined;
+      const ledgerNote = stateLedgerNote({ ledger: stateLedger, continuity: pastContinuity, pastSpanSec: pastSpan });
+      console.log(`[past] ledger ${stateLedger.rows} rows, ${stateLedger.states.length} states; continuity=${pastContinuity ? `${pastContinuity.verdict} (${pastContinuity.reason})` : '-'}`);
+      const planContextNote = [contextNote, ledgerNote].filter(Boolean).join('\n');
+
       const vlmTrace: PlanTrace = {};
       const vlmStartedAt = Date.now();
       setStage('plan');
@@ -1774,7 +1825,7 @@ async function startServer() {
         target: normalizedTarget,
         scenarioCount: count,
         sceneTime: typeof sceneTime === 'string' ? sceneTime : new Date().toISOString(),
-        sceneParams: contextNote ? { ...sceneParams, contextNote } : sceneParams,
+        sceneParams: planContextNote ? { ...sceneParams, contextNote: planContextNote } : sceneParams,
         captureId,
         trace: vlmTrace,
         signal,
@@ -1786,6 +1837,24 @@ async function startServer() {
         sceneDistances,
         vlmBackend: backends.vlm,
       });
+      // Tone enforcement (2026-10-20): the planner ignores the Tone sentence, so a scene whose wording contradicts its
+      // tone band ("slightly" at TONE 1) is rewritten once; a failed rewrite keeps the original plan.
+      if (people.length > 0 && backends.vlm !== 'gemini') {
+        await Promise.all(scenarios.map(async (scenario, index) => {
+          const tone = toneAt(sceneParams, index);
+          const english = String(scenario?.prediction_prompt ?? ''), japanese = String(scenario?.scenario_description ?? '');
+          const mismatch = english ? toneMismatch(tone, english, japanese) : null;
+          if (!mismatch) return;
+          const scene = String.fromCharCode(65 + index);
+          let fixed = await rewriteForTone({ tone, english, japanese, seconds: sceneDistances[index] ?? null, signal });
+          if (!fixed) fixed = await rewriteForTone({ tone, english, japanese, seconds: sceneDistances[index] ?? null, signal });
+          if (!fixed) { fixed = forceToneWording(mismatch, english, japanese); console.warn(`[tone] ${captureId} ${scene}: rewrite failed twice; weak words replaced`); sceneNotes.add(captureId, scene, `Tone ${tone.toFixed(2)} に合わない計画（${mismatch==='too_weak'?'弱すぎ':'強すぎ'}）。書き直しに2回失敗し、言葉を置き換えた`, 'warn'); }
+          else sceneNotes.add(captureId, scene, `Tone ${tone.toFixed(2)} に合わない計画（${mismatch==='too_weak'?'弱すぎ':'強すぎ'}）を書き直した。元: ${japanese}`, 'info');
+          console.log(`[tone] ${captureId} ${scene}: ${mismatch} at tone ${tone.toFixed(2)} -> rewritten: ${fixed.prediction_prompt}`);
+          scenario.prediction_prompt = fixed.prediction_prompt;
+          scenario.scenario_description = fixed.scenario_description;
+        }));
+      }
       {
         const g = vlmTrace.guard;
         evt.planMs = g?.planMs ?? Date.now() - vlmStartedAt;
@@ -1940,7 +2009,7 @@ async function startServer() {
         referencePersonImage=undefined;referenceCrop=null;
         refImages=visibleHeads.map(()=>image);referenceCrops=visibleHeads;
       }
-      if (!referencePersonImage && !refImages.length && refFramesEnabled() && useHistory && backends.image !== 'gemini' && vlmTrace.guard?.unoccupied !== true && !unoccupied && sceneParams.presence > 0) {
+      if (!referencePersonImage && !refImages.length && refFramesEnabled() && useHistory && backends.image !== 'gemini' && vlmTrace.guard?.unoccupied !== true && !unoccupied && resolveScenePresence(sceneParams, count).some((p) => p > 0)) {
         try {
           const cur = classifyOrientation({ people, sceneDescription: observation, observation });
           const picked = selectRefFrames(historyAll, { captureId, orientation: cur }, { max: refFramesMax(), windowMin: refFramesWindowMin() });
@@ -2089,9 +2158,10 @@ async function startServer() {
           referenceCast:sceneCast?{sourcePeople:people,references:sceneCast.references,sourceIdentityImages:sceneCast.sourceIdentityImages}:undefined,
           editRegion,
           foregroundObject: scenario.foreground_object,
-          presence: sceneUnoccupied ? 0 : sceneParams.presence,
-          tone: sceneParams.tone,
+          presence: sceneUnoccupied ? 0 : presenceAt(sceneParams, index),
+          tone: toneAt(sceneParams, index),
           distanceSec: sceneDistances[index],
+          pastContinuity: pastContinuity?.verdict,
           // Each scene's own signed offset decides the direction and the clock digits.
           clock: clockForSignedDistance(sceneDistances[index], resolvedSceneTime, scenario.clock_visible === true),
           signal,
@@ -2107,6 +2177,7 @@ async function startServer() {
               inspect:()=>sceneCast?inspectAndCaptionWithReferences(image,candidate,people,sceneCast.references,sceneDistances[index],signal,sceneCast.sourceIdentityImages,belongings):inspectAndCaption(sceneDrawFromBehind && sceneReference ? sceneReference : image, candidate, expectedPeople, sceneDistances[index], people, signal, image, belongings)});
           },
           rejected: (candidate, verdict, attempt) => {
+            sceneNotes.add(captureId, sceneKey, `${attempt}回目の画像を検査で不合格: ${verdict.ok===null?'判定不能 ':''}${String(verdict.reason??'').slice(0,240)}`, verdict.ok===null?'warn':'warn');
             const rejectedDir = path.join(archiveRootDir(), 'rejected', captureId.replace(/[^a-zA-Z0-9_-]/g, '_'));
             fs.mkdirSync(rejectedDir, { recursive: true });
             const rejectedFile = `${sceneKey}-attempt${attempt}-${Date.now()}.png`;
@@ -2134,6 +2205,7 @@ async function startServer() {
           const reason = `rejected:${generated.defect}`;
           console.warn(`[integrity] scene ${sceneKey} skipped after ${generated.attempts} rejection${generated.attempts===1?'':'s'}: ${generated.defect} (${captureId})`);
           skippedScenes.push({ sceneKey: sceneKey as 'gen_a' | 'gen_b' | 'gen_c', reason });
+          if(generated.defect==='inspection_unavailable')operatorWarnings.push('inspection',`${sceneKey.slice(-1).toUpperCase()}: 人物チェックが判定できなかったため、この場面は出さず前の画像を残しました${observedPersonReferences?.[sceneKey as ScenarioSceneKey]?.length?'（参照人物あり）':''}`,captureId);
           generatedCount -= 1;
           evt.skippedScenes = skippedScenes;
           captureEvents.patch(captureId, { skippedScenes });
@@ -2256,6 +2328,7 @@ async function startServer() {
           captureQa.notePrompt(captureId, sceneKey, scenario.prediction_prompt);
         }
         console.log(`generate: saved ${sceneKey} -> ${savedImageAsset.absolutePath}`);
+        sceneNotes.add(captureId, sceneKey, `公開した${generated.attempts>1?'（'+generated.attempts+'回目で合格）':''}`, 'info');
         results.push({ sceneKey, label, url: savedImageAsset.url, predictionText: scenario.scenario_description });
         if(evt.browserFollow){
           evt.browserBatch??=[];
@@ -2272,6 +2345,14 @@ async function startServer() {
       cm.complete(captureId);
       await Promise.race([summaryPromise, new Promise((r) => setTimeout(r, 500))]);
       if (!mobileLane) archive?.setHistorySummary(useHistory?composeSummary(venueSummary):testHistory.snapshot(historyContext.scope).summary);
+      // MAIN error box: say which scenes were not shown and why, or the display just looks frozen (2026-10-20).
+      const skipWhy=(reason:string)=>reason==='no_recent_activity'?'無人で最近の動きもない':reason==='chance'?'無人時の確率ルールで変化なし':reason==='no_movable_object'?'無人で動かせる物がない':reason==='rejected:inspection_unavailable'?'人物チェックが判定できなかった':reason.startsWith('rejected:')?'検査で不合格（'+reason.slice(9)+'）':reason;
+      for(const item of skippedScenes)sceneNotes.add(captureId,item.sceneKey,'出さなかった（前の画像のまま）: '+skipWhy(item.reason),'warn');
+      sceneNotes.end(captureId,'completed');
+      if(skippedScenes.length&&!isTest){
+        const why=(reason:string)=>reason==='no_recent_activity'?'無人で最近の動きもないため':reason==='chance'?'無人時の確率ルールで変化なし':reason==='no_movable_object'?'無人で動かせる物がないため':reason==='rejected:inspection_unavailable'?'人物チェックが判定できなかったため':reason.startsWith('rejected:')?'検査で不合格（'+reason.slice(9)+'）':reason;
+        operatorWarnings.push('skip',skippedScenes.map(item=>item.sceneKey.slice(-1).toUpperCase()+' '+(sceneDistances[item.sceneKey.charCodeAt(4)-97]>0?'+':'')+(sceneDistances[item.sceneKey.charCodeAt(4)-97]??'?')+'秒: '+why(item.reason)).join(' / ')+' → 前の画像のまま',captureId);
+      }
       archive?.finish('completed');
       captureEvents.finish({ ...evt, result: 'completed', errorStage: null, errorMessage: null });
       // QA of the three images runs later, between captures (never while something generates).
@@ -2347,6 +2428,7 @@ async function startServer() {
   app.post("/api/generate", (req, res) => handleGenerate(req, res, "venue"));
   if(nativeOperatorMode){
     nativeOperator=await createNativeOperator({
+      scenarioRuns,
       directory:process.env.OPERATOR_CONTROL_DIRECTORY||path.join(path.dirname(path.resolve(archiveRootDir())),'operator-control'),
       python:process.env.PEOPLE_DETECTOR_PYTHON||path.join(process.env.USERPROFILE||'','Documents/ComfyUI/.venv/Scripts/python.exe'),
       preflightPersonReferences:async body=>{await preflightScenePersonReferences(body);},

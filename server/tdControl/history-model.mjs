@@ -37,6 +37,15 @@ export function elapsedLabel(ms){
   return (ms<0?'−':'')+(h?String(h)+':':'')+String(m).padStart(2,'0')+':'+String(s).padStart(2,'0');
 }
 export function secondsLabel(ms){return finite(ms)&&ms>=0?(ms/1000).toFixed(1)+' sec':'Unknown';}
+// Server-made 320px preview (captures/thumbs/<name>.jpg); anything else is ignored.
+export function thumbFor(value){
+  if(typeof value!=='string'||!/^\/captures\/thumbs\/[A-Za-z0-9][A-Za-z0-9_.-]{0,239}\.jpg$/.test(value)||value.includes('..'))return null;
+  return value;
+}
+/** History pages loaded so far and the result window cap (rows kept, 200 per page). */
+export function pageCounter(pages,rows,windowRows){
+  return 'Page '+pages+' · '+rows+' records loaded'+(Number.isFinite(windowRows)?' · window last '+windowRows:'');
+}
 export function normalizeEvent(row){
   if(!row||typeof row.captureId!=='string'||!row.captureId||typeof row.startedAt!=='string')return null;
   const start=Date.parse(row.startedAt);if(!Number.isFinite(start))return null;
@@ -58,21 +67,23 @@ export function normalizeEvent(row){
     if(matching.length&&(!content||content.captureId!==row.captureId||content.imageUrl!==url||
        content.provenance!==(key==='now'?'actual':'generated')||scope&&content.scope!==scope))continue;
     if(key!=='now'&&!url)continue;
+    const thumbUrl=url?thumbFor(row.thumbUrls?.[key]):null;
     const offset=key==='now'?0:finite(content?.distanceSecSigned)?content.distanceSecSigned:null;
     const time=offset===null?null:start+offset*1000;
-    points.push({key,url,offset,time:Number.isSafeInteger(time)?time:null,
+    points.push({key,url,thumbUrl,offset,time:Number.isSafeInteger(time)?time:null,
       caption:typeof content?.caption==='string'?content.caption:'',
       recordedAtMs:finite(content?.sourceRecordedAtMs)?content.sourceRecordedAtMs:null,
       generatedAtMs:finite(content?.generatedAtMs)?content.generatedAtMs:null,
       targetAtMs:finite(content?.targetAtMs)?content.targetAtMs:null});
   }
-  if(!points.some(point=>point.key==='now'))points.unshift({key:'now',url:null,offset:0,time:start,caption:'',recordedAtMs:null,generatedAtMs:null,targetAtMs:null});
+  if(!points.some(point=>point.key==='now'))points.unshift({key:'now',url:null,thumbUrl:null,offset:0,time:start,caption:'',recordedAtMs:null,generatedAtMs:null,targetAtMs:null});
   return {id:row.captureId,start,end:Number.isFinite(end)&&end>=start?end:null,status,session,label,
     totalMs:finite(row.totalMs)&&row.totalMs>=0?row.totalMs:null,
     requested:count(row.requestedCount),saved:count(row.savedCount),published:count(row.publishedCount),
     input:row.inputIdentity?.id||scene||'Unknown input',mode:row.executionSource||'Unknown',
     error:typeof row.errorMessage==='string'?row.errorMessage:'',errorStage:row.errorStage||null,
-    stages:[['Recognition',row.detectDescribeMs],['Plan',row.planMs],['A',row.sceneAMs],['B',row.sceneBMs],['C',row.sceneCMs]],points};
+    stages:[['Recognition',row.detectDescribeMs],['Plan',row.planMs],['A',row.sceneAMs],['B',row.sceneBMs],['C',row.sceneCMs]],points,
+    scenarioRun:row.scenarioRun&&typeof row.scenarioRun.runId==='string'&&/^[A-Za-z0-9_-]{1,64}$/.test(row.scenarioRun.runId)?{runId:row.scenarioRun.runId,scenarioId:String(row.scenarioRun.scenarioId??''),csvSha:String(row.scenarioRun.csvSha??'')}:null};
 }
 export function buildSections(events,origin,windowSec=120){
   const span=windowSec*1000;if(!finite(origin)||!finite(span)||span<=0)return [];
@@ -170,4 +181,59 @@ export function sourceConnectionPath(from,to,key,avoid=null){
   }
   const bendY=from.y;
   return `M ${from.x} ${from.y} C ${to.x} ${bendY} ${to.x} ${bendY} ${to.x} ${to.y}`;
+}
+// G-27 scenario CSV runs: which CSV drove which stretch of the timeline.
+const RUN_ID=/^[A-Za-z0-9_-]{1,64}$/;
+export function clockLabel(ms){
+  if(!finite(ms))return '--:--:--';
+  return new Intl.DateTimeFormat('en-GB',{timeZone:'Asia/Tokyo',hour12:false,hour:'2-digit',minute:'2-digit',second:'2-digit'}).format(new Date(ms));
+}
+/** Valid runs, oldest first. A run whose CSV sha differs from the first run of the same scenario id is marked revised (修正版). */
+export function normalizeScenarioRuns(rows,nowMs=Date.now()){
+  const runs=[];
+  for(const row of Array.isArray(rows)?rows:[]){
+    if(!row||typeof row.runId!=='string'||!RUN_ID.test(row.runId)||typeof row.scenarioId!=='string')continue;
+    const start=Date.parse(row.startedAt);if(!Number.isFinite(start))continue;
+    const ended=typeof row.endedAt==='string'?Date.parse(row.endedAt):NaN,running=!Number.isFinite(ended);
+    runs.push({runId:row.runId,scenarioId:row.scenarioId.slice(0,80)||'scenario',file:typeof row.file==='string'?row.file:'',sha:typeof row.sha256==='string'?row.sha256:'',
+      start,end:running?Math.max(start,nowMs):Math.max(start,ended),running,endReason:typeof row.endReason==='string'?row.endReason:null,cuesApplied:Number.isInteger(row.cuesApplied)?row.cuesApplied:null});
+  }
+  runs.sort((a,b)=>a.start-b.start||a.runId.localeCompare(b.runId));
+  const firstSha=new Map();
+  for(const run of runs){if(!firstSha.has(run.scenarioId))firstSha.set(run.scenarioId,run.sha);run.revised=!!run.sha&&firstSha.get(run.scenarioId)!==run.sha;}
+  for(const run of runs)run.label=run.scenarioId+' '+clockLabel(run.start)+'–'+(run.running?'running':clockLabel(run.end))+(run.revised?' (修正版)':'');
+  return runs;
+}
+/** Runs shown for one history session: tagged by one of its captures, or overlapping its time span. */
+export function runsForSession(runs,events){
+  if(!events.length)return [];
+  const tagged=new Set(events.map(event=>event.scenarioRun?.runId).filter(Boolean));
+  let first=Infinity,last=-Infinity;for(const event of events){first=Math.min(first,event.start);last=Math.max(last,event.end??event.start);}
+  return runs.filter(run=>tagged.has(run.runId)||run.start<=last&&run.end>=first);
+}
+/** Greedy lanes so overlapping runs never share a row. */
+function lanesFor(items,startKey,endKey){
+  const ends=[];for(const item of items){let lane=ends.findIndex(end=>item[startKey]>=end);if(lane<0)lane=ends.length;ends[lane]=item[endKey];item.lane=lane;}
+  return ends.length;
+}
+/** Horizontal views: left/right in % of the plot width (same scale as plotPosition), clipped to the section. */
+export function runBandLayout(runs,origin,section){
+  const low=origin+section.min,high=origin+section.max,bands=[];
+  for(const run of runs){
+    if(run.end<low||run.start>high)continue;
+    const from=Math.max(run.start,low),to=Math.min(run.end,high);
+    bands.push({run,left:plotPosition(from,origin,section),right:plotPosition(to,origin,section),clippedStart:run.start<low,clippedEnd:run.end>high});
+  }
+  return {bands,lanes:lanesFor(bands,'left','right')};
+}
+/** Vertical view: top/height in px on the same y scale as verticalConnectionLayout. */
+export function verticalRunBandLayout(runs,origin,section,geometry){
+  const low=origin+section.min,high=origin+section.max,bands=[];
+  const y=time=>geometry.top+(time-origin-section.min)*geometry.scale;
+  for(const run of runs){
+    if(run.end<low||run.start>high)continue;
+    const top=y(Math.max(run.start,low)),bottom=y(Math.min(run.end,high));
+    bands.push({run,top,height:Math.max(4,bottom-top),bottom:top+Math.max(4,bottom-top),clippedStart:run.start<low,clippedEnd:run.end>high});
+  }
+  return {bands,lanes:lanesFor(bands,'top','bottom')};
 }

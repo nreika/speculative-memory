@@ -1,0 +1,26 @@
+seconds,action,target,value
+0,scenario,,SCN-SIMPLE-001
+0,instructions,,"Simple check: A=+60s future, B=-60s past, NOW/A/B on Output 1-3, timer 60s, swap 1 and 3 at 2 min with crossfade, end at 4 min"
+0,distance,A,60
+0,distance,B,-60
+0,distance,C,-30
+0,interval_sec,,60
+0,mode,,timer
+0,resume,,
+0,output_fade,screen-1,original
+0,output_fade,screen-2,original
+0,output_fade,screen-3,original
+0,output_source,screen-1,a
+0,output_source,screen-2,b
+0,output_source,screen-3,now
+60,one_shot,A,画面に人が映っていたら、その人が両手を上げる。
+60,one_shot,B,画面に人が映っていたら、その人がかばんを持って立っている。
+119,output_fade,screen-1,crossfade
+119,output_fade,screen-3,crossfade
+119,output_fade_sec,screen-1,1.0
+119,output_fade_sec,screen-3,1.0
+120,output_source,screen-1,now
+120,output_source,screen-3,a
+123,output_fade,screen-1,original
+123,output_fade,screen-3,original
+240,end,,

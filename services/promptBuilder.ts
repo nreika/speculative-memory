@@ -6,6 +6,8 @@ import {
   formatDistanceJa,
   presenceAllowsNewPerson,
   resolveSceneDistances,
+  resolveScenePresence,
+  resolveSceneTone,
   formatSignedDistanceJa,
   type SceneParams,
 } from "./sceneParams";
@@ -256,17 +258,80 @@ export const buildVariationGuidance = (signedDistancesSec: number[]): string => 
   // Scenarios before the frame: an unmistakable rewind.
   const past = signedDistancesSec.map((_, i) => i).filter((i) => signedDistancesSec[i] < 0);
   if (past.length > 0) lines.push(replacePlaceholders(sp.rewindGuidance, { LIST: scenarioListEn(past), EACH: past.length > 1 ? "each " : "" }));
+  if (past.length > 0) lines.push(buildPastSceneContract(past.map((i) => signedDistancesSec[i]), past));
   return lines.join(" ");
 };
+
+/**
+ * G-26 (2026-10-20, user: 「過去のPROMPTが、全然過去ではない」): the contract for every scenario BEFORE the frame.
+ * The frame is the END state; the past scenario is the earlier state that led into it, written as that state
+ * (never a change that ends in "now"), and consistent with HISTORY: an activity already seen for longer than the
+ * span was already going on (a slightly earlier moment of it), only a NEW state is reversed.
+ */
+export const PAST_SCENE_USER_WORDS =
+  "「たとえば、何かを食べている場合、それが未開封になってるとか、紙袋にはいってるとか、ならわかる」 / " +
+  "「ただ、常に未開封だと、変。すでに10分以上食事しているときに、その３０秒前が常に未開封なシーン、だと不自然。」 / " +
+  "「整合性のある、あり得た過去・未来を生成するのは、だいぶハイコンテクスト。完全にはできないとおもうけど、ベストエフォートで実装したい」";
+
+export function buildPastSceneContract(pastDistancesSec: number[], pastIndexes?: number[]): string {
+  const list = scenarioListEn(pastIndexes ?? pastDistancesSec.map((_, i) => i));
+  const span = sharedSpanPhrase(pastDistancesSec);
+  return (
+    `PAST-SCENE CONTRACT for ${list}: this frame is the END state. ${list} must show the room as it plausibly WAS ${span} earlier, ` +
+    `the moment that led into this frame, causally consistent with it (same people, same belongings, same places; nothing that could not become this frame within ${span}). ` +
+    `First decide from HISTORY and the STATE LEDGER (when given) whether the current activity or state started within the last ${span}. ` +
+    `If it was already going on before that (the same activity appears in HISTORY for longer than ${span}, e.g. the person has been eating for 10 minutes), ` +
+    `the SAME activity was already going on: show a slightly earlier moment of it (one bite earlier, the cup a little lower, the hands in a slightly different position), never the unopened, closed, packed-away or absent state. ` +
+    `If HISTORY is missing or unclear, use the SMALLEST coherent difference (a slightly earlier moment of the same state), never a bold reversal. ` +
+    `Only if HISTORY shows the state is NEW (it began within about twice ${span}) reverse the most recent action or state change: ` +
+    `if a person is eating something now, earlier the item was still unopened or still inside its paper bag; ` +
+    `if a cup is at the mouth now, earlier it was still on the desk; if a bag is open now, earlier it was still closed. ` +
+    `Never invent a new or unrelated action. ` +
+    `Write its prediction_prompt as the earlier state itself (e.g. "The cup is still on the desk next to her right hand; both her hands rest on the desk."), ` +
+    `never as a change that ends in the present: no "now", "currently", "at present", "originally ... now", "has lowered", "then", "will". ` +
+    `Its scenario_description is that earlier state in the past tense (e.g. "${formatDistanceEn(Math.abs(pastDistancesSec[0] ?? 30))} before, the cup was still on the desk."). ` +
+    `(User guidance G-26: ${PAST_SCENE_USER_WORDS})`
+  );
+}
 
 /** Japanese time phrase each scenario_description must begin with. */
 export const buildDescriptionPhrases = (signedDistancesSec: number[]): string =>
   signedDistancesSec.map((d, i) => `Scenario ${i + 1}: "${formatSignedDistanceJa(d)}、..."`).join("; ");
 
+/**
+ * People sentence(s) for all scenarios. Every scenario on the same presence band -> the single sentence (as before);
+ * otherwise one sentence per band, naming its scenarios ("For Scenario 2: People: ...").
+ */
+export const buildPresenceSection = (presences: number[]): string => {
+  const groups = groupBy(presences, (p) => buildPresenceSentence(p));
+  if (groups.length <= 1) return buildPresenceSentence(presences[0] ?? DEFAULT_SCENE_PARAMS.presence);
+  return groups.map((idx) => `For ${scenarioListEn(idx)}: ${buildPresenceSentence(presences[idx[0]])}`).join("\n");
+};
+
+/**
+ * Tone sentence(s) for all scenarios. One band for all -> the single sentence (as before); otherwise one sentence per
+ * band, and its "applies to ALL scenarios" wording is narrowed to the scenarios it names.
+ */
+export const buildToneSection = (tones: number[], signedDistancesSec: number[]): string => {
+  const groups = groupBy(tones, (t) => buildToneSentence(t, signedDistancesSec));
+  if (groups.length <= 1) return buildToneSentence(tones[0] ?? DEFAULT_SCENE_PARAMS.tone, signedDistancesSec);
+  return groups
+    .map((idx) => {
+      const list = scenarioListEn(idx);
+      const spans = idx.map((i) => signedDistancesSec[i] ?? signedDistancesSec[signedDistancesSec.length - 1]);
+      const text = buildToneSentence(tones[idx[0]], spans).replace(
+        /applies to ALL scenarios, including the one before this frame/,
+        `applies ONLY to ${list}; the other scenarios follow their own Tone sentence`
+      );
+      return `For ${list}: ${text}`;
+    })
+    .join("\n");
+};
+
 const buildSceneControlSentences = (params: SceneParams, signedDistancesSec: number[]): string[] => [
   buildDistanceScaleSection(signedDistancesSec),
-  buildPresenceSentence(params.presence),
-  buildToneSentence(params.tone, signedDistancesSec),
+  buildPresenceSection(resolveScenePresence(params, signedDistancesSec.length)),
+  buildToneSection(resolveSceneTone(params, signedDistancesSec.length), signedDistancesSec),
 ];
 
 const buildDefaultScenarioContext = (): string =>

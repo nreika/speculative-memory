@@ -176,7 +176,11 @@ export function purgeExpiredMobile(root: string, capturesDir: string | null, hou
           const side = JSON.parse(fs.readFileSync(path.join(e.dir, `${e.generationId}_mobile.json`), 'utf8'));
           for (const f of Array.isArray(side?.captureFiles) ? side.captureFiles : []) {
             const name = path.basename(String(f));
-            if (/^(record|Gen_[abc])_[\w.-]+$/i.test(name)) fs.rmSync(path.join(capturesDir, name), { force: true });
+            if (/^(record|Gen_[abc])_[\w.-]+$/i.test(name)) {
+              fs.rmSync(path.join(capturesDir, name), { force: true });
+              // History thumbnail of the same capture (captures/thumbs/<name>.jpg) expires with it.
+              fs.rmSync(path.join(capturesDir, 'thumbs', path.parse(name).name + '.jpg'), { force: true });
+            }
           }
         } catch {
           // no sidecar

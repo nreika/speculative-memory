@@ -135,3 +135,16 @@ export function coneGeometry(offsets) {
   const ticks=[-range,-60,-5,0,5,60,range].map(d=>({x:position(d),label:d===0?'SOURCE':label(d)}));
   return {points,ticks,range};
 }
+
+// Skip / rejection reasons recorded for the capture that produced the displayed NOW.
+export function skipReasons(rows,captureId){
+  const out={};if(!Array.isArray(rows)||typeof captureId!=='string'||!captureId)return out;
+  // NOW changes when a capture starts; its skips are known only when it ends, so fall back to the latest ended row.
+  const own=rows.find(r=>r?.captureId===captureId);
+  const row=own?.endedAt?own:rows.find(r=>r?.endedAt&&Array.isArray(r.skippedScenes));
+  for(const item of row?.skippedScenes||[]){
+    const match=/^gen_([abc])$/.exec(item?.sceneKey||'');
+    if(match&&typeof item.reason==='string'&&item.reason.length<=80)out[match[1]]=item.reason;
+  }
+  return out;
+}

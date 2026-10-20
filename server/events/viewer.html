@@ -240,6 +240,8 @@
     if (e.guard && e.guard.duplicateRetried) add('重複再試行', '');
     if (typeof e.presence === 'number') add('presence ' + e.presence.toFixed(2) + (typeof e.effectivePresence === 'number' && e.effectivePresence !== e.presence ? '→' + e.effectivePresence.toFixed(2) : ''), '', '写っている人物の動きの量（→は無人のため実際に使った値）');
     if (typeof e.tone === 'number') add('tone ' + e.tone.toFixed(2), '', '変化の振れ幅（表情・動き・光の変化量）');
+    if (Array.isArray(e.scenePresence)) add('presence A/B/C ' + e.scenePresence.map((v) => Number(v).toFixed(2)).join('/'), '', 'シーン別の presence（全体値と異なるときだけ記録）');
+    if (Array.isArray(e.sceneTone)) add('tone A/B/C ' + e.sceneTone.map((v) => Number(v).toFixed(2)).join('/'), '', 'シーン別の tone（全体値と異なるときだけ記録）');
     if (e.rulebookVersion) add('ルール v' + e.rulebookVersion, '', 'この撮影のプロンプトを作ったルールブックの版');
     if (e.qa) add(e.qa.defective ? 'QA 不良 ' + e.qa.defective + '/' + e.qa.judged : 'QA OK', e.qa.defective ? 'ng' : 'ok', e.qa.defects && Object.keys(e.qa.defects).length ? Object.keys(e.qa.defects).map(function (k) { return k + ' ' + e.qa.defects[k]; }).join(', ') : '不良なし');
     if (e.vlmBackend) add('認識:' + e.vlmBackend, e.vlmBackend === 'gemini' ? 'gem' : '', e.vlmModel || '');

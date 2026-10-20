@@ -145,6 +145,13 @@ export function emptyRoomObjectChange(
   const turn = (o.group === "seat") === (Math.floor(index / Math.max(2, objs.length)) % 2 === 0);
   const turnText = ["a few degrees", "about fifteen degrees", "about thirty degrees"][tier];
   const shiftText = ["a few centimetres", "about ten centimetres", "about twenty centimetres"][tier];
+  // G-26: a past scene (negative distance) is the REVERSE: the object was still at its earlier spot / angle and was
+  // moved into the position shown in the photo afterwards (the photo is the END state).
+  if (distanceSec < 0) {
+    return turn
+      ? `${subject} is still turned ${turnText} further to the ${dir} than in the photo${tier === 2 ? ` and stands ${shiftText} further to the ${dir}` : ""}: its earlier position, before it was turned to the position shown in the photo.`
+      : `${subject} still sits ${shiftText} further to the ${dir} than in the photo${tier > 0 ? " and is turned slightly" : ""}: its earlier spot, before it was moved to the spot shown in the photo.`;
+  }
   return turn
     ? `${subject} is turned ${turnText} to the ${dir}${tier === 2 ? ` and stands ${shiftText} further to the ${dir}` : ""}.`
     : `${subject} sits ${shiftText} further to the ${dir}${tier > 0 ? " and is turned slightly" : ""}.`;

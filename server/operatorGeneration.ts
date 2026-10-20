@@ -7,7 +7,7 @@ export type OperatorGenerationSource='manual'|'scenario'|'timer'|'chain';
 type Scene='a'|'b'|'c';
 export interface OperatorGenerateCommand {requestId:string;source:OperatorGenerationSource;runId?:string;cueId?:string}
 export interface OperatorGenerationSettings {
- scenes:Record<Scene,{distanceSec:number;continuous:string;oneShot:string;continuousPersonReferenceIds?:string[];oneShotPersonReferenceIds?:string[]}>;
+ scenes:Record<Scene,{distanceSec:number;continuous:string;oneShot:string;continuousPersonReferenceIds?:string[];oneShotPersonReferenceIds?:string[];presence?:number;tone?:number}>;
  presence:number;tone:number;emptyRoomPersonChance?:number;vlmBackend:'local'|'gemini';imageBackend:'local'|'gemini';
  imageCount?:number;[key:string]:unknown;
 }
@@ -42,6 +42,7 @@ export class OperatorGenerationError extends Error {
  constructor(readonly statusCode:number,readonly code:string,message:string){super(message);this.name='OperatorGenerationError';}
 }
 const scenes=['a','b','c'] as const;
+const optionalUnit=(v:unknown)=>v===undefined||typeof v==='number'&&Number.isFinite(v)&&v>=0&&v<=1;
 const plain=(v:unknown):v is Record<string,any>=>!!v&&typeof v==='object'&&!Array.isArray(v);
 const identifier=(v:unknown,max=128):v is string=>typeof v==='string'&&v.length>0&&v.length<=max&&/^[A-Za-z0-9_-]+$/.test(v);
 const uuid=(v:unknown)=>typeof v==='string'&&/^(?:[a-f0-9]{32}|[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12})$/i.test(v);
@@ -58,7 +59,7 @@ function command(raw:unknown):OperatorGenerateCommand {
 }
 function validateSettings(value:OperatorGenerationSettings){
  if(!plain(value)||!plain(value.scenes)||!Number.isFinite(value.presence)||value.presence<0||value.presence>1||!Number.isFinite(value.tone)||value.tone<0||value.tone>1||!['local','gemini'].includes(value.vlmBackend)||!['local','gemini'].includes(value.imageBackend))return fail(400,'INVALID_SETTINGS','Invalid generation settings');
- for(const key of scenes){const s=value.scenes[key];if(!plain(s)||!Number.isFinite(s.distanceSec)||typeof s.continuous!=='string'||typeof s.oneShot!=='string'||s.continuous.length>4000||s.oneShot.length>4000)return fail(400,'INVALID_SETTINGS','Invalid scene settings');try{mergedPersonReferenceIds(s.continuousPersonReferenceIds,s.oneShotPersonReferenceIds);}catch(error){return fail(400,'INVALID_PERSON_REFERENCES',(error as Error).message);}}
+ for(const key of scenes){const s=value.scenes[key];if(!plain(s)||!Number.isFinite(s.distanceSec)||typeof s.continuous!=='string'||typeof s.oneShot!=='string'||s.continuous.length>4000||s.oneShot.length>4000||!optionalUnit(s.presence)||!optionalUnit(s.tone))return fail(400,'INVALID_SETTINGS','Invalid scene settings');try{mergedPersonReferenceIds(s.continuousPersonReferenceIds,s.oneShotPersonReferenceIds);}catch(error){return fail(400,'INVALID_PERSON_REFERENCES',(error as Error).message);}}
 }
 export function operatorScenePersonReferences(settings:OperatorGenerationSettings){
  const result:Partial<Record<'gen_a'|'gen_b'|'gen_c',Array<{contentId:string;role:'add-person'}>>>={};
@@ -108,7 +109,10 @@ export function buildOperatorGenerationBody(frame:OperatorGenerationFrame,settin
  // Explicit whitelist: neither settings nor arbitrary source fields may override acquisition identity.
  return frozenCopy({image:frame.image,captureId:frame.suggestedCaptureId,imageCount:3,sceneTime,
   ...acquisition,notify:false,notifyToSender:false,
-  sceneDistancesSec:scenes.map(k=>settings.scenes[k].distanceSec),presence:settings.presence,tone:settings.tone,...(typeof settings.emptyRoomPersonChance==='number'?{emptyRoomPersonChance:settings.emptyRoomPersonChance}:{}),
+  sceneDistancesSec:scenes.map(k=>settings.scenes[k].distanceSec),presence:settings.presence,tone:settings.tone,
+  // Per-scene effective presence / tone (a scene without an override sends the global value); server.ts falls back to the global presence/tone for a missing key.
+  scenePresence:Object.fromEntries(scenes.map(k=>['gen_'+k,settings.scenes[k].presence??settings.presence])),sceneTone:Object.fromEntries(scenes.map(k=>['gen_'+k,settings.scenes[k].tone??settings.tone])),
+  ...(typeof settings.emptyRoomPersonChance==='number'?{emptyRoomPersonChance:settings.emptyRoomPersonChance}:{}),
   ...(settings.displayTiming==='each'||settings.displayTiming==='all'?{displayTiming:settings.displayTiming}:{}),
   vlmBackend:settings.vlmBackend,imageBackend:settings.imageBackend,sceneExtras:extras,
   ...(Object.keys(scenePersonReferences).length?{scenePersonReferences}:{}),

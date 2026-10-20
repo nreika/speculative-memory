@@ -62,3 +62,13 @@ test('emptyRoomPersonChance: defaults to 0.3 for old stored state, applies 0..1 
  const reopened=createOperatorState({file:f.file,initial:initial()});assert.equal((await reopened.readSettings()).emptyRoomPersonChance,.3);
  }finally{await fs.rm(f.dir,{recursive:true,force:true});}
 });
+test('per-scene presence/tone: optional 0..1 overrides via settings.apply, null removes, out of range rejected',async()=>{
+ const f=await fixture();try{const state=createOperatorState({file:f.file,initial:initial()});let s=await state.snapshot();assert.equal(s.settings.scenes.b.presence,undefined);
+ for(const [i,bad] of [1.5,-0.1,'0.5',NaN].entries())await assert.rejects(state.action({action:'settings.apply',data:{scenes:{b:{presence:bad}}},requestId:'bad-scene-'+i,baseRevision:s.settingsRevision}),(e:any)=>e.status===400);
+ const before=s.settingsRevision;const ok=await state.action({action:'settings.apply',data:{scenes:{b:{presence:.8},c:{tone:.1}}},requestId:'scene-pt',baseRevision:s.settingsRevision});
+ assert.equal(ok.state.settings.scenes.b.presence,.8);assert.equal(ok.state.settings.scenes.c.tone,.1);assert.equal(ok.state.settings.scenes.a.presence,undefined);assert.notEqual(ok.state.settingsRevision,before);
+ const cleared=await state.action({action:'settings.apply',data:{scenes:{b:{presence:null}}},requestId:'scene-clear',baseRevision:ok.state.settingsRevision});
+ assert.equal('presence' in cleared.state.settings.scenes.b,false);assert.equal(cleared.state.settings.scenes.c.tone,.1);
+ const reopened=createOperatorState({file:f.file,initial:initial()});assert.equal((await reopened.readSettings()).scenes.c.tone,.1);
+ }finally{await fs.rm(f.dir,{recursive:true,force:true});}
+});

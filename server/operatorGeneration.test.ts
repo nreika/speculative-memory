@@ -120,3 +120,9 @@ test('asset-only cannot silently discard pending add-person references',async()=
  const value=settings();value.scenes.a.continuous='';value.scenes.a.oneShot='';value.scenes.a.oneShotPersonReferenceIds=[refA];
  const s=setup({readSettings:()=>value,readScenario:()=>({prompts:{},scenarioControl:imageScenario()}),preflightPersonReferences:()=>{}});await assert.rejects(s.api.generate(cmd),{code:'INVALID_SCENARIO_CONTROL'});assert.equal(s.fetched,0);assert.equal(s.consumed,0);
 });
+test('per-scene presence/tone: the body carries scenePresence/sceneTone maps (global value where a scene has no override)',()=>{
+ const s=settings();s.scenes.b.presence=.9;s.scenes.c.tone=.1;
+ const body:any=buildOperatorGenerationBody(frame(),s,undefined,'2026-10-18T00:00:00Z');
+ assert.equal(body.presence,.7);assert.equal(body.tone,.4);
+ assert.deepEqual(body.scenePresence,{gen_a:.7,gen_b:.9,gen_c:.7});assert.deepEqual(body.sceneTone,{gen_a:.4,gen_b:.4,gen_c:.1});
+});

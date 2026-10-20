@@ -121,6 +121,8 @@ def settings_patch(p):
     (field, item), = row.items()
     if field == 'distanceSec':
         item = number(item, 'distanceSec', -3600, 3600)
+    elif field in ('presence', 'tone'):
+        item = number(item, field, 0, 1)
     elif field in ('continuousPersonReferenceIds', 'oneShotPersonReferenceIds'):
         item = reference_ids(item)
     else:

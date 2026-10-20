@@ -34,3 +34,19 @@ button,input,select,textarea{font:inherit}a{color:inherit;text-decoration:none}h
 .mapping-link{display:block;text-align:center;margin:3px 6px;padding:3px;border:1px solid #6b6b6b;color:#c1e4ee;font-size:10px}
 .person-references{display:flex;gap:4px;align-items:center;flex:none;margin-top:3px;min-height:21px}.person-references>button{font-size:9px;padding:2px 4px}.person-reference-list{display:flex;gap:3px;overflow-x:auto;min-width:0}.person-reference{display:inline-flex;align-items:center;gap:2px;flex:none;font-size:9px;max-width:110px}.person-reference img{width:28px;height:28px;object-fit:cover}.person-reference button{font-size:10px;padding:1px 4px}.scene-content>label:has(.person-references){min-height:90px}
 .page-links{margin-left:auto;display:flex;gap:4px;flex-shrink:0}.page-links a{font-size:10px;padding:4px 7px;border:1px solid #6e8292;border-radius:3px;color:#dfe8ee;text-decoration:none;background:#193044}.page-links a:hover{background:#24506e}.page-links+.session{margin-left:8px}
+/* Text blocks must stay selectable/copyable even though the page re-renders while polling. */
+.scene-caption,.scenario-prompt,#source-caption,#history,#scenario-instructions,#scenario-message,#scenario-format-box,#diagnostics,#notice,.subtle{user-select:text;-webkit-user-select:text;cursor:text}
+.copy-btn{align-self:flex-start;margin:2px 5px;padding:1px 6px;font-size:9px;line-height:1.4;border-radius:3px;cursor:pointer;width:auto;flex:none}
+.per-scene-toggle{display:flex}.per-scene-toggle .subtle{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.per-scene-row{color:var(--scene)}.per-scene-row output{color:var(--scene)}
+/* Panels still showing the previous capture blink their frame while a generation runs (same period as GENERATING). */
+.scene.is-pending>.scene-visual{animation:pending-pulse .95s ease-in-out infinite}
+@keyframes pending-pulse{0%,100%{box-shadow:inset 0 0 0 1px var(--scene)}50%{box-shadow:inset 0 0 0 4px var(--scene)}}
+.scene.is-previous>.scene-visual img{opacity:.7}
+@media(prefers-reduced-motion:reduce){.scene.is-pending>.scene-visual{animation:none;box-shadow:inset 0 0 0 3px var(--scene)}}
+.page-links a.manual-link{background:#2c3d22;border-color:#8da77c}
+.error-panel{flex-shrink:0}.error-panel>.section-head{min-height:22px;padding:3px 6px}.error-panel h2{font-size:11px}
+.error-list{margin:0;padding:3px 6px 5px 6px;list-style:none;max-height:110px;overflow:auto;font-size:10px;line-height:1.35;user-select:text;-webkit-user-select:text;cursor:text}.error-list:empty{display:none}
+.error-row{padding:2px 0;border-bottom:1px solid #2a2a2a;overflow-wrap:anywhere}.error-row.is-error{color:#ffa396}.error-row.is-warning{color:#e2d060}
+.error-panel.has-recent{border-color:#d29080}
+.error-row.is-skip{color:#b9c4c7}
+.scene-notes{font-size:9.5px;line-height:1.35;padding:2px 5px 4px;max-height:96px;overflow:auto;border-top:1px dashed #3a3a3a;flex-shrink:0;user-select:text;-webkit-user-select:text;cursor:text}.scene-notes:empty{display:none}.scene-notes-head{color:#8f9da5;margin-top:2px}.scene-note{overflow-wrap:anywhere}.scene-note.is-info{color:#b9c4c7}.scene-note.is-warn{color:#e2d060}.scene-note.is-error{color:#ffa396}

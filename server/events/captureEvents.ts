@@ -36,6 +36,8 @@ export interface CaptureEvent {
   /** Browser publication eligibility; not a remote browser decode acknowledgement. */
   publishedCount?: number | null;
   executionSource?: 'manual'|'timer'|'chain'|'scenario'|'unknown';
+  /** G-27: the live scenario CSV run this capture was started under (runId, scenario id, sha256 of the archived CSV copy). */
+  scenarioRun?: {runId:string;scenarioId:string;csvSha:string};
   inputIdentity?: {kind:'test'|'live-camera'|'unknown';id:string|null;sceneId?:string;runId?:string;loop?:number;sha256?:string};
   failureReason?: string | null;
   browserFollow?: {updateMode?:'each'|'all';testSceneId?:string;testRunId?:string;scope:string;sourceRecordedAtMs:number|null;cameraScope?:string};
@@ -83,6 +85,9 @@ export interface CaptureEvent {
   presence?: number | null;
   tone?: number | null;
   effectivePresence?: number | null;
+  /** Per-scene presence / tone [gen_a, gen_b, gen_c]; present only when a scene differs from the global value. */
+  scenePresence?: number[] | null;
+  sceneTone?: number[] | null;
   /** Rulebook version (rulebook/active.json) the prompts of this capture were built with. */
   rulebookVersion?: number | null;
   /** Local-QA summary (server/qa/localJudge.ts), added after the images were judged between captures. */

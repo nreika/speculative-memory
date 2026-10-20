@@ -7,7 +7,9 @@ test('live play keeps clock responsive, generates twice and restores layout on S
  s.load(plan,'SCN-001.csv');await s.play(false,['NOW','C','A','B']);clock=8;await s.tick();await Promise.resolve();assert.equal(calls.length,1);
  clock=75;await s.tick();assert.deepEqual(layouts.at(-1),['B','NOW','A','C']);
  clock=100;await s.tick();await Promise.resolve();assert.equal(calls.length,2);assert.equal(calls[1].snapshot.prompts.b,'stand');s.acknowledge(calls[1].snapshot.receipt);assert.equal(s.snapshot().prompts.b,'');
- clock=180;await s.tick();assert.equal(s.status().state,'completed');assert.equal(s.ownsLayout(),true);assert.equal(s.canGenerate(),false);
+ clock=180;await s.tick();assert.equal(s.status().state,'completed');assert.equal(s.canGenerate(),false);
+ // Natural end performs the same release as Stop: layout restored, ownership returned.
+ assert.deepEqual(layouts.at(-1),['NOW','C','A','B']);assert.equal(s.ownsLayout(),false);
  await s.stop();assert.deepEqual(layouts.at(-1),['NOW','C','A','B']);assert.equal(s.ownsLayout(),false);
 });
 test('Preview never generates and pause excludes wall time',async()=>{
@@ -51,4 +53,16 @@ test('output_* row aimed at a missing screen yields a non-fatal warning; channel
  assert.deepEqual(warn.map(w=>[w.row,w.severity,w.message]),[[4,'warning','target screen-99 does not exist in the current browser outputs']]);
  assert.equal((await checkOperatorPlan(root,'m.csv',python)).formatWarnings.filter(w=>w.message.includes('does not exist')).length,0);
  assert.equal((await checkOperatorPlan(root,'m.csv',python,async()=>{throw Error('store down');})).plan.cues.length>0,true);
+});
+test('autoCaptureMode follows the run own live mode cue; preview, pause, manual and end clear it; end calls finished once',async()=>{
+ let clock=0;const m=settingsMock(),finished:any[]=[];
+ const modePlan:OperatorPlan={version:1,id:'AUTO',durationSec:30,loop:false,cues:[{id:'m',atSec:0,settings:{mode:'timer'}},{id:'m2',atSec:10,settings:{mode:'manual'}}]};
+ const s=createOperatorScenario({now:()=>clock,setLayout:()=>{},generate:async()=>{},settings:m.port,finished:info=>{finished.push(info);}});
+ s.load(modePlan,'a.csv');await s.play(true,['A','B','C','NOW']);assert.equal(s.autoCaptureMode(),undefined);await s.stop();
+ s.load(modePlan,'a.csv');await s.play(false,['A','B','C','NOW']);assert.equal(s.autoCaptureMode(),'timer');
+ s.pause();assert.equal(s.autoCaptureMode(),undefined);s.pause();assert.equal(s.autoCaptureMode(),'timer');
+ clock=10;await s.tick();assert.equal(s.autoCaptureMode(),undefined);
+ clock=30;await s.tick();assert.equal(s.status().state,'completed');assert.equal(s.ownsLayout(),false);
+ const live=finished.filter(f=>!f.previewOnly);assert.equal(live.length,1);assert.equal(live[0].reason,'end');assert.deepEqual(live[0].cueIds,['m','m2']);
+ await s.stop();assert.equal(finished.filter(f=>!f.previewOnly).length,1);
 });

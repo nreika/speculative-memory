@@ -7,6 +7,7 @@ import {defaultLocalImageEngine,selectedLocalImageUrl,type LocalImageEngine} fro
 import type { PeopleEditRegion } from './peopleEditRegion';
 import { compactPeopleInstruction } from './compactPeople';
 import { mainChangeLine } from './mainChange';
+import { isPastDistance, pastMainChangeLine, pastMomentLead, type PastContinuityVerdict } from './pastScene';
 /**
  * Server-side generation orchestrator.
  *
@@ -43,7 +44,7 @@ import { guardOnce, occupancySourceOf, sanitizeEmptyRoomPrediction } from "./sce
 import type { SceneExtras } from "./sceneExtras";
 import { planScenariosLocal, vlmConfig, vlmReachable, type PlanTrace, type PlannerLlm } from "./vlmClient";
 import { GEMINI_VLM_MODEL, defaultBackends, type StepBackend } from "./backends";
-import { foregroundRule, getRulebook, obstructedLead, personFidelityText, physicsBlock, screenAndFrameText, toneImageRule } from "./rulebook";
+import { foregroundRule, framingAnchor, getRulebook, obstructedLead, personFidelityText, physicsBlock, screenAndFrameText, toneImageRule } from "./rulebook";
 import { abandonOnAbort } from "../captureManager";
 import {
   DEFAULT_SCENE_PARAMS,
@@ -338,6 +339,8 @@ export function composeEditInstruction(args: {
   obstructed?: boolean;
   /** What blocks the lens (describe step), e.g. "mesh chair backrest". */
   obstructedBy?: string;
+  /** G-26 past scene: the history verdict (ongoing = step the same activity back instead of undoing it). */
+  pastContinuity?: PastContinuityVerdict;
 }): string {
   const clockEdit = !!args.clock && shouldEditClock(args.clock.visible, args.mode);
   const clockInstruction =
@@ -357,19 +360,24 @@ export function composeEditInstruction(args: {
   if (handConflict) args = { ...args, predictionPrompt: armsChangeAction(args.predictionPrompt, handConflict) };
   const rb = handConflict ? { ...rb0, imagePrompt: { ...rb0.imagePrompt, holdingsRule: rb0.imagePrompt.holdingsRule && withoutHandCommitments(rb0.imagePrompt.holdingsRule) } } : rb0;
   const ip = rb.imagePrompt;
+  // G-26: a scene BEFORE the frame is framed as the EARLIER moment (lead line + "Main difference ... EARLIER moment").
+  const past = isPastDistance(spanSec);
+  const emptyTemplate = presence <= 0 && !args.referencePerson;
+  const pastLead = past ? pastMomentLead(spanSec, emptyTemplate, args.pastContinuity) : "";
+  const changeLine = (prediction: string) => (past ? pastMainChangeLine(prediction) : mainChangeLine(prediction));
   if (args.compactPeople && args.people?.length && (args.personCount ?? 0) > 0 && !args.behindView && presence > 0) {
-    return obstructedLead(rb,args.obstructed,args.obstructedBy) +
+    return obstructedLead(rb,args.obstructed,args.obstructedBy) + framingAnchor(rb) + pastLead +
       compactPeopleInstruction(args.people,args.personCount!,args.predictionPrompt,!!args.behindView) + clockInstruction +
       "\n\n" + ip.noNewFaceRule + "\n\n" + ip.holdingsRule +
       "\n\n" + ip.extraConstraints.join(' ') +
       (args.tone !== undefined ? "\n\n"+toneImageRule(args.tone,false,rb) : '') +
       (args.obstructed ? "\n\n"+foregroundScaleRule(args.foregroundObject)+"\n\n"+physicsBlock(rb)+screenAndFrameText(rb,true) : '') +
-      mainChangeLine(args.predictionPrompt);
+      changeLine(args.predictionPrompt);
   }
-  if (presence <= 0 && !args.referencePerson) {
+  if (emptyTemplate) {
     const er = ip.emptyRoom;
     return (
-      obstructedLead(rb, args.obstructed, args.obstructedBy) +
+      obstructedLead(rb, args.obstructed, args.obstructedBy) + framingAnchor(rb) + pastLead +
       `${er.head}${sanitizeEmptyRoomPrediction(args.predictionPrompt)}. ` +
       `${er.scope} ` +
       `${er.keep} ` +
@@ -386,7 +394,7 @@ export function composeEditInstruction(args: {
     );
   }
   return (
-    obstructedLead(rb, args.obstructed, args.obstructedBy) +
+    obstructedLead(rb, args.obstructed, args.obstructedBy) + framingAnchor(rb) + pastLead +
     (args.behindView ? behindViewSentence(args.behindView, args.predictionPrompt) + "\n\n" : "") +
     buildFutureImagePrompt(actionWithBelongings(args.predictionPrompt, args.people ?? []), args.options, clockEdit, presence, spanSec) +
     "\n\n" + FIXED_LIGHTING + "\n\n" + identityConstraints(args.people ?? [], args.personCount, args.predictionPrompt) +
@@ -407,7 +415,7 @@ export function composeEditInstruction(args: {
     "\n\n" + ip.disembodiedRule +
     "\n\n" +
     buildQualitySuffix(clockEdit, presenceAllowsNewPerson(presence), Math.abs(spanSec) >= LONG_SPAN_IMAGE_SEC) +
-    mainChangeLine(args.predictionPrompt)
+    changeLine(args.predictionPrompt)
   );
 }
 
@@ -468,6 +476,7 @@ export async function generateImage(args: {
   /** See composeEditInstruction. */
   obstructed?: boolean;
   obstructedBy?: string;
+  pastContinuity?: PastContinuityVerdict;
   /** Rough rectangle of that person inside faceImageDataUrl (pixels). */
   faceCrop?: { x: number; y: number; width: number; height: number };
   /** `faceImageDataUrl` is a recently seen person (not a face crop): tell the edit to reuse that person only. */
@@ -522,7 +531,12 @@ export async function generateImage(args: {
       behindView: args.behindView,
       obstructed: args.obstructed,
       obstructedBy: args.obstructedBy,
+      pastContinuity: args.pastContinuity,
     });
+  // G-26: the reference-cast template gets the same EARLIER-moment lead for a past scene.
+  if (args.referenceCast && isPastDistance(args.distanceSec)) editInstruction = pastMomentLead(args.distanceSec!, false, args.pastContinuity) + editInstruction;
+  // Framing anchor (rulebook v20+) leads the reference-cast template too (composeEditInstruction adds it to the others).
+  if (args.referenceCast) editInstruction = framingAnchor() + editInstruction;
   if(args.scenarioElementInstruction)editInstruction+='\n\n'+withoutLightingChanges(args.scenarioElementInstruction);
 
   // Empty room (presence 0): also push person words into the negative prompt (inert at cfg 1, active above).

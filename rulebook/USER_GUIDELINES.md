@@ -284,3 +284,24 @@
 - skip した場面の表示（2026-10-19 ユーザー決定、原文「それでいい 進めて」= 推奨案「前回の画像を残す」を採用）: ブラウザ出力（/display/、/control/screen/、/control/output/）とパネルは前回の画像と字幕をそのまま表示し続け、黒フェードも起こさない。NOW の画面は通常どおり更新する。archive には skipped:true と理由（no_recent_activity / no_movable_object など）を記録する。
 - 追加指示の優先（2026-10-19 ユーザー回答、原文「まあ追加指示にあるなら、それ優先でいいよ」）: Continuous を含む追加指示に人物の言及があれば、emptyRoomPersonChance の確率に関係なく直近人物を描く（operator_mention）。普段の有人用の指示が入ったままでも同じ扱いになるので、無人時に確率だけで判定したいときは追加指示から人物の言及を外す。
 
+
+## G-26 過去のシーンは「本当に過去」に。整合性のある、あり得た過去・未来をベストエフォートで
+- 日付: 2026-10-20（コーディネーター経由のユーザー指示、16:2x 以降）
+- 原文:「過去のPROMPTが、全然過去ではない」
+- 原文:「たとえば、何かを食べている場合、それが未開封になってるとか、紙袋にはいってるとか、ならわかる」
+- 原文:「ただ、常に未開封だと、変。すでに10分以上食事しているときに、その３０秒前が常に未開封なシーン、だと不自然。」
+- 原文:「整合性のある、あり得た過去・未来を生成するのは、だいぶハイコンテクスト。完全にはできないとおもうけど、ベストエフォートで実装したい」
+- 内容: 過去のシーン（距離が負、通常 C）は撮影フレームを「結果（END）」とし、その少し前にあり得た状態を描く。表示文は過去形（「30秒前、…ていた」）で「今では／現在／今は」を使わない。新しい無関係な動作を足さない。
+- 履歴との整合: サーバーが履歴から STATE LEDGER（状態ごとの初出・最終・継続時間）を作って計画に渡す。現在の状態・活動が |距離| より前から続いていれば、過去シーンは同じ活動の少し前の瞬間（一口前、カップが少し低い、手の位置が少し違う）。状態が新しい（約 |距離|×2 以内に始まった）ときだけ直前の変化を戻す（未開封、紙袋の中、カップは机の上、袋は閉じている）。履歴が無い・曖昧なときは最小の整合的な差（同じ状態の少し前）にし、大胆な巻き戻しはしない。未来のシーン（A/B）も続いている活動を続ける（やり直させない）。
+- 無人の過去シーン: 物の変化は逆向き（物はまだ少し別の位置・角度にあり、その後写真の位置になった）。
+- 反映先: services/promptBuilder.ts（buildPastSceneContract、PAST_SCENE_USER_WORDS）、server/generation/vlmClient.ts（PAST_SCENE_JSON_RULE、PAST_TRANSLATION_RULE、過去シーンの文の整形）、server/generation/pastScene.ts（整形・画像指示の過去の行・STATE LEDGER）、server/generation/orchestrator.ts（画像指示の先頭の行と「Main difference from the photo (this is the EARLIER moment)」）、server/generation/scenarioGuard.ts（無人の逆向きの変化）。
+- エンジン用の文: "PAST-SCENE CONTRACT … this frame is the END state … show the room as it plausibly WAS {span} earlier …" / 画像: "This image is the moment {span} BEFORE this photo; the photo shows what happened next. Render that earlier moment: undo the most recent small action rather than adding a new one."
+
+## G-27 CSVで動かしたら、そのCSVの複製を必ずログに残し、HISTORYでどの範囲がどのCSVかを示す
+- 日付: 2026-10-20（コーディネーター経由のユーザー指示、SCN-SIMPLE-001 のライブ試験 16:36–16:40 のあと）
+- 原文:「CSVで動かした場合、その複製をつねにとってログに保存して。CSV自体に修正が入ることがあるので。で、HISTORY画面に、どこからどこまでがどのCSVでうごかしたか、がわかるようにして」
+- 関連原文:「CSVで全部制御」（CSVの mode=timer/chain と interval_sec が、再生中の自動キャプチャをそのまま動かす）
+- ライブ再生（scenario.play）ごとに、読み込んだ時点の CSV 本文をそのまま logs/scenario-runs/<開始ISO>_<scenarioId>_<runId>.csv に複製し、同名 .json（runId, scenarioId, file, sha256, startedAt, endedAt, endReason=end|stop|error, cuesApplied, settingsCues, outputsChanged, captureIds, restored）と logs/scenario-runs.jsonl に開始行・終了行を残す。ライブラリの CSV が後で直されても複製は変えない。
+- 再生中に始まった生成は capture-events の行に scenarioRun {runId, scenarioId, csvSha} を持つ。
+- TIME HISTORY は時間軸に沿って「SCN-SIMPLE-001 16:36:26–16:40:26」の帯を出し、クリックで複製 CSV と .json の内容を表示する。同じ scenario id で sha256 が違う回は「(修正版)」。
+- 終了（end 行）は Stop と同じ復元（出力割り当て・設定・生成の一時停止は開始前の値）をし、直前に読み込んでいたシナリオ（既定 SCN-001.csv）を読み直して待機状態に戻る。

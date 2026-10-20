@@ -296,7 +296,7 @@ export class BrowserOutputsStore {
 }
 export function registerBrowserOutputsRoutes(app:Pick<Express,'use'>,options:BrowserOutputsOptions){
  const store=new BrowserOutputsStore(options),allowedHosts=new Set(options.allowedHosts??['localhost:3000','127.0.0.1:3000']);
- for(const host of allowedHosts){const parsed=new URL('http://'+host);if(parsed.host!==host||parsed.port!=='3000'||parsed.pathname!=='/'||parsed.search||parsed.hash||parsed.username||parsed.password||!(parsed.hostname==='localhost'||peer(parsed.hostname)))throw Error('Invalid browser-output allowed Host');}
+ for(const host of allowedHosts){const parsed=new URL('http://'+host);if(parsed.host!==host||parsed.port!=='3000'||parsed.pathname!=='/'||parsed.search||parsed.hash||parsed.username||parsed.password||!(parsed.hostname==='localhost'||peer(parsed.hostname)||/^[a-z0-9-]+\.[a-z0-9-]+\.ts\.net$/.test(parsed.hostname)))throw Error('Invalid browser-output allowed Host');}
  app.use(async(req,res,next)=>{
   const url=new URL(req.originalUrl||req.url,'http://local'),route=url.pathname;
   if(route!=='/api/browser-outputs'&&!route.startsWith('/api/browser-outputs/')&&!route.startsWith('/captures/browser-output-assets/')&&!route.startsWith('/captures/browser-output-thumbnails/'))return next();

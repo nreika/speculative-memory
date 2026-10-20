@@ -31,6 +31,18 @@ export const LONG_SPAN_QUALITY_SUFFIX =
   "This is the same photograph: identical camera position, zoom and viewpoint. The desks, chairs, bag, laptops, cables, curtains, floor and walls " +
   "stay exactly where they are and exactly as they look in the input; only the person's pose and position change. Do not zoom, shift or re-compose the view.";
 
+/**
+ * Framing anchor (2026-10-20, true-positive framing_drift rejections on camera input): one sentence for every scene, placed
+ * right after the obstruction lead (which stays first). Versioned as imagePrompt.framingAnchorRule (rulebook v20+).
+ */
+export const FRAMING_ANCHOR_RULE =
+  "Same field of view, zoom, tilt and camera position as the input; the content touching all four image edges stays identical; do not re-compose, crop or zoom.";
+
+/** LONG_SPAN_QUALITY_SUFFIX without its camera sentences, for versions that carry FRAMING_ANCHOR_RULE (merged, not repeated). */
+export const LONG_SPAN_QUALITY_SUFFIX_ANCHORED =
+  "The desks, chairs, bag, laptops, cables, curtains, floor and walls stay exactly where they are and exactly as they look in the input; " +
+  "only the person's pose and position change.";
+
 export const DEFAULT_NEGATIVE_PROMPT =
   "blurry, soft focus, out of focus, hazy, low detail, motion blur, " +
   "transparent, translucent, see-through, ghost, double exposure, " +

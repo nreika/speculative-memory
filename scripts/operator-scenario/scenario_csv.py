@@ -104,6 +104,10 @@ def _apply(action, row, cue, used, plan):
                 'instruction':row.get('instruction') or ''}]}
         elif action=='clear_image':cue['images']={target:[]}
         else:cue['oneShot' if action=='one_shot' else 'prompts']={target:'' if action=='clear_prompt' else value}
+    elif action in ('presence','tone') and target:
+        # Per-scene override: target A|B|C sets settings.scenes.<a|b|c>.presence/tone; blank target = global (as before).
+        scene_target()
+        cue['settings']={'scenes':{target.lower():{action:_num(value,action,0,1)}}}
     elif action in ('mode','interval_sec','presence','tone','empty_person'):
         blank_target()
         if action=='mode':

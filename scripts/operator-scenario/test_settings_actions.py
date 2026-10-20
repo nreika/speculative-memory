@@ -21,7 +21,7 @@ class SettingsActionTests(unittest.TestCase):
         self.assertEqual([c[7]['hold'],c[8]['hold']],['pause','resume'])
         self.assertFalse(any(x.get('generate') for x in c))
     def test_invalid_values_rejected(self):
-        bad=[('mode','','auto'),('mode','A','timer'),('interval_sec','','4'),('interval_sec','','3601'),('interval_sec','','soon'),('distance','A','3600.5'),('distance','D','10'),('distance','','10'),('distance','A','nan'),('presence','','1.1'),('presence','','-0.1'),('tone','A','0.5'),('tone','','inf'),('person_refs','A','not-a-uuid'),('person_refs','A',U1+'|'+U1.upper()),('person_refs','A','|'.join([U1]*16)),('person_refs_once','','' ),('person_refs','A','/private/photo.jpg'),('pause','A',''),('resume','','1')]
+        bad=[('mode','','auto'),('mode','A','timer'),('interval_sec','','4'),('interval_sec','','3601'),('interval_sec','','soon'),('distance','A','3600.5'),('distance','D','10'),('distance','','10'),('distance','A','nan'),('presence','','1.1'),('presence','','-0.1'),('tone','D','0.5'),('presence','B','1.5'),('tone','a ','x'),('tone','','inf'),('person_refs','A','not-a-uuid'),('person_refs','A',U1+'|'+U1.upper()),('person_refs','A','|'.join([U1]*16)),('person_refs_once','','' ),('person_refs','A','/private/photo.jpg'),('pause','A',''),('resume','','1')]
         for action,target,value in bad:
             with self.subTest(action=action,target=target,value=value),self.assertRaises(ValueError):parse(text([[0,action,target,value],[1,'end','','']]))
     def test_empty_person_action(self):
@@ -36,11 +36,20 @@ class SettingsActionTests(unittest.TestCase):
     def test_engine_rejects_malformed_documents(self):
         for cue in [{'settings':{'mode':'timer','tone':0.1}},{'settings':{'scenarioPreview':True}},{'settings':{'scenes':{'a':{'continuous':'x'}}}},{'hold':'stop'},{'settings':{'tone':0.1},'hold':'pause'}]:
             with self.subTest(cue=cue),self.assertRaises(ValueError):validate({'version':1,'id':'x','cues':[{'id':'c','atSec':0,**cue}]})
+    def test_per_scene_presence_tone(self):
+        p=parse(text([[0,'presence','B','0.8'],[1,'tone','C','0.25'],[2,'presence','','0.4'],[3,'end','','']]))
+        c=p['cues']
+        self.assertEqual(c[0]['settings'],{'scenes':{'b':{'presence':0.8}}})
+        self.assertEqual(c[1]['settings'],{'scenes':{'c':{'tone':0.25}}})
+        self.assertEqual(c[2]['settings'],{'presence':0.4})
+        for cue in c:validate({'version':1,'id':'x','cues':[{**cue,'id':'c'}]})
+        with self.assertRaises(ValueError):validate({'version':1,'id':'x','cues':[{'id':'c','atSec':0,'settings':{'scenes':{'a':{'tone':2}}}}]})
     def test_example_loads(self):
         plan,_=load(Path(__file__).parent/'examples'/'SCN-SETTINGS-001.csv')
         self.assertEqual(plan['id'],'SCN-SETTINGS-001');self.assertEqual(plan['durationSec'],20)
-        self.assertEqual([c['atSec'] for c in plan['cues']],[0,4,8,10,12,16])
-        self.assertEqual(plan['cues'][3]['settings'],{'emptyRoomPersonChance':0.5})
+        self.assertEqual([c['atSec'] for c in plan['cues']],[0,4,6,8,10,12,16])
+        self.assertEqual(plan['cues'][2]['settings'],{'scenes':{'b':{'presence':0.8}}})
+        self.assertEqual(plan['cues'][4]['settings'],{'emptyRoomPersonChance':0.5})
         self.assertEqual(plan['cues'][0]['settings'],{'scenes':{'a':{'distanceSec':10}}})
         self.assertFalse(any(c.get('generate') for c in plan['cues']))
 if __name__=='__main__':unittest.main()

@@ -1,9 +1,13 @@
-import {normalizeEvent,buildSections,buildSharedSections,connectionLayout,mixedConnectionLayout,verticalConnectionLayout,sourceConnectionPath,thumbnailGapPercent,elapsedLabel,secondsLabel,pendingRefreshIds,RecentHistoryGaps,SCENE_COLORS} from './history-model.mjs';
+import {normalizeEvent,buildSections,buildSharedSections,connectionLayout,mixedConnectionLayout,verticalConnectionLayout,sourceConnectionPath,thumbnailGapPercent,elapsedLabel,secondsLabel,pendingRefreshIds,RecentHistoryGaps,SCENE_COLORS,pageCounter,normalizeScenarioRuns,runsForSession,runBandLayout,verticalRunBandLayout,clockLabel} from './history-model.mjs';
 const $=id=>document.getElementById(id);
 const records=new Map(),sectionNodes=new Map(),runOrigins=new Map();
-const recentGaps=new RecentHistoryGaps();
+let recentGaps=new RecentHistoryGaps();
+let pagesLoaded=0,epoch=0;
+const PAGE_SIZE=200,resultWindow=()=>Number($('window').value)||PAGE_SIZE;
 let selected=null,reading=false,nextCursor=null,hasEarlier=false,origin=null,pendingCursor=0;
 let crossLayer=null,shownEvents=[],focusedCaptureId=null,crossFrame=null;
+// G-27: scenario CSV runs from the timeline response; sessionRuns = the ones drawn for the selected history run.
+let scenarioRunRows=[],sessionRuns=[];
 const stamp=value=>Number.isFinite(value)?new Date(value).toLocaleString('ja-JP',{timeZone:'Asia/Tokyo',hour12:false}):'Unknown';
 function node(tag,text,cls){const element=document.createElement(tag);if(text!==undefined)element.textContent=text;if(cls)element.className=cls;return element;}
 function svg(tag,attributes){const element=document.createElementNS('http://www.w3.org/2000/svg',tag);for(const [key,value] of Object.entries(attributes))element.setAttribute(key,String(value));return element;}
@@ -35,7 +39,9 @@ function makeImage(event,point,position){
   label.append(node('b',point.key==='now'?'SOURCE':point.key.toUpperCase()),node('span','T'+(elapsed>=0?'+':'')+elapsedLabel(elapsed)));
   if(point.key==='now'&&event.status!=='completed')label.append(node('span',event.status==='running'?'…':event.status==='failed'?'×':'·','status-mark'));
   button.append(label);
-  if(point.url){const image=node('img');image.loading='lazy';image.decoding='async';image.src=point.url;image.alt=(point.key==='now'?'Source':point.key.toUpperCase())+' · '+event.id;button.append(image);}
+  if(point.url){const image=node('img');image.loading='lazy';image.decoding='async';
+    // 320px server thumbnail when it exists; the full image stays the click-through (details dialog).
+    if(point.thumbUrl){image.onerror=()=>{image.onerror=null;image.src=point.url;};image.src=point.thumbUrl;}else image.src=point.url;image.alt=(point.key==='now'?'Source':point.key.toUpperCase())+' · '+event.id;button.append(image);}
   else button.append(node('span','No saved source image','placeholder'));
   button.title=(point.key==='now'?'Source input':point.key.toUpperCase()+' '+(point.offset>=0?'+':'')+point.offset+' sec')+' · '+event.status+' · '+secondsLabel(event.totalMs)+' · '+event.id;
   button.onclick=()=>showDetails(event,point);return button;
@@ -55,6 +61,7 @@ function timelinePlot(section,lanes={}){
     lines.append(vertical?svg('path',{d:sourceConnectionPath({x:line.from.x*10,y:line.from.y},{x:line.to.x*10,y:line.to.y},line.key),fill:'none',...attributes}):svg('line',{x1:line.from.x*10,y1:line.from.y,x2:line.to.x*10,y2:line.to.y,...attributes}));
   }
   plot.append(lines);
+  if(vertical){const layout=verticalRunBandLayout(sessionRuns,origin,section,geometry);for(const band of layout.bands)plot.append(verticalBand(band));}
   for(const point of geometry.nodes){const button=makeImage(point.event,point,point);button.onpointerenter=()=>highlight(point.event.id);button.onpointerleave=()=>highlight(null);button.onfocus=()=>highlight(point.event.id);button.onblur=()=>highlight(null);plot.append(button);}
   scroll.append(plot);
   const unknown=section.events.flatMap(event=>event.points.filter(point=>point.time===null).map(point=>({event,point})));
@@ -87,6 +94,42 @@ function generationNode(event,section){
   return article;
 }
 
+/** Run color: revised CSV (修正版) gets the warm tone so an edited CSV is visible at a glance. */
+const runColor=run=>run.revised?'#f1ba75':'#7fd1c1';
+function runTitle(run){return run.label+' · '+run.file+' · sha256 '+run.sha.slice(0,12)+(run.endReason?' · '+run.endReason:'')+' · click: CSV copy';}
+function horizontalBands(section){
+  const layout=runBandLayout(sessionRuns,origin,section),strip=node('div',undefined,'run-bands');
+  strip.hidden=!layout.bands.length;strip.style.height=(layout.lanes*22+(layout.lanes?6:0))+'px';
+  for(const band of layout.bands){
+    const button=node('button',undefined,'run-band');button.style.left=band.left+'%';button.style.width=Math.max(.6,band.right-band.left)+'%';button.style.top=(3+band.lane*22)+'px';button.style.setProperty('--run',runColor(band.run));
+    button.classList.toggle('clip-start',band.clippedStart);button.classList.toggle('clip-end',band.clippedEnd);button.dataset.runId=band.run.runId;
+    button.append(node('span',band.run.label));button.title=runTitle(band.run);button.onclick=()=>openRun(band.run);strip.append(button);
+  }
+  return strip;
+}
+function verticalBand(band){
+  const button=node('button',undefined,'run-band vertical-run-band');button.style.top=band.top+'px';button.style.height=band.height+'px';button.style.left=(54+band.lane*16)+'px';button.style.setProperty('--run',runColor(band.run));
+  button.classList.toggle('clip-start',band.clippedStart);button.classList.toggle('clip-end',band.clippedEnd);button.dataset.runId=band.run.runId;
+  button.append(node('span',band.run.label));button.title=runTitle(band.run);button.onclick=()=>openRun(band.run);return button;
+}
+function renderRunLegend(){
+  const legend=$('run-legend');legend.replaceChildren();legend.hidden=!sessionRuns.length;if(!sessionRuns.length)return;
+  legend.append(node('span','CSV runs:','run-legend-title'));
+  for(const run of sessionRuns){const chip=node('button',undefined,'run-chip');chip.style.setProperty('--run',runColor(run));chip.append(node('i'),node('span',run.label));chip.title=runTitle(run);chip.onclick=()=>openRun(run);legend.append(chip);}
+  legend.append(node('span','band = time this CSV owned playback · (修正版) = same scenario id, edited CSV (different sha256)','run-legend-note'));
+}
+async function openRun(run){
+  $('run-title').textContent=run.label;$('run-csv').textContent='Loading the archived CSV copy…';$('run-facts').replaceChildren();
+  $('run-open').href='/api/scenario-runs/'+encodeURIComponent(run.runId)+'/csv';
+  $('run-dialog').showModal();
+  try{
+    const [sidecar,csv]=await Promise.all([readJson('/api/scenario-runs/'+encodeURIComponent(run.runId)),fetch('/api/scenario-runs/'+encodeURIComponent(run.runId)+'/csv',{cache:'no-store'}).then(r=>{if(!r.ok)throw Error('CSV copy returned '+r.status);return r.text();})]);
+    const list=value=>Array.isArray(value)&&value.length?value.map(item=>typeof item==='string'?item:JSON.stringify(item)).join('\n'):'–';
+    const facts=[['Scenario',sidecar.scenarioId+(run.revised?' (修正版)':'')],['Library file',sidecar.file],['sha256',sidecar.sha256],['Run ID',sidecar.runId],['Started',stamp(Date.parse(sidecar.startedAt))+' JST'],['Ended',sidecar.endedAt?stamp(Date.parse(sidecar.endedAt))+' JST':'running'],['End reason',sidecar.endReason??'running'],['Cues applied',String(sidecar.cuesApplied??'–')],['Captures',list(sidecar.captureIds)],['Settings cues',list((sidecar.settingsCues??[]).map(row=>row&&typeof row==='object'?'T+'+row.atSec+'s '+row.change+' · '+row.status+(row.error?' · '+row.error:''):row))],['Outputs changed',list(sidecar.outputsChanged)],['Restored at end',list(sidecar.restored)],['Restore problems',list(sidecar.restoreErrors)],['Archived copy','logs/scenario-runs/'+sidecar.csvFile]];
+    $('run-facts').replaceChildren(...facts.flatMap(([key,value])=>[node('dt',key),node('dd',value)]));
+    $('run-csv').textContent=csv;
+  }catch(error){$('run-csv').textContent=error.message;}
+}
 function resetLayout(){highlight(null);sectionNodes.clear();crossLayer=null;$('sections').replaceChildren();}
 function scheduleCrossConnections(){if(crossFrame!==null)return;crossFrame=requestAnimationFrame(()=>{crossFrame=null;drawCrossConnections();});}
 function drawCrossConnections(){
@@ -119,6 +162,7 @@ function render(){
   if(origin!==nextOrigin){origin=nextOrigin;resetLayout();}
   const status=$('status-filter').value,events=run.filter(event=>status==='all'||event.status===status);
   shownEvents=events;
+  sessionRuns=runsForSession(normalizeScenarioRuns(scenarioRunRows),run);renderRunLegend();
   const groups=($('view-mode').value==='generations'?buildSections:buildSharedSections)(events,origin,Number($('section-size').value));
   // Same lane/column counts in every section so SOURCE stays on one straight line through the whole run.
   const lanes={};
@@ -134,12 +178,15 @@ function render(){
       const element=node('section',undefined,'time-section'),heading=node('div',undefined,'section-title'),axis=node('div',undefined,'axis'),chart=node('div');
       heading.append(node('h2',elapsedLabel(group.start)+' — '+elapsedLabel(group.end)),node('span',($('view-mode').value==='vertical'?'Time flows ↓':$('view-mode').value==='shared'?'Shared timeline →':'By generation')+' · SOURCE → A / B / C'));
       axis.hidden=$('view-mode').value==='vertical';
-      element.append(heading,axis,chart);entry={element,axis,chart,range:null,content:null};sectionNodes.set(group.start,entry);
+      const bands=node('div');element.append(heading,bands,axis,chart);entry={element,axis,chart,bands,range:null,content:null,bandKey:null};sectionNodes.set(group.start,entry);
     }
     if(entry.range!==range){
       entry.axis.replaceChildren();for(let i=0;i<=6;i++){const time=group.min+(group.max-group.min)*i/6,tick=node('span',elapsedLabel(time),'tick');tick.style.left=(8+84*i/6)+'%';entry.axis.append(tick);}entry.range=range;
     }
-    const content=JSON.stringify([group.events,range,$('view-mode').value,lanes]);
+    const runKey=JSON.stringify(sessionRuns.map(run=>[run.runId,run.start,run.end,run.label]));
+    const bandKey=JSON.stringify([runKey,range,$('view-mode').value]);
+    if(entry.bandKey!==bandKey){entry.bands.replaceChildren(...($('view-mode').value==='vertical'?[]:[horizontalBands(group)]));entry.bandKey=bandKey;}
+    const content=JSON.stringify([group.events,range,$('view-mode').value,lanes,$('view-mode').value==='vertical'?runKey:'']);
     if(entry.content!==content){highlight(null);entry.chart.replaceChildren(...($('view-mode').value==='generations'?group.events.map(event=>generationNode(event,group)):[timelinePlot(group,lanes)]));entry.content=content;}
     const index=groups.indexOf(group);if($('sections').children[index]!==entry.element)$('sections').insertBefore(entry.element,$('sections').children[index]||null);
   }
@@ -152,6 +199,7 @@ function render(){
   $('summary').textContent=events.length+' generation attempts · '+run.filter(event=>event.status==='completed').length+' completed · '+run.filter(event=>event.status==='failed').length+' failed'+(average!==null?' · 3-image average '+secondsLabel(average):'');
   $('anchor').textContent=origin===null?'':'Elapsed 00:00 = '+stamp(origin)+' JST · first generation recorded for this run (server-verified). Original recording timestamps are shown in image details.';
   $('older').disabled=reading||!hasEarlier;
+  $('pages').textContent=pageCounter(pagesLoaded,records.size,resultWindow())+(hasEarlier?'':' · all loaded');
   if($('follow').checked)window.scrollTo({top:document.documentElement.scrollHeight,behavior:'instant'});
 }
 async function readJson(url){const response=await fetch(url,{cache:'no-store',signal:AbortSignal.timeout(15000)});if(!response.ok)throw Error('Log server returned '+response.status);return response.json();}
@@ -161,6 +209,7 @@ async function timelinePage(limit,cursor=null){
   return page;
 }
 function mergePage(page){
+  if(Array.isArray(page.scenarioRuns))scenarioRunRows=page.scenarioRuns;
   for(const run of page.runOrigins)if(typeof run.key==='string'&&Number.isSafeInteger(run.startedAtMs))runOrigins.set(run.key,run.startedAtMs);
   merge(page.events);
 }
@@ -171,13 +220,19 @@ async function refreshPending(freshIds){
   if(replies.length)render();
 }
 async function refresh(earlier=false){
-  if(reading)return;reading=true;$('older').disabled=true;
+  if(reading)return;reading=true;$('older').disabled=true;const started0=epoch;
   try{
     const initial=!records.size,knownIds=new Set(records.keys());
-    const page=await timelinePage(earlier||initial?200:20,earlier?nextCursor:null);
+    const page=await timelinePage(earlier||initial?PAGE_SIZE:20,earlier?nextCursor:null);
+    if(epoch!==started0)return;
     if(!initial&&!earlier)recentGaps.observeHead(page,knownIds);
     mergePage(page);
-    if(initial||earlier){nextCursor=page.nextCursor;hasEarlier=nextCursor!==null;}
+    if(initial||earlier){nextCursor=page.nextCursor;hasEarlier=nextCursor!==null;pagesLoaded++;}
+    // Results window: the first load keeps reading 200-row pages until the window (200/500/1000) is filled.
+    while(initial&&hasEarlier&&records.size<resultWindow()){
+      const more=await timelinePage(PAGE_SIZE,nextCursor);if(epoch!==started0)return;
+      mergePage(more);nextCursor=more.nextCursor;hasEarlier=nextCursor!==null;pagesLoaded++;
+    }
     $('notice').textContent=recentGaps.cursor?'Catching up on recent generation records…':'';
     render();
     // At most two 200-row gap pages per poll. Retain the independent continuation
@@ -191,23 +246,26 @@ async function refresh(earlier=false){
     render();
     await refreshPending(new Set(page.events.map(row=>row.captureId)));
   }catch(error){$('notice').textContent=error.message+' · Existing history retained.';}
-  finally{reading=false;$('older').disabled=!hasEarlier;}
+  finally{if(epoch===started0){reading=false;$('older').disabled=!hasEarlier;}}
 }
 function showDetails(event,point){
   $('dialog-title').textContent=(point.key==='now'?'SOURCE':point.key.toUpperCase())+' · '+event.status.toUpperCase();
   const image=$('detail-image');image.hidden=!point.url;if(point.url)image.src=point.url;else image.removeAttribute('src');
   $('detail-caption').textContent=point.caption||'No saved caption for this image.';
-  const facts=[['Generation ID',event.id],['Input ID',event.input],['Elapsed request time',elapsedLabel(event.start-origin)],['Generation requested',stamp(event.start)+' JST'],['Generation ended',event.end===null?'Not ended / unknown':stamp(event.end)+' JST'],['Total generation duration',secondsLabel(event.totalMs)],...event.stages.map(([stage,ms])=>[stage+' duration',secondsLabel(ms)]),['Position on this timeline',point.time===null?'Unknown offset':elapsedLabel(point.time-origin)],['Stored relative offset',point.offset===null?'Unknown':point.offset+' sec'],['Original recording timestamp',point.recordedAtMs===null?'Unknown':stamp(point.recordedAtMs)+' JST'],['Saved image generated at',point.generatedAtMs===null?'Not a generated image / unknown':stamp(point.generatedAtMs)+' JST'],['Execution mode',event.mode],['Requested / saved / display-eligible',number(event.requested)+' / '+number(event.saved)+' / '+number(event.published)]];
+  const facts=[['Generation ID',event.id],['Input ID',event.input],['Elapsed request time',elapsedLabel(event.start-origin)],['Generation requested',stamp(event.start)+' JST'],['Generation ended',event.end===null?'Not ended / unknown':stamp(event.end)+' JST'],['Total generation duration',secondsLabel(event.totalMs)],...event.stages.map(([stage,ms])=>[stage+' duration',secondsLabel(ms)]),['Position on this timeline',point.time===null?'Unknown offset':elapsedLabel(point.time-origin)],['Stored relative offset',point.offset===null?'Unknown':point.offset+' sec'],['Original recording timestamp',point.recordedAtMs===null?'Unknown':stamp(point.recordedAtMs)+' JST'],['Saved image generated at',point.generatedAtMs===null?'Not a generated image / unknown':stamp(point.generatedAtMs)+' JST'],['Execution mode',event.mode],['Scenario CSV run',event.scenarioRun?event.scenarioRun.scenarioId+' · '+event.scenarioRun.runId.slice(0,8)+' · sha256 '+event.scenarioRun.csvSha.slice(0,12):'–'],['Requested / saved / display-eligible',number(event.requested)+' / '+number(event.saved)+' / '+number(event.published)]];
   $('detail-facts').replaceChildren(...facts.flatMap(([key,value])=>[node('dt',key),node('dd',value)]));
   $('detail-error').textContent=event.error;
   $('image-dialog').showModal();
 }
 $('close-dialog').onclick=()=>$('image-dialog').close();
+$('close-run').onclick=()=>$('run-dialog').close();
+$('run-dialog').onclick=event=>{if(event.target===$('run-dialog'))$('run-dialog').close();};
 $('image-dialog').onclick=event=>{if(event.target===$('image-dialog'))$('image-dialog').close();};
 $('run-filter').onchange=()=>{selected=$('run-filter').value;resetLayout();render();};
 $('status-filter').onchange=()=>{resetLayout();render();};
 $('section-size').onchange=()=>{resetLayout();render();};
 $('view-mode').onchange=()=>{resetLayout();render();};
+$('window').onchange=()=>{epoch++;records.clear();runOrigins.clear();recentGaps=new RecentHistoryGaps();nextCursor=null;hasEarlier=false;pagesLoaded=0;pendingCursor=0;reading=false;resetLayout();render();refresh();};
 $('older').onclick=()=>{$('follow').checked=false;refresh(true);};
 $('latest').onclick=()=>window.scrollTo({top:document.documentElement.scrollHeight,behavior:'instant'});
 $('follow').onchange=()=>{if($('follow').checked)window.scrollTo({top:document.documentElement.scrollHeight,behavior:'instant'});};

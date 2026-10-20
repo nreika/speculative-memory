@@ -9,6 +9,7 @@ import { withoutLightingChanges,uniqueActionPerson,occupiedHandSides } from "./f
 import { bothArmsHolding } from "./handConflict";
 import { parseClockVisible, type ScenarioResult } from "../../services/promptBuilder";
 import { withEnglishSpan, withJapaneseSpan } from "./spanFix";
+import { isPastDistance, pastJapaneseText, pastScenePrediction } from "./pastScene";
 import { groundTruthNote, hasBigArmMotion, isWeakScenario, mentionsSeveralPeople, modestMotion, recentPersonPhrase, spanPhrase, synthesizeEmptyRoom, synthesizeScenarios, type PersonInfo } from "./peopleDescribe";
 import { emptyRoomObjectChange, extractObjects, isNoChangeSentence } from "./scenarioGuard";
 import { resolveEmptyScene, resolveRecentPersonScene, type EmptyRoomSceneDecision } from "./emptyRoomDecision";
@@ -47,6 +48,15 @@ export function stripJapaneseDescriptionRule(prompt: string): string {
   return prompt.replace(/Write scenario_description in Japanese[^\n]*?always keep that exact time phrase\.?/g, "");
 }
 
+/**
+ * G-26: a scenario BEFORE this frame is the earlier state that led into it (see PAST-SCENE CONTRACT in the prompt),
+ * consistent with HISTORY; never a change that ends in the present ("now", "currently").
+ */
+export const PAST_SCENE_JSON_RULE =
+  "A scenario BEFORE this frame (a past scenario) follows the PAST-SCENE CONTRACT: this frame is the END state and its prediction_prompt describes the EARLIER state that led into it " +
+  "(decide from HISTORY / STATE LEDGER whether the current activity started within its time span: if it was already going on or HISTORY is unclear, a slightly earlier moment of the same activity; only if it is clearly new, reverse the most recent action), " +
+  "written as that state, never as a change that ends in the present (no 'now', 'currently', 'originally ... now', 'then', 'will'), and never a new unrelated action. ";
+
 const JSON_INSTRUCTION =
   "\n\nFIRST decide who is visible and write scene_description. IF NO PERSON is visible in this frame (the room is empty), " +
   "NO scenario may mention any person, people, hands, arms, he, she or they: there is nobody, so describe only changes of objects that are already visible " +
@@ -60,6 +70,7 @@ const JSON_INSTRUCTION =
   '(e.g. "his right hand leaves the keyboard and picks up the paper on the right while his left hand stays on the keyboard"); ' +
   'describe the resulting pose, never an action added on top of the current pose (no bare "also reaches"). ' +
   "Follow the per-scenario direction and time span, and the People and Tone instructions given above (how far before or after this frame each scenario is, how much people appear or move, how calm or dramatic); a new person may enter only when the People instruction allows it, always from a frame edge or door and never in the middle of the scene. In an empty room nobody enters unless the People instruction allows it. " +
+  PAST_SCENE_JSON_RULE +
   "Never change anyone's hairstyle, hair length or hair colour. " +
   "Never write large arm motions (raising both hands or arms overhead, stretching, waving, banzai) unless an operator MAIN EVENT asks for it; only small posture changes, sitting down or standing up, walking and turning are allowed. " +
   "Do not add, duplicate or remove objects. Existing movable furniture or loose items may change position only when the scenario and visible physical support justify it; do not invent a mover, move unrelated objects, or enlarge the amount of movement to hide errors. A dark monitor stays dark; all screen contents and lighting stay unchanged. If an object must move, say it is moved FROM its original spot TO the new one and the original spot becomes empty. " +
@@ -73,7 +84,7 @@ const JSON_INSTRUCTION =
   "Also return a top-level string field foreground_object (next to scene_description): the object that is very close to the camera and large in the frame, described with its REAL size and distance, " +
   "e.g. 'the backrest of an ordinary office chair about 50 cm wide, right in front of the camera'; use an empty string when there is none. " +
   "Likewise, in scene_description describe any such near-camera object by its real-world size, not as a big structure. " +
-  "LANGUAGE: write EVERY text field (prediction_prompt, scenario_description, scene_description) in English only. Begin each scenario_description with its time span in English (e.g. \"30 seconds later,\" or \"2 minutes 30 seconds before,\"). The Japanese version is produced in a separate step. " +
+  "LANGUAGE: write EVERY text field (prediction_prompt, scenario_description, scene_description) in English only. Begin each scenario_description with its time span in English (e.g. \"30 seconds later,\" or \"2 minutes 30 seconds before,\"). A past scenario_description is written in the past tense (e.g. \"30 seconds before, the cup was still on the desk.\"). The Japanese version is produced in a separate step. " +
   "No markdown, no commentary.";
 
 // Context and output budget. The prompt+image is ~2.9k tokens; num_ctx must hold it plus the output.
@@ -300,10 +311,19 @@ export async function planScenariosLocal(args: {
       }
       return { ...x, prediction_prompt: kept || 'Keep the scene exactly as in the input.' };
     });
+    // G-26: a past scene keeps the EARLIER state ("was originally A, now B" -> "A"; no "then/will" tail).
+    list = list.map((x, i) => {
+      if (x.skipped || !isPastDistance(spanDists[i])) return x;
+      const p = pastScenePrediction(x.prediction_prompt);
+      if (p !== x.prediction_prompt) console.error(`[past] scene ${i + 1}: present-result phrasing rewritten to the earlier state`);
+      return { ...x, prediction_prompt: p };
+    });
     const spanned = list.map((x, i) => ({ ...x, scenario_description: x.skipped ? "" : withEnglishSpan(x.prediction_prompt, spanDists[i] ?? 30) }));
     const out = (await translateDisplayTextToJapanese(spanned, args.signal, args.llm,process.env.VLM_SKIP_OVERRIDDEN_TRANSLATIONS==='true'?extrasOverrides:undefined)).map((x, i) => ({
       ...x,
-      scenario_description: withJapaneseSpan(x.scenario_description, spanDists[i] ?? 30),
+      scenario_description: isPastDistance(spanDists[i])
+        ? pastJapaneseText(withJapaneseSpan(x.scenario_description, spanDists[i] ?? 30))
+        : withJapaneseSpan(x.scenario_description, spanDists[i] ?? 30),
     }));
     // Recent person drawn into an empty frame: the display text always names the subject ("人物は…").
     if (args.allowPerson === true && !detectedPerson) {
@@ -819,6 +839,10 @@ Scenario: "${scenario.prediction_prompt} ${scenario.scenario_description}"
  * Replaces scenario_description and scene_now (display text for TD) with Japanese via a short
  * text-only call. prediction_prompt stays English. Falls back to the English text on any failure.
  */
+/** G-26: an item that begins with "... before," describes the EARLIER moment: Japanese past tense, never 今では/現在. */
+export const PAST_TRANSLATION_RULE =
+  'An item whose time span says "before" describes an EARLIER moment: translate it in the Japanese past tense (…ていた／…していた) and never use 今では, 今は or 現在 in it. ';
+
 export async function translateDisplayTextToJapanese(
   scenarios: ScenarioResult[],
   signal?: AbortSignal,
@@ -834,6 +858,7 @@ export async function translateDisplayTextToJapanese(
       outRaw = await llm.text(
         "Translate every string in this JSON from English into natural Japanese. Keep the JSON structure and the same number of items. " +
           'Write a leading time span as Japanese, e.g. "30 seconds later," -> "30秒後、", "2 minutes 30 seconds before," -> "2分30秒前、". ' +
+          PAST_TRANSLATION_RULE +
           'Return ONLY JSON of the form {"scene":"...","items":["..."]}.\n' +
           JSON.stringify(payload),
         signal
@@ -847,6 +872,7 @@ export async function translateDisplayTextToJapanese(
         prompt:
           "Translate every string in this JSON from English into natural Japanese. Keep the JSON structure and the same number of items. " +
           'Write a leading time span as Japanese, e.g. "30 seconds later," -> "30秒後、", "2 minutes 30 seconds before," -> "2分30秒前、". ' +
+          PAST_TRANSLATION_RULE +
           'Return ONLY JSON of the form {"scene":"...","items":["..."]}.\n' +
           JSON.stringify(payload),
         stream: false,
