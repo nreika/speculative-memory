@@ -57,6 +57,7 @@ export interface BrowserOutputsCatalog {
  tdRouting?:BrowserOutputTdRouting;
  fadeBatches?:Record<string,BrowserOutputFadeBatch>;
  currentStatus?:Partial<Record<'now'|'a'|'b'|'c',NonNullable<BrowserDisplaySnapshot['displayStatus']>>>;
+ standIn?:Partial<Record<'a'|'b'|'c',true>>;
  contents:BrowserDisplayContent[];
  current:Partial<Record<'now'|'a'|'b'|'c',string>>;
  sourceScopes:Partial<Record<'actual-past'|'generated-history',string>>;
@@ -168,7 +169,7 @@ export class BrowserOutputsStore {
    }
    const byId=derived.byId;let contents=derived.base;
    const current:BrowserOutputsCatalog['current']={};
-   for(const key of ['now','a','b','c'] as const){const id=raw.current[key];if(id!==undefined){const c=byId.get(id);if(!c||c.sceneKey!==(key==='now'?'now':'gen_'+key)||c.provenance!==(key==='now'?'actual':'generated'))throw Error('Invalid current content');current[key]=id;}}
+   for(const key of ['now','a','b','c'] as const){const id=raw.current[key];if(id!==undefined){const c=byId.get(id);const stand=key!=='now'&&plain(raw.standIn)&&(raw.standIn as any)[key]===true&&c?.sceneKey==='now'&&c?.provenance==='actual';if(!c||(!stand&&(c.sceneKey!==(key==='now'?'now':'gen_'+key)||c.provenance!==(key==='now'?'actual':'generated'))))throw Error('Invalid current content');current[key]=id;}}
    const sourceScopes:BrowserOutputsCatalog['sourceScopes']={};
    for(const key of ['actual-past','generated-history'] as const){const scope=raw.sourceScopes[key];if(scope!==undefined){if(!text(scope))throw Error('Invalid source scope');sourceScopes[key]=scope;}}
    const clocks:BrowserOutputsCatalog['clocks']=Object.create(null);
@@ -189,7 +190,8 @@ export class BrowserOutputsStore {
    if(raw.fadeBatches!==undefined){if(!plain(raw.fadeBatches))throw Error('Invalid fade batches');for(const [key,batch] of Object.entries(raw.fadeBatches)){if(!text(key)||!plain(batch)||batch.captureId!==key||!Number.isSafeInteger(batch.completedAtMs)||batch.completedAtMs<0)throw Error('Invalid fade batch');fadeBatches[key]={captureId:key,completedAtMs:batch.completedAtMs};}}
    const currentStatus:NonNullable<BrowserOutputsCatalog['currentStatus']>={};
    if(plain(raw.currentStatus))for(const key of ['now','a','b','c'] as const){const st=(raw.currentStatus as any)[key];if(plain(st)&&['idle','generating','completed','failed'].includes(st.state as string)){const s=(v:unknown)=>typeof v==='string'?v.slice(0,512):null;currentStatus[key]={state:st.state as any,requestedCaptureId:s(st.requestedCaptureId),displayedCaptureId:s(st.displayedCaptureId),error:s(st.error),userMessage:s(st.userMessage),lastSuccessAtMs:Number.isSafeInteger(st.lastSuccessAtMs)?st.lastSuccessAtMs as number:null};}}
-   const value={contents,current,sourceScopes,clocks,fadeBatches,currentStatus,...(tdRouting?{tdRouting}:{})},result:Pool={value,contents,revision:hash({contents:derived.idsHash,current}),byId,timelines:new Map()};
+   const standIn:NonNullable<BrowserOutputsCatalog['standIn']>={};if(plain(raw.standIn))for(const key of ['a','b','c'] as const)if((raw.standIn as any)[key]===true&&current[key])standIn[key]=true;
+   const value={contents,current,sourceScopes,clocks,fadeBatches,currentStatus,standIn,...(tdRouting?{tdRouting}:{})},result:Pool={value,contents,revision:hash({contents:derived.idsHash,current}),byId,timelines:new Map()};
    if(epoch===this.poolEpoch)this.pool={value:result,expires:this.now()+this.ttl};return result;
   })();
  }
@@ -294,9 +296,10 @@ export class BrowserOutputsStore {
   const view={...desiredView,visible,fadeMode:desiredView.fade?(output.fadeMode??'original'):'none' as BrowserOutputFadeMode,fadeDurationMs:output.fadeDurationMs??800,blackHoldMs:output.blackHoldMs??120,fadeOnImageChange:output.source==='fixed',faceBlur:faceBlur(output.faceBlur)};
   const fadeBatch=content?.captureId?catalog.fadeBatches?.[content.captureId]:undefined;
   // Generating / failed notice for screens that follow the live NOW/A/B/C sources.
+  const standInFor=(['a','b','c'] as const).includes(source as any)&&catalog.standIn?.[source as 'a'|'b'|'c']?source as 'a'|'b'|'c':undefined;
   const displayStatus=['now','a','b','c'].includes(source as string)&&!(output.delaySec>0)?catalog.currentStatus?.[source as 'now'|'a'|'b'|'c']:undefined;
   const scenarioOverride=this.scenarioPreview?.baseRevision===config.revision?{runId:this.scenarioPreview.owner,source:output.source}:undefined;
-  const result={...snapshot,...(scenarioOverride?{scenarioOverride}:{}),clock:{...snapshot.clock,known:clockKnown},output,view,...(fadeBatch?{fadeBatch}:{}),...(displayStatus?{displayStatus}:{}),outputStatus,revision:hash({snapshotRevision:snapshot.revision,clockKnown,output,view,outputStatus,fadeBatch,displayStatus,scenarioOverride})};
+  const result={...snapshot,...(scenarioOverride?{scenarioOverride}:{}),clock:{...snapshot.clock,known:clockKnown},output,view,...(fadeBatch?{fadeBatch}:{}),...(displayStatus?{displayStatus}:{}),...(standInFor?{standInFor}:{}),outputStatus,revision:hash({snapshotRevision:snapshot.revision,clockKnown,output,view,outputStatus,fadeBatch,displayStatus,standInFor,scenarioOverride})};
   if(!this.options.presentSnapshot)return result;
   const presented=await this.options.presentSnapshot(result);
   return {...result,...presented,output:result.output,view:result.view,outputStatus:result.outputStatus};

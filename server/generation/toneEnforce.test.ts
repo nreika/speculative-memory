@@ -119,3 +119,12 @@ test('back view: hands-in-front actions are replaced; similar plans are detected
   assert.ok(planSimilarity(a,a.replace('firmly','slowly'))>=0.7);
   assert.ok(planSimilarity(a,'The person stretches both arms forward and rolls the shoulders.')<0.4);
 });
+
+test('only clear arm / hand / object / whole-body actions on a front view are checked for visibility', async () => {
+  const {actionIsCheckable}=await import('./toneEnforce');
+  assert.equal(actionIsCheckable('The person lifts the bottle with both hands.',false),true);
+  assert.equal(actionIsCheckable('The person stands up from the chair.',false),true);
+  assert.equal(actionIsCheckable('The head tilts slightly to the left, eyes remain focused on the cable.',false),false);
+  assert.equal(actionIsCheckable('The person blinks slowly and nods.',false),false);
+  assert.equal(actionIsCheckable('The person lifts the bottle with both hands.',true),false);
+});

@@ -12,6 +12,7 @@ import {spawn} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 import {createCookieSigner,createLoginLimiter,createPasswordVerifier,cookieHeader,readCookie,safeEqualString,VIEW_COOKIE,CAPTURE_COOKIE,SESSION_MS} from './auth';
 import {remoteCamera as defaultRemote,RemoteFrameError,REMOTE_MAX_FRAME_BYTES,type RemoteCameraStore} from '../remoteCamera';
+import {createSubmitGate,isSubmitRoute} from './submitGate';
 
 type Box={x:number;y:number;width:number;height:number};
 export interface BlurSpec{strengthPx:number;status:string;regions:Box[]}
@@ -127,6 +128,7 @@ export function createPublicGateApp(options:PublicGateOptions){
  const validNext=(value:unknown)=>typeof value==='string'&&value.length<200&&isGatePage(value)?value:'/display/current-now';
  const viewer=(req:express.Request)=>signer.verify(readCookie(req.headers.cookie,VIEW_COOKIE),'view');
  const capturer=(req:express.Request)=>signer.verify(readCookie(req.headers.cookie,CAPTURE_COOKIE),'capture');
+ const submitGate=createSubmitGate({captureToken,signer,limiter,clientIp,upstreamPort,log});
 
  const app=express();app.disable('x-powered-by');app.set('etag',false);
  app.use(async(req,res)=>{
@@ -165,11 +167,11 @@ export function createPublicGateApp(options:PublicGateOptions){
     const cookie=readCookie(req.headers.cookie,CAPTURE_COOKIE)!,last=lastFrameAt.get(cookie)??0;
     if(now()-last<3000)return res.status(429).json({ok:false,error:'At most one frame every 3 s'});
     const body=await readBody(req,REMOTE_MAX_FRAME_BYTES);if(!body)return res.status(413).json({ok:false,error:'Frame too large (2 MB max)'});
-    let image:unknown;try{image=JSON.parse(body.toString('utf8'))?.image;}catch{return res.status(400).json({ok:false,error:'Invalid JSON'});}
+    let image:unknown,clientId:unknown;try{const j=JSON.parse(body.toString('utf8'));image=j?.image;clientId=j?.clientId;}catch{return res.status(400).json({ok:false,error:'Invalid JSON'});}
     const m=typeof image==='string'?/^data:image\/jpeg;base64,([A-Za-z0-9+/]+={0,2})$/.exec(image):null;if(!m)return res.status(400).json({ok:false,error:'image must be a JPEG data URL'});
-    try{const frame=remote.setFrame(Buffer.from(m[1],'base64'));lastFrameAt.set(cookie,now());while(lastFrameAt.size>1000)lastFrameAt.delete(lastFrameAt.keys().next().value!);
+    try{const frame=remote.setFrame(Buffer.from(m[1],'base64'),clientId as string);lastFrameAt.set(cookie,now());while(lastFrameAt.size>1000)lastFrameAt.delete(lastFrameAt.keys().next().value!);
      return res.json({ok:true,receivedAt:new Date(frame.receivedAtMs).toISOString(),selected:remote.selected});}
-    catch(error){return res.status(error instanceof RemoteFrameError?error.status:400).json({ok:false,error:error instanceof Error?error.message:'Invalid frame'});}
+    catch(error){return res.status(error instanceof RemoteFrameError?error.status:400).json({ok:false,error:error instanceof Error?error.message:'Invalid frame',...(error instanceof RemoteFrameError?error.detail:{})});}
    }
    if(method!=='GET'&&method!=='HEAD')return deny(res,405);
    if(route==='/capture/'&&params.has('token')){
@@ -190,6 +192,7 @@ export function createPublicGateApp(options:PublicGateOptions){
    return res.type('html').sendFile(path.join(here,'capture.html'));
   }
 
+  if(isSubmitRoute(route))return submitGate(req,res,route,query,params);
   // The only other POST: viewers report browser-side display problems (timeouts, slow images, ...) to the local log.
   if(route==='/api/display-errors'){
    if(method!=='POST')return deny(res,405);if(query)return deny(res,400);

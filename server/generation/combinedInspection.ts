@@ -42,9 +42,9 @@ export function extraHandPerson(people:unknown):{index:number;hands:number}|null
  return null;
 }
 /** Same rejection path as the people-count failure (ok:false), with defect "extra_hand". */
-export type InspectionDefect='extra_hand'|'framing_drift'|'missing_belongings'|'incoherent_body'|'action_not_shown'|'face_on_back_view'|'duplicate_object';
+export type InspectionDefect='extra_hand'|'framing_drift'|'missing_belongings'|'incoherent_body'|'action_not_shown'|'face_on_back_view'|'duplicate_object'|'person_too_large'|'person_moved';
 /** QA/archive defect type for a rejected pre-publish verdict: its own defect, else the person-integrity failure. */
-const INSPECTION_DEFECTS:readonly string[]=['extra_hand','framing_drift','missing_belongings','incoherent_body','action_not_shown','face_on_back_view','duplicate_object'];
+const INSPECTION_DEFECTS:readonly string[]=['extra_hand','framing_drift','missing_belongings','incoherent_body','action_not_shown','face_on_back_view','duplicate_object','person_too_large','person_moved'];
 export const inspectionDefectType=(defect?:string):InspectionDefect|'fabricated_person'=>defect&&INSPECTION_DEFECTS.includes(defect)?defect as InspectionDefect:'fabricated_person';
 /** missing_belongings (2026-10-19, TSC-003 F004 A/C: the person drawn from behind stood where the chair with the blue
  * backpack and black jacket was, and they vanished or were mostly hidden). The SAME inspection call is asked, per object
@@ -63,6 +63,21 @@ export function withDuplicateObject<T extends {ok:boolean|null;reason:string;def
  if(verdict.ok!==true||duplicate!==true)return verdict;
  return {...verdict,ok:false,defect:'duplicate_object',reason:'duplicate_object: the same object appears twice (the moved object also remains at its old place)'};
 }
+/**
+ * Mechanical duplicate check (2026-10-21): the VLM's duplicateObject flag never fired although held objects were drawn twice.
+ * For every object class NAMED IN THE ACTION the same call counts the objects in the original and in the finished photo;
+ * more in the output than in the original (and at least 2) = the moved object was copied.
+ */
+export const OBJECT_CLASSES=['bottle','mug','cup','bin','laptop','bag','backpack','notebook','phone','box','cable','book','jacket'] as const;
+export const actionObjectClasses=(action?:string):string[]=>action?OBJECT_CLASSES.filter(c=>new RegExp('\\b'+c+'s?\\b','i').test(action)):[];
+export const objectCountsField=(classes:string[])=>classes.length?{objectCounts:{type:'object',properties:Object.fromEntries(classes.map(c=>[c,{type:'object',properties:{original:{type:'integer',minimum:0,maximum:6},output:{type:'integer',minimum:0,maximum:6}},required:['original','output'],additionalProperties:false}])),required:classes,additionalProperties:false}}:{};
+export const objectCountsInstruction=(classes:string[])=>classes.length?` OBJECT COUNTS (objectCounts): for each of these object classes count how many separate objects of that class are visible in IMAGE 1 (the original) and in IMAGE 2 (the finished photo): ${classes.join(', ')}. An object held in a hand counts once, and the same object standing elsewhere counts again.`:'';
+export function withObjectDuplicates<T extends {ok:boolean|null;reason:string;defect?:InspectionDefect}>(verdict:T,counts:unknown,classes:string[]):T {
+ if(verdict.ok!==true||!counts||typeof counts!=='object')return verdict;
+ const doubled=classes.filter(c=>{const row=(counts as any)[c];return row&&Number.isInteger(row.original)&&Number.isInteger(row.output)&&row.output>row.original&&row.output>=2;});
+ if(!doubled.length)return verdict;
+ return {...verdict,ok:false,defect:'duplicate_object',reason:`duplicate_object: the same object appears twice (${doubled.map(c=>`${c}: ${(counts as any)[c].original} -> ${(counts as any)[c].output}`).join(', ')})`};
+}
 export const plannedActionField=(action?:string)=>action&&action.trim()?{plannedActionVisible:{type:'boolean'}}:{};
 export const plannedActionInstruction=(action?:string)=>action&&action.trim()?` PLANNED ACTION (plannedActionVisible): true only if a person in the finished photo is clearly doing this: "${action.trim().replace(/"/g,"'").slice(0,300)}". Judge the pose and gesture actually visible, not the intention; false when the person is not visibly doing it (for example not turned around, not standing, hands not raised).`:'';
 export function withBodyCoherence<T extends {ok:boolean|null;reason:string;defect?:InspectionDefect}>(verdict:T,people:unknown):T {
@@ -71,10 +86,13 @@ export function withBodyCoherence<T extends {ok:boolean|null;reason:string;defec
  if(verdict.ok===false)return {...verdict,reason:verdict.reason.includes('incoherent_body')?verdict.reason:verdict.reason+'; '+note};
  return {...verdict,ok:false,defect:'incoherent_body',reason:note};
 }
-/** Only an otherwise acceptable image can be rejected for a missing action; other defects keep priority. */
-export function withPlannedAction<T extends {ok:boolean|null;reason:string;defect?:InspectionDefect}>(verdict:T,visible:unknown,action?:string):T {
+/**
+ * 2026-10-21 (decision after a QA sample: ~60% of the action_not_shown rejections were wrong and each cost a ~30 s retry):
+ * a planned action that is not visible is only a warn note (actionNotShown), never a rejection or a retry.
+ */
+export function withPlannedAction<T extends {ok:boolean|null;reason:string;defect?:InspectionDefect}>(verdict:T,visible:unknown,action?:string):T&{actionNotShown?:true} {
  if(!action||!action.trim()||visible!==false||verdict.ok!==true)return verdict;
- return {...verdict,ok:false,defect:'action_not_shown',reason:'action_not_shown: the planned action is not visible in the image'};
+ return {...verdict,actionNotShown:true};
 }
 export const MAX_BELONGINGS=6;
 /** Only large personal items count (2026-10-19 18:2x regression: every empty-room scene was rejected over a "blue water
@@ -168,16 +186,18 @@ const handCount=(p:{hands?:unknown;handPositions?:unknown;raisedHands?:unknown;o
 /** frameSource: the frame the output must keep the framing of (the NOW frame); defaults to `source`. Behind-view scenes
  * inspect people against the recent-person frame but must keep the NOW framing, so the caller passes NOW here. */
 /** belongings: objects the source scene lists on its furniture (missing_belongings check; empty = no check). */
-export async function inspectAndCaption(source:string,output:string,expected:number,distance:number,people:PersonInfo[],signal?:AbortSignal,frameSource:string=source,belongings:string[]=[],plannedAction?:string):Promise<CombinedInspectionResult>{
+export async function inspectAndCaption(source:string,output:string,expected:number,distance:number,people:PersonInfo[],signal?:AbortSignal,frameSource:string=source,belongings:string[]=[],plannedActionRaw?:string,checkAction=true):Promise<CombinedInspectionResult>{
+ const plannedAction=checkAction?plannedActionRaw:undefined;
  const bare=(s:string)=>s.match(/^data:image\/[^;]+;base64,(.+)$/)?.[1];
  const original=bare(source),edited=bare(output);if(!original||!edited)throw new Error('Invalid inspection images');
  const pair=expected>1;
+ const dupClasses=actionObjectClasses(plannedActionRaw);
  const objects=belongingsList(belongings);
  const fields={...HAND_COUNT_FIELD,...VISIBLE_PERSON_FIELDS,...BODY_COHERENT_FIELD,sourceIndex:{type:'integer',minimum:-1,maximum:7}};
- const request={model:process.env.VLM_MODEL,images:pair?[original,edited]:[edited],stream:false,think:false,keep_alive:'5m',
-   prompt:(pair?'IMAGE 1 is the original. Inspect ONLY IMAGE 2 as the finished photo. Number original people in IMAGE 1 left-to-right starting at 0; map each actual IMAGE 2 person to their original sourceIndex. Repeat an index if that original person appears twice; use -1 for unmatched or uncertain people. ':'Inspect this SINGLE finished photo. Use sourceIndex 0 for each visible person. ')+
-    'Return JSON with a people array in finished-image left-to-right order; each person has raisedHands, objectHands, otherHands, handPositions, hands, sourceIndex, posture, leftHand and rightHand. Include EVERY actual visible human body, including cropped bodies at the edges; ignore people on screens, posters, chairs and curtains. A raised arm or hand belonging to an already counted body is not another person. Count overlapping humans separately when they have separate bodies; matching clothes do not merge people. An empty room has an empty array. Do not force a particular number of people.' + HAND_COUNT_INSTRUCTION + ' ' + VISIBLE_HAND_INSTRUCTION + BODY_COHERENT_INSTRUCTION + DUPLICATE_OBJECT_INSTRUCTION + plannedActionInstruction(plannedAction) + belongingsInstruction(objects,pair?'IMAGE 2':'the finished photo'),
-   format:{type:'object',properties:{people:{type:'array',maxItems:12,items:{type:'object',properties:fields,required:[...HAND_COUNT_REQUIRED,'sourceIndex','posture','leftHand','rightHand','bodyCoherent'],additionalProperties:false}},...plannedActionField(plannedAction),...DUPLICATE_OBJECT_FIELD,...(objects.length?{objectsVisible:belongingsSchema(objects)}:{})},required:['people','duplicateObject',...(plannedAction&&plannedAction.trim()?['plannedActionVisible']:[]),...(objects.length?['objectsVisible']:[])],additionalProperties:false},options:{temperature:0,num_predict:1024,num_ctx: sharedOllamaContextLength()}};
+ const request={model:process.env.VLM_MODEL,images:pair||dupClasses.length?[original,edited]:[edited],stream:false,think:false,keep_alive:'5m',
+   prompt:(!pair&&dupClasses.length?'IMAGE 1 is the original photo and IMAGE 2 is the finished photo. Inspect ONLY IMAGE 2 for the people: use sourceIndex 0 for each visible person. ':pair?'IMAGE 1 is the original. Inspect ONLY IMAGE 2 as the finished photo. Number original people in IMAGE 1 left-to-right starting at 0; map each actual IMAGE 2 person to their original sourceIndex. Repeat an index if that original person appears twice; use -1 for unmatched or uncertain people. ':'Inspect this SINGLE finished photo. Use sourceIndex 0 for each visible person. ')+
+    'Return JSON with a people array in finished-image left-to-right order; each person has raisedHands, objectHands, otherHands, handPositions, hands, sourceIndex, posture, leftHand and rightHand. Include EVERY actual visible human body, including cropped bodies at the edges; ignore people on screens, posters, chairs and curtains. A raised arm or hand belonging to an already counted body is not another person. Count overlapping humans separately when they have separate bodies; matching clothes do not merge people. An empty room has an empty array. Do not force a particular number of people.' + HAND_COUNT_INSTRUCTION + ' ' + VISIBLE_HAND_INSTRUCTION + BODY_COHERENT_INSTRUCTION + DUPLICATE_OBJECT_INSTRUCTION + objectCountsInstruction(dupClasses) + plannedActionInstruction(plannedAction) + belongingsInstruction(objects,pair?'IMAGE 2':'the finished photo'),
+   format:{type:'object',properties:{people:{type:'array',maxItems:12,items:{type:'object',properties:fields,required:[...HAND_COUNT_REQUIRED,'sourceIndex','posture','leftHand','rightHand','bodyCoherent'],additionalProperties:false}},...plannedActionField(plannedAction),...DUPLICATE_OBJECT_FIELD,...objectCountsField(dupClasses),...(objects.length?{objectsVisible:belongingsSchema(objects)}:{})},required:['people','duplicateObject',...(dupClasses.length?['objectCounts']:[]),...(plannedAction&&plannedAction.trim()?['plannedActionVisible']:[]),...(objects.length?['objectsVisible']:[])],additionalProperties:false},options:{temperature:0,num_predict:1024,num_ctx: sharedOllamaContextLength()}};
  // CPU hand count runs in parallel with the VLM request (one subprocess per image; never rejects).
  const cpu=countHands(output,{signal});
  const frame=alignFrames(frameSource,output,{signal}).catch(()=>noFrame);
@@ -188,7 +208,7 @@ export async function inspectAndCaption(source:string,output:string,expected:num
  if(!Array.isArray(value.people))throw new Error('Combined inspection missing people');
  const cpuResult=await cpu,frameResult=await frame;
  const belongingsFacts=parseBelongings(value,objects);
- const verdict=withPlannedAction(withDuplicateObject(withBodyCoherence(withBelongings(withFraming(withCpuHandCount(withHandCount(parsePeopleIntegrity({sourceCount:expected,outputToSource:value.people.map(p=>p.sourceIndex)},expected),value.people),cpuResult,expected),frameResult),belongingsFacts),value.people),value.duplicateObject),value.plannedActionVisible,plannedAction);
+ const verdict=withPlannedAction(withObjectDuplicates(withDuplicateObject(withBodyCoherence(withBelongings(withFraming(withCpuHandCount(withHandCount(parsePeopleIntegrity({sourceCount:expected,outputToSource:value.people.map(p=>p.sourceIndex)},expected),value.people),cpuResult,expected),frameResult),belongingsFacts),value.people),value.duplicateObject),value.objectCounts,dupClasses),value.plannedActionVisible,plannedAction);
  // The shared per-hand schema distinguishes grips from supported-surface contact in this one observation.
  // Build the displayed words from this same observation, never from the planned action.
  const caption=descriptionFromVisibleFacts(value,distance,true);

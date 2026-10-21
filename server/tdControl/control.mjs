@@ -312,19 +312,30 @@ function render(state){
   if(state.runtime==='native'&&!$('input-set').querySelector('option[value="camera"]'))$('input-set').add(new Option('Live camera','camera'));
   if(state.runtime==='native'&&!$('input-set').querySelector('option[value="remote-device"]'))$('input-set').add(new Option('Remote device (phone)','remote-device'));
   const remote=state.remoteCamera?.selected?state.remoteCamera:null;
+  const camSel=$('input-camera-index'),camIndex=Number.isInteger(state.cameraIndex)?state.cameraIndex:null;
+  if(camIndex!==null&&document.activeElement!==camSel&&!camSel.dataset.touched)camSel.value=String(camIndex);
   $('input-kind').textContent=remote?(remote.state==='fresh'?'REMOTE':'REMOTE · STALE'):replay.active?'TEST REPLAY':'CAMERA';
   const queued=state.pendingInput?.setId||'';
   if(inputSelection===null&&document.activeElement!==$('input-set'))$('input-set').value=queued||(remote?'remote-device':replay.pendingSet||(replay.cycle?'cycle':(replay.setId||(state.runtime==='native'&&!replay.active?'camera':'TSC-001'))));
+  camSel.hidden=$('input-set').value!=='camera';
+  $('release-device').hidden=!remote;
   $('select-input').textContent=queued?'Queued…':'Switch';
   $('select-input').title=queued?`Queued: ${queued} · applied after the current generation (a new Switch replaces it)`:'Switch the input';
-  $('input-detail').textContent=queued?`Queued… ${queued} · applied after the current generation`:remote?(remote.state==='none'?'Remote device · remote camera stale (no frame yet) · live input, writes venue history':`Remote device · last frame ${remote.ageSec} s ago${remote.state==='stale'?' · remote camera stale':''} · live input, writes venue history`):replay.pendingSet?`Switch to ${replay.pendingSet} after the current generation`:replay.active?`${replay.currentFrameId||replay.setId} · loop ${replay.loop||1}`:'Live camera';
-  const library=state.scenarioLibrary.map(item=>item.file).join('|');
+  $('input-detail').textContent=queued?`Queued… ${queued} · applied after the current generation`:remote?(remote.state==='none'?'Remote device · remote camera stale (no frame yet) · live input, writes venue history':`Remote device · ${remote.holderShort?'remote · '+remote.holderShort+' · ':''}last frame ${remote.ageSec} s ago${remote.state==='stale'?' · remote camera stale':''} · live input, writes venue history`):replay.pendingSet?`Switch to ${replay.pendingSet} after the current generation`:replay.active?`${replay.currentFrameId||replay.setId} · loop ${replay.loop||1}`:'Live camera';
+  const library=state.scenarioLibrary.map(item=>item.file+(item.external?':'+item.external.approved:'')).join('|');
   if($('scenario-file').dataset.library!==library){
     const previous=$('scenario-file').value;$('scenario-file').replaceChildren();
-    for(const item of state.scenarioLibrary)$('scenario-file').add(new Option(item.name,item.file));
+    // External submissions (public /submit/): "external · <name> · <time>"; unapproved ones are listed but not selectable.
+    for(const item of state.scenarioLibrary){
+      const option=new Option(item.external?externalLabel(item.external)+(item.external.approved?'':' · not approved'):item.name,item.file);
+      if(item.external&&!item.external.approved){option.disabled=true;option.className='unapproved';}
+      $('scenario-file').add(option);
+    }
     $('scenario-file').dataset.library=library;
-    $('scenario-file').value=state.scenarioLibrary.some(x=>x.file===previous)?previous:state.scenario.file;
+    const selectable=file=>state.scenarioLibrary.some(x=>x.file===file&&(!x.external||x.external.approved));
+    $('scenario-file').value=selectable(previous)?previous:state.scenario.file;
   }
+  renderExternal(state.scenarioLibrary);
   const scenario=state.scenario;
   $('scenario-state').textContent=scenario.state;
   const previewOnly=!!state.settings.scenarioPreview;
@@ -421,16 +432,52 @@ $('recheck-state').onclick=async()=>{
 for(const [id,action] of Object.entries({'run':'generation.resume','pause-generation':'generation.pause','generate':'generation.generate','cancel':'generation.cancel','save-project':'project.save','pause-scenario':'scenario.pause','stop-scenario':'scenario.stop','shuffle':'display.shuffle','reset-layout':'display.reset','show-outputs':'display.show','hide-outputs':'display.hide'}))$(id).onclick=()=>perform(action,{},id==='run'||id==='generate');
 $('play-scenario').onclick=()=>perform('scenario.play',{},true);
 $('load-scenario').onclick=()=>perform('scenario.load',{file:$('scenario-file').value});
-$('input-set').addEventListener('change',()=>{inputSelection=$('input-set').value;});
+$('input-set').addEventListener('change',()=>{inputSelection=$('input-set').value;$('input-camera-index').hidden=inputSelection!=='camera';});
+$('input-camera-index').addEventListener('change',()=>{$('input-camera-index').dataset.touched='1';});
 $('select-input').onclick=async()=>{
   const selected=inputSelection||$('input-set').value;
-  await perform('input.select',{setId:selected});
+  await perform('input.select',selected==='camera'?{setId:selected,cameraIndex:Number($('input-camera-index').value)}:{setId:selected});delete $('input-camera-index').dataset.touched;
   if(latest?.pendingInput?.setId===selected||latest?.replay?.setId===selected||latest?.replay?.pendingSet===selected||(selected==='cycle'&&latest?.replay?.cycle)||(selected==='camera'&&latest?.runtime==='native'&&!latest?.replay?.active&&!latest?.remoteCamera?.selected)||(selected==='remote-device'&&latest?.remoteCamera?.selected)){
     inputSelection=null;render(latest);
   }
 };
+$('release-device').onclick=()=>perform('input.release',{});
 $('apply-layout').onclick=()=>perform('display.layout',{sources:[1,2,3,4].map(i=>$(`route-${i}`).value)});
 $('upload-open').onclick=()=>$('scenario-upload').click();
+// External scenario submissions: Approve / Delete (POST /api/td-control/scenario-submission). Unapproved ones cannot be loaded or played.
+function externalLabel(x){const d=new Date(x.submittedAt);const t=Number.isFinite(d.getTime())?d.toLocaleString('ja-JP',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false}):'';return `external · ${x.name} · ${t}`;}
+function renderExternal(library){
+  let box=$('scenario-external');
+  if(!box){
+    box=document.createElement('details');box.id='scenario-external';box.className='scenario-external';
+    box.innerHTML='<summary id="scenario-external-title"></summary><div><p class="subtle">External submissions (public /submit/). Approve to make one selectable for Load CSV / Play; Delete removes its import folder.</p><ul id="scenario-external-list"></ul></div>';
+    $('scenario-upload').after(box);
+  }
+  const rows=library.filter(item=>item.external).sort((a,b)=>String(b.external.submittedAt).localeCompare(String(a.external.submittedAt)));
+  const key=JSON.stringify(rows.map(r=>[r.file,r.external.approved]));
+  box.hidden=!rows.length;if(box.dataset.key===key)return;box.dataset.key=key;
+  const pending=rows.filter(r=>!r.external.approved).length;
+  $('scenario-external-title').textContent=pending?`External · ${pending} new`:`External · ${rows.length}`;
+  box.classList.toggle('has-pending',pending>0);
+  $('scenario-external-list').replaceChildren(...rows.slice(0,30).map(item=>{
+    const x=item.external,li=document.createElement('li');li.className=x.approved?'approved':'pending';
+    const label=document.createElement('span');label.textContent=externalLabel(x)+' · '+(x.scenarioId||item.name)+(x.approved?' · approved':'');label.title=x.note||'';
+    li.append(label);
+    if(x.note){const note=document.createElement('small');note.textContent=x.note;li.append(note);}
+    const actions=document.createElement('span');actions.className='external-actions';
+    if(!x.approved){const ok=document.createElement('button');ok.type='button';ok.textContent='Approve';ok.onclick=()=>manageExternal('approve',x);actions.append(ok);}
+    const del=document.createElement('button');del.type='button';del.textContent='Delete';del.onclick=()=>manageExternal('delete',x);actions.append(del);
+    li.append(actions);return li;
+  }));
+}
+async function manageExternal(action,x){
+  if(busy||!online)return;
+  if(action==='delete'&&!confirm(`Delete external scenario "${x.name}" (${x.scenarioId})? Its import folder is removed.`))return;
+  busy=true;updateButtons();
+  try{const result=await json(API+'/scenario-submission',{method:'POST',headers:{'Content-Type':'application/json','X-Control-Request':'1'},body:JSON.stringify({action,id:x.id})});notice(result.message||'Done.');}
+  catch(error){notice(error.message,true);}
+  finally{busy=false;updateButtons();refresh();}
+}
 function encode(raw){let s='';for(let i=0;i<raw.length;i+=16384)s+=String.fromCharCode(...raw.subarray(i,i+16384));return btoa(s);}
 $('scenario-upload').onchange=async event=>{
   if(busy||!online||uncertain){event.target.value='';return;}
@@ -488,14 +535,33 @@ async function refreshConeResults(){
   }catch{/* Keep the completed cone; archive reads must not block Each-image updates. */}
   finally{conePolling=false;}
 }
+function setLiveLabel(){const i=latest?.cameraIndex;$('input-preview-label').textContent=Number.isInteger(i)?'Live · cam '+i:'Live';}
+const STREAM_URL=API+'/input-preview/stream';
+let previewStreaming=false,streamBlockedUntil=0;
+function startPreviewStream(image){
+  if(previewStreaming||Date.now()<streamBlockedUntil)return false;
+  previewStreaming=true;
+  image.onerror=()=>{ // 404/409/429/502 or dropped stream: back to 1 s polling, retry the stream after 30 s
+    image.onerror=null;previewStreaming=false;streamBlockedUntil=Date.now()+30000;image.removeAttribute('src');refreshInputPreview();
+  };
+  image.src=STREAM_URL;image.hidden=false;image.alt='Current camera input (live stream)';
+  setLiveLabel();$('input-preview-label').title='Live camera stream';
+  return true;
+}
 async function refreshInputPreview(){
+  if(previewStreaming){
+    // Stream alive: no polling, unless the input is no longer the live camera.
+    if(/^(REMOTE|TEST REPLAY)/.test($('input-kind').textContent||'')){const image=$('input-preview');image.onerror=null;previewStreaming=false;image.removeAttribute('src');}
+    else return;
+  }
   if(previewPolling||document.hidden)return;previewPolling=true;
   try{
     const frame=await json(API+'/input-preview');
+    if(frame.kind==='camera'&&!/^REMOTE/.test($('input-kind').textContent||'')&&startPreviewStream($('input-preview')))return;
     if(typeof frame.dataUrl!=='string'||frame.dataUrl.length>12*1024*1024||!/^data:image\/(jpeg|png);base64,[A-Za-z0-9+/]+=*$/.test(frame.dataUrl))throw Error('Invalid input preview');
     const image=$('input-preview');if(image.getAttribute('src')!==frame.dataUrl)image.src=frame.dataUrl;
     image.hidden=false;image.alt=frame.kind==='replay'?'Current replay input':'Current camera input';
-    $('input-preview-label').textContent=frame.kind==='replay'?'Current replay':'Live';
+    if(frame.kind==='replay')$('input-preview-label').textContent='Current replay';else setLiveLabel();
     $('input-preview-label').title=frame.frameId||'Current camera input';
   }catch{$('input-preview').hidden=true;$('input-preview-label').textContent='Preview unavailable';}
   finally{previewPolling=false;}
@@ -557,8 +623,8 @@ function renderErrors(state){
   const key=JSON.stringify(rows.map(row=>[row.at,row.count,row.message]));
   if(list.dataset.key===key)return;list.dataset.key=key;list.replaceChildren();
   const clock=at=>{const d=new Date(at);return Number.isFinite(d.getTime())?d.toLocaleTimeString('ja-JP',{hour12:false}):'';};
-  for(const row of rows.slice(0,8)){
-    const item=document.createElement('li');item.className='error-row '+(row.kind==='generation'?'is-error':row.kind==='skip'?'is-skip':'is-warning');
+  for(const row of rows.slice(0,50)){
+    const item=document.createElement('li');item.className='error-row '+(row.kind==='generation'?'is-error':row.kind==='skip'?'is-skip':row.kind==='external'?'is-info':'is-warning');
     item.textContent=clock(row.at)+'  '+row.message+(row.count>1?'  ×'+row.count:'');
     list.append(item);
   }

@@ -3,12 +3,13 @@ import {sceneNotes} from './sceneNotes';
 import {operatorWarnings} from './operatorWarnings';
 import path from 'node:path';
 import {createHash,randomUUID} from 'node:crypto';
-import {createOperatorInputClient,type OperatorInputClient} from './operatorInput';
+import {createOperatorInputClient,servePreviewStream,type OperatorInputClient} from './operatorInput';
 import {withRemoteCamera,remoteCamera,remoteStaleMessage,type RemoteCameraStore} from './remoteCamera';
 import {createOperatorState,OperatorStateError} from './operatorState';
 import {createOperatorGeneration,type OperatorGenerateCommand,type OperatorGenerationOptions} from './operatorGeneration';
 import {createOperatorScenario,ScenarioFormatError,type OperatorScenarioOptions} from './operatorScenario';
 import {createOperatorLibrary} from './operatorLibrary';
+import {createScenarioSubmissions} from './scenarioSubmit';
 import {createOperatorScenarioSettings} from './operatorScenarioSettings';
 import type {BrowserDisplaySnapshot} from './browserDisplay';
 import {createScenarioRunArchive,csvSha256,type ScenarioRunArchive,type ScenarioRunTag} from './scenarioRunArchive';
@@ -77,18 +78,21 @@ export function watchSettingsChange(w:{lastKey:string|null;changedAt:number|null
 export async function createNativeOperator(options:Options){
  const initial=JSON.parse(await fs.readFile(path.join(options.directory,'bootstrap-state.json'),'utf8'));
  const remoteStore=options.remoteCamera??remoteCamera,input=withRemoteCamera(options.input??createOperatorInputClient(),remoteStore),library=createOperatorLibrary(path.join(options.directory,'scenarios'),options.python,options.readOutputIds);
+ // External CSV submissions (public /submit/): stored through the same library import, listed unapproved until the operator approves.
+ const submissions=createScenarioSubmissions({root:path.join(options.directory,'scenarios'),library,onSubmitted:s=>operatorWarnings.push('external',`New external scenario: ${s.name} (${s.scenarioId}) · approve it in the scenario list`)});
  let state:ReturnType<typeof createOperatorState>,generation:ReturnType<typeof createOperatorGeneration>;
  let zeroScenesAt:number|null=null;
  let lastSettingsKey:string|null=null,settingsChangedAt:number|null=null,resyncSettingsKey=false,settingsStopping=false;
  let pausedByHold=false,lastAttempt=Date.now(),inputChecked=0,inputSnapshot:any, inputError='',lastError='';
  let schedulerBusy=false,recordingError='',logError='',mismatchError='';
  // input.select received while a capture runs (chain leaves ~1 s idle): applied at the next idle scheduler tick, before the next auto capture.
- let pendingInput:{setId:string;requestId:string;requestedAt:string}|null=null,pendingInputError='';
+ let pendingInput:{setId:string;requestId:string;requestedAt:string;cameraIndex?:number}|null=null,pendingInputError='';
  const selectionFile=path.join(options.directory,'input-selection.json');
  // The last input.select the operator made (persisted so a restart can re-assert it on the bridge); never defaults to anything.
- let storedSelection:string|undefined;
+ let storedSelection:string|undefined,storedCameraIndex:number|undefined;
+ const camIdx=(v:unknown)=>Number.isInteger(v)&&(v as number)>=0&&(v as number)<=3?v as number:undefined;
  const SELECTIONS=['TSC-001','TSC-002','TSC-003','cycle','camera','remote-device'];
- const storeSelection=(setId:string)=>{storedSelection=setId;mismatchError='';void fs.writeFile(selectionFile,JSON.stringify({schema:1,setId,savedAt:new Date().toISOString()})).catch(()=>{});};
+ const storeSelection=(setId:string,cameraIndex?:number)=>{storedSelection=setId;if(setId==='camera'&&cameraIndex!==undefined)storedCameraIndex=cameraIndex;mismatchError='';void fs.writeFile(selectionFile,JSON.stringify({schema:1,setId,...(storedCameraIndex!==undefined?{cameraIndex:storedCameraIndex}:{}),savedAt:new Date().toISOString()})).catch(()=>{});};
  const selectionMatches=(setId:string,bridge:any)=>{
   if(!bridge)return false;
   if(setId==='camera')return bridge.inputKind==='live-camera';
@@ -109,13 +113,13 @@ export async function createNativeOperator(options:Options){
    const raw=JSON.parse(await fs.readFile(selectionFile,'utf8').catch(()=>'null'));
    const setId=raw&&typeof raw.setId==='string'&&SELECTIONS.includes(raw.setId)?raw.setId:undefined;
    if(!setId)return;
-   storedSelection=setId;
+   storedSelection=setId;storedCameraIndex=camIdx(raw.cameraIndex);
    if(setId==='remote-device')return;
    // 2026-10-21: re-selecting restarted the bridge's cycle from TSC-001 at every server restart. When the bridge already
    // shows the stored selection (cycle: replay.cycle, or the same set) nothing is sent.
    const current=await input.readState().catch(()=>null);
    if(selectionMatches(setId,current)){inputSnapshot=current;inputChecked=Date.now();mismatchError='';console.log(`[input] resync skipped: bridge already on ${setId}`);return;}
-   const result=await input.select({setId:setId as any,requestId:randomUUID()});
+   const result=await input.select({setId:setId as any,requestId:randomUUID(),...(setId==='camera'&&storedCameraIndex!==undefined?{cameraIndex:storedCameraIndex}:{})});
    inputSnapshot=result.state;inputChecked=Date.now();
    console.log(`[input] resync: ${setId} → ${result.state?.inputKind}`);
    if(!selectionMatches(setId,result.state)){mismatchError='Input bridge mismatch after resync';console.warn(`[input] resync mismatch: stored ${setId} but bridge reports ${result.state?.inputKind}`);}
@@ -193,24 +197,28 @@ export async function createNativeOperator(options:Options){
   return {mode:'manual',interval:70,phase:active?'generating':request?'requested':'idle',captureId:active?.captureId??request?.captureId??'',source:'native',busyFor:active?(Date.now()-Date.parse(active.startedAt))/1000:0,nextTimerTickIn:null,chainDueIn:null};
  };
  state=createOperatorState({file:path.join(options.directory,'state.json'),initial,
-  runtime:async()=>{const source=await readInput(),settings=await state.readSettings(),selected=await options.readScenes(settings.displayTiming);const currentScenario=scenario.status(),outcome=options.latestOutcome?.(),generationError=lastError||(outcome?.result==='failed'?outcome.errorMessage||'Generation failed':'');return {project:'Speculative Memory',capture:{...capture(),mode:settings.mode,interval:settings.intervalSec,nextTimerTickIn:Math.max(0,settings.intervalSec-(Date.now()-lastAttempt)/1000)},scenario:{...currentScenario,...(!currentScenario.ownsLayout?{previewOnly:settings.scenarioPreview}:{})},scenarioLibrary:await library.list(),remoteCamera:input.remote(),replay:source?.inputKind==='live-camera'?{active:false}:source?.replay??initial.replay??{active:false},history:source?.history??initial.history,cost:options.readCost?.()??initial.cost,sceneText:{now:selected.now?.content?.caption??'',a:selected.a?.content?.caption??'',b:selected.b?.content?.caption??'',past:selected.c?.content?.caption??''},captureScenes:Object.fromEntries(['a','b','c'].map(key=>{const content=selected[key]?.content;const details=content?.captureId&&content.sceneKey&&content.imageUrl?options.readSceneDetails?.({captureId:content.captureId,sceneKey:content.sceneKey,imageUrl:content.imageUrl}):undefined;return ['gen_'+key,{captureId:content?.captureId,sceneKey:content?.sceneKey,imageUrl:content?.imageUrl,distanceSecSigned:content?.distanceSecSigned,...(details?{action:details.predictionPrompt,fullPrompt:details.imagePromptFull,references:details.referenceNote}:{})}];})),pendingInput:pendingInput?{...pendingInput}:null,warnings:operatorWarnings.list(),sceneNotes:sceneNotes.snapshot(),errors:[{operator:'input',message:inputError},{operator:'input',message:mismatchError},{operator:'input',message:pendingInputError},{operator:'native',message:generationError},{operator:'native-recording',message:recordingError},{operator:'native-log',message:logError},...(options.readDisplayErrors?.()??[]).map(message=>({operator:'screen',message}))].filter(error=>error.message)};},
+  runtime:async()=>{const source=await readInput(),settings=await state.readSettings(),selected=await options.readScenes(settings.displayTiming);const currentScenario=scenario.status(),outcome=options.latestOutcome?.(),generationError=lastError||(outcome?.result==='failed'?outcome.errorMessage||'Generation failed':'');return {project:'Speculative Memory',capture:{...capture(),mode:settings.mode,interval:settings.intervalSec,nextTimerTickIn:Math.max(0,settings.intervalSec-(Date.now()-lastAttempt)/1000)},scenario:{...currentScenario,...(!currentScenario.ownsLayout?{previewOnly:settings.scenarioPreview}:{})},scenarioLibrary:submissions.decorate(await library.list()),remoteCamera:input.remote(),cameraIndex:storedCameraIndex??null,replay:source?.inputKind==='live-camera'?{active:false}:source?.replay??initial.replay??{active:false},history:source?.history??initial.history,cost:options.readCost?.()??initial.cost,sceneText:{now:selected.now?.content?.caption??'',a:selected.a?.content?.caption??'',b:selected.b?.content?.caption??'',past:selected.c?.content?.caption??''},captureScenes:Object.fromEntries(['a','b','c'].map(key=>{const content=selected[key]?.content;const details=content?.captureId&&content.sceneKey&&content.imageUrl?options.readSceneDetails?.({captureId:content.captureId,sceneKey:content.sceneKey,imageUrl:content.imageUrl}):undefined;return ['gen_'+key,{captureId:content?.captureId,sceneKey:content?.sceneKey,imageUrl:content?.imageUrl,distanceSecSigned:content?.distanceSecSigned,...(details?{action:details.predictionPrompt,fullPrompt:details.imagePromptFull,references:details.referenceNote}:{})}];})),pendingInput:pendingInput?{...pendingInput}:null,warnings:operatorWarnings.list(),sceneNotes:sceneNotes.snapshot(),errors:[{operator:'input',message:inputError},{operator:'input',message:mismatchError},{operator:'input',message:pendingInputError},{operator:'native',message:generationError},{operator:'native-recording',message:recordingError},{operator:'native-log',message:logError},...(options.readDisplayErrors?.()??[]).map(message=>({operator:'screen',message}))].filter(error=>error.message)};},
   delegate:async(action,data,context)=>{
    if(action==='generation.generate'){const accepted=await submit({requestId:context.requestId,source:'manual'});return {message:'Manual generation accepted · '+accepted.captureId};}
    if(action==='generation.cancel'){const active=generation.status().active;if(active){cancelledRequests.add(active.requestId);while(cancelledRequests.size>128)cancelledRequests.delete(cancelledRequests.values().next().value!);}options.cancel();return {message:'Cancellation requested'};}
    if(action==='generation.pause'){if(context.origin!=='scenario'&&scenario.status().state==='running'){scenario.pause();pausedByHold=true;}return {message:'New generation requests paused'};}
    if(action==='generation.resume'){if(context.origin!=='scenario'&&scenario.ownsLayout())throw new OperatorStateError(409,'Stop the scenario before starting automatic generation');lastAttempt=Date.now();return {message:'Generation enabled'};}
+   if(action==='input.release'){const had=remoteStore.release();return {message:had?'Remote device released':'No remote device was active'};}
    if(action==='input.select'){
     if(!SELECTIONS.includes(String(data.setId)))throw new OperatorStateError(400,'Invalid input selection');
     const setId=String(data.setId);
+    if(data.cameraIndex!==undefined&&(setId!=='camera'||camIdx(data.cameraIndex)===undefined))throw new OperatorStateError(400,'Invalid camera index');
+    const cameraIndex=setId==='camera'?camIdx(data.cameraIndex)??storedCameraIndex:undefined;
     // Busy: queue (a newer request replaces an older one); applied right after the current capture, before the next one.
-    if(options.isBusy()||generation.status().active){pendingInput={setId,requestId:context.requestId,requestedAt:new Date().toISOString()};return {message:`Input change queued: ${setId} (applied after the current generation)`};}
+    if(options.isBusy()||generation.status().active){pendingInput={setId,requestId:context.requestId,requestedAt:new Date().toISOString(),...(cameraIndex!==undefined?{cameraIndex}:{})};return {message:`Input change queued: ${setId} (applied after the current generation)`};}
     pendingInput=null;
-    const result=await input.select({setId:setId as any,requestId:context.requestId});inputSnapshot=result.state;inputChecked=Date.now();pendingInputError='';storeSelection(setId);return {message:'Input selected'};
+    const result=await input.select({setId:setId as any,requestId:context.requestId,...(cameraIndex!==undefined?{cameraIndex}:{})});inputSnapshot=result.state;inputChecked=Date.now();pendingInputError='';storeSelection(setId,cameraIndex);return {message:'Input selected'};
    }
    if(action==='scenario.load'){
     if(scenario.ownsLayout())throw new OperatorStateError(409,'Stop the scenario before loading');
     // Full-file format check: on any error nothing loads, the last good plan stays and the panel shows FORMAT ERROR.
     const file=String(data.file),previous=scenario.status().file;
+    await submissions.assertPlayable(file);
     const checked=await loadFile(file);
     if(previous&&previous!==file)returnFile=previous;
     return {message:checked.formatWarnings.length?`Scenario loaded · WARNING: ${checked.formatWarnings.length} format note${checked.formatWarnings.length===1?'':'s'}`:'Scenario loaded'};
@@ -219,6 +227,7 @@ export async function createNativeOperator(options:Options){
     if(options.isBusy()||generation.status().active)throw new OperatorStateError(409,'A generation is running; pause generation first, then start the scenario');
     // Paused by the operator's generation.pause: Play resumes the same run and clears the hold (as generation.resume would); it is not a restart from 0.
     if(pausedByHold&&scenario.ownsLayout()&&scenario.status().state==='paused'){pausedByHold=false;scenario.pause();lastAttempt=Date.now();return {message:'Scenario resumed · generation enabled',submissionHold:false};}
+    await submissions.assertPlayable(scenario.status().file);
     pausedByHold=false;
     // 2026-10-21: Play while a run owns the outputs is "Restart": stop that run first (restores outputs/settings, closes its archive).
     // Before this, a second Play collided with the still-owned output mapping and came back as an unconfirmed 504.
@@ -256,8 +265,8 @@ export async function createNativeOperator(options:Options){
  async function applyPendingInput(){
   const pending=pendingInput;if(!pending)return;
   try{
-   const result=await input.select({setId:pending.setId as any,requestId:pending.requestId});
-   inputSnapshot=result.state;inputChecked=Date.now();pendingInputError='';storeSelection(pending.setId);
+   const result=await input.select({setId:pending.setId as any,requestId:pending.requestId,...(pending.cameraIndex!==undefined?{cameraIndex:pending.cameraIndex}:{})});
+   inputSnapshot=result.state;inputChecked=Date.now();pendingInputError='';storeSelection(pending.setId,pending.cameraIndex);
    console.log(`[input] queued select applied: ${pending.setId} → ${remoteStore.selected?'remote-device':result.state?.inputKind}`);
   }catch(error){pendingInputError=`Queued input change to ${pending.setId} failed: ${String((error as Error)?.message??error)}`;console.warn('[input] '+pendingInputError);}
   finally{if(pendingInput===pending)pendingInput=null;}
@@ -308,6 +317,12 @@ export async function createNativeOperator(options:Options){
    if(method==='GET'&&route.includes('/outputs')){const all=await outputs(),slot=/\/outputs\/([1-4])$/.exec(route);return {body:slot?all.outputs[Number(slot[1])-1]:all};}
    if(method==='POST'&&route.endsWith('/scenario-upload'))return {body:await library.upload(payload).catch(error=>{if(error instanceof ScenarioFormatError)scenario.recordFormat(String(payload?.csv?.name??''),error);throw error;})};
    if(method==='POST'&&route.endsWith('/action'))return {body:await state.action(payload)};
+   if(method==='POST'&&route.endsWith('/scenario-submission')){
+    const inUse=(file:string)=>file===scenario.status().file||file===playingCsv?.file;
+    if(payload?.action==='approve')return {body:await submissions.approve(payload.id)};
+    if(payload?.action==='delete')return {body:await submissions.remove(payload.id,inUse)};
+    return {status:400,body:{ok:false,error:'Unknown submission action'}};
+   }
    return {status:404,body:{ok:false,error:'Unknown native control route'}};
   }catch(error){const e=error as any;return {status:e.statusCode??e.status??400,body:{ok:false,error:String(e.message??error),...(e.indeterminate?{indeterminate:true}:{}),...(error instanceof ScenarioFormatError?{formatErrors:e.formatErrors,formatWarnings:e.formatWarnings}:{})}};}
  }
@@ -341,5 +356,6 @@ export async function createNativeOperator(options:Options){
    recordingError='';
   })().catch(error=>{recordingError='Live frame recording failed: '+String((error as Error)?.message??error).slice(0,120);console.error('[recording]',error);}).finally(()=>{recordingBusy=false;});
  },250);recordTimer.unref();
- return {inputResync,checkSelection,handle,state,scenario,generation,outputs,scenarioRuns:runs,scenarioRunTag,whenReloaded:()=>reloading,assertCaptureAllowed(captureId:string){const active=generation.status().active;if(!active||active.captureId!==captureId||cancelledRequests.has(active.requestId))throw new OperatorStateError(409,'Generation request was cancelled');},close:()=>{clearInterval(selectionTimer);clearInterval(timer);clearInterval(recordTimer);}};
+ const previewStream=(req:any,res:any)=>servePreviewStream(input,async()=>!remoteStore.selected&&(await readInput())?.inputKind==='live-camera',req,res);
+ return {inputResync,checkSelection,handle,submissions,previewStream,state,scenario,generation,outputs,scenarioRuns:runs,scenarioRunTag,whenReloaded:()=>reloading,assertCaptureAllowed(captureId:string){const active=generation.status().active;if(!active||active.captureId!==captureId||cancelledRequests.has(active.requestId))throw new OperatorStateError(409,'Generation request was cancelled');},close:()=>{clearInterval(selectionTimer);clearInterval(timer);clearInterval(recordTimer);}};
 }

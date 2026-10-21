@@ -16,6 +16,7 @@ import {createBrowserFaceBoxes} from './server/browserFaceBoxes';
 import {createBrowserFacePresentation} from './server/browserFacePresentation';
 import {browserOutputCurrent} from './server/browserOutputCurrent';
 import {installTdBrowserControl} from './server/tdControl/node-proxy.mjs';
+import {createScenarioSubmitRouter} from './server/scenarioSubmit';
 import {createNativeOperator} from './server/nativeOperator';
 import {createScenarioRunArchive,registerScenarioRunRoutes} from './server/scenarioRunArchive';
 import {createOperatorScenarioOutputs} from './server/operatorScenarioOutputs';
@@ -134,7 +135,9 @@ import { obstructedSince, withObstructionNote } from './server/events/obstructio
 import { operatorWarnings } from './server/operatorWarnings';
 import { sceneNotes } from './server/sceneNotes';
 import { withBackViewFace, countFacesWithWorker } from './server/generation/backViewFace';
-import { toneMismatch, rewriteForTone, forceToneWording, plansNearIdentical, planSimilarity, rememberToneAction, recentActionList, backViewForbiddenHit, backViewFallback } from './server/generation/toneEnforce';
+import { behindViewRetryAnchor } from './server/generation/editPrompt';
+import { personFrameShift } from './server/generation/personFrame';
+import { toneMismatch, rewriteForTone, forceToneWording, plansNearIdentical, planSimilarity, rememberToneAction, recentActionList, actionIsCheckable, backViewForbiddenHit, backViewFallback } from './server/generation/toneEnforce';
 import { CaptureEventStore, captureBatchCounts, captureExecutionSource, captureInputIdentity, type CaptureEvent as CaptureEventRow } from './server/events/captureEvents';
 import { registerEventRoutes } from './server/events/routes';
 import { QaService } from './server/qa/qaService';
@@ -875,12 +878,13 @@ async function startServer() {
   let browserFaces:ReturnType<typeof createBrowserFaceBoxes>|undefined;
   const presentBrowserFaces=createBrowserFacePresentation(url=>browserFaces?.inspect(url)??Promise.resolve({status:'unavailable',boxes:[]}));
   if (process.env.TD_CONTROL_BRIDGE_URL && process.env.TD_CONTROL_BRIDGE_TOKEN_FILE) {
-    try { installTdBrowserControl(app,{...(nativeOperatorMode?{controlHandler:async request=>nativeOperator?nativeOperator.handle(request):{status:503,body:{ok:false,error:'Native operator is initializing'}}}:{})}); }
+    try { installTdBrowserControl(app,{...(nativeOperatorMode?{controlHandler:async request=>nativeOperator?nativeOperator.handle(request):{status:503,body:{ok:false,error:'Native operator is initializing'}},streamHandler:(req:any,res:any)=>nativeOperator?nativeOperator.previewStream(req,res):res.status(409).json({error:'not-live'})}:{})}); }
     catch {
       console.error('[td-control] Control initialization failed; generation remains available.');
       app.use(['/control', '/api/td-control'], (_req, res) => res.status(503).json({ok:false,error:'TD browser control is unavailable'}));
     }
   }
+  app.use(createScenarioSubmitRouter(()=>nativeOperator?.submissions)); // external scenario CSV submissions (/submit/, POST /api/scenario-submit); before cors()
   app.use(cors());
   app.use(express.json({ limit: '50mb' }));
   // Browser-side display problems (screens on the tailnet or through the public gate) -> logs/display-errors.jsonl.
@@ -2219,8 +2223,8 @@ const m=/^data:image\/[a-z]+;base64,(.+)$/i.exec(imageDataUrl);const small=m?'da
         const legacyPeople=scenarioPeoplePolicy(sceneMode,people.length||detector.count||0,sceneUnoccupied,drawFromBehind&&!sceneUnoccupied);
         const sceneDrawFromBehind=sceneCast?false:legacyPeople.drawFromBehind;
         const expectedPeople=sceneCast?sceneCast.cast.expectedSceneTotal:legacyPeople.expectedPeople;
-        const sceneReference=sceneCast?undefined:(assetOnly||!unoccupied)&&sceneUnoccupied?undefined:referencePersonImage;
-        const sceneRefs=sceneCast?sceneCast.referenceImages:(assetOnly||!unoccupied)&&sceneUnoccupied?[]:refImages;
+        const sceneReference=sceneCast?undefined:sceneUnoccupied?undefined:referencePersonImage;
+        const sceneRefs=sceneCast?sceneCast.referenceImages:sceneUnoccupied?[]:refImages;
         const sceneReferenceCrops=sceneCast?sceneCast.referenceCrops:referenceCrops;
         const sceneInput=scenarioPrepared?.composition.scenes[sceneKey as ScenarioSceneKey];
         let sceneInputPath:string|undefined;
@@ -2243,7 +2247,8 @@ const m=/^data:image\/[a-z]+;base64,(.+)$/i.exec(imageDataUrl);const small=m?'da
 
         const nowFaces: Promise<number | null> = people.some((p) => p.facing === 'away') ? countFacesWithWorker(image) : Promise.resolve(null);
         const runUnique = async () => generateUniquePeople({
-          plannedAction: scenario.prediction_prompt,
+          sizeAnchor: behindViewRetryAnchor(resolveScenePresence(sceneParams, count)[index], vlmTrace.guard?.scene ?? scenarios[0]?.scene_now),
+          plannedAction: actionIsCheckable(scenario.prediction_prompt, people.some((p) => p.facing === 'away') || recentPersonScene) ? scenario.prediction_prompt : undefined,
           generate: async (attempt, correction) => generateImage({
           originalImageDataUrl: sceneInput?.imageDataUrl??image,
           scenarioElementInstruction:scenarioElementInstruction(scenarioControl,sceneKey as ScenarioSceneKey),
@@ -2284,16 +2289,41 @@ const m=/^data:image\/[a-z]+;base64,(.+)$/i.exec(imageDataUrl);const small=m?'da
             const detection = await detectPeople(candidate, signal);
             const backViewVerdict = await inspectCountedImage({detection,expectedPeople,sourceActors:countSourceActors,
               allowPartOverlap:!sceneCast&&selection.engine==='qwen21-turbo'&&!assetOnly&&!sceneDrawFromBehind&&expectedPeople===1&&people.length===1,
-              inspect:()=>sceneCast?inspectAndCaptionWithReferences(image,candidate,people,sceneCast.references,sceneDistances[index],signal,sceneCast.sourceIdentityImages,belongings,scenario.prediction_prompt):inspectAndCaption(sceneDrawFromBehind && sceneReference ? sceneReference : image, candidate, expectedPeople, sceneDistances[index], people, signal, image, belongings, scenario.prediction_prompt)});
+              inspect:()=>sceneCast?inspectAndCaptionWithReferences(image,candidate,people,sceneCast.references,sceneDistances[index],signal,sceneCast.sourceIdentityImages,belongings,actionIsCheckable(scenario.prediction_prompt, people.some((p) => p.facing === 'away') || recentPersonScene) ? scenario.prediction_prompt : undefined):inspectAndCaption(sceneDrawFromBehind && sceneReference ? sceneReference : image, candidate, expectedPeople, sceneDistances[index], people, signal, image, belongings, scenario.prediction_prompt, actionIsCheckable(scenario.prediction_prompt, people.some((p) => p.facing === 'away') || recentPersonScene))});
             // Mechanical back-view check: a faceless (back view) original must not get a face in the output.
             // Identity (who is who) cannot be judged from behind: a back view is not rejected for it when the count is right.
             let judged: any = backViewVerdict;
             // Identity (who is who) is judged by a small VLM from tiny faces; it is a warn, never a rejection, as long as the count is right
             // and nobody is drawn twice (duplicates stay rejected).
             const mapped: number[] = Array.isArray(judged?.outputToSource) ? judged.outputToSource.filter((v: number) => v >= 0) : [];
-            if (judged?.ok === false && !judged.defect && /identity or uniqueness mismatch/.test(String(judged.reason ?? '')) && Array.isArray(judged.outputToSource) && judged.outputToSource.length === expectedPeople && new Set(mapped).size === mapped.length) {
+            const otherDefect = /(incoherent_body|framing_drift|extra_hand|duplicate_object|action_not_shown|face_on_back_view|missing_belongings)/.test(String(judged?.reason ?? ''));
+            // An empty-room source (nobody in NOW: the recently seen person is drawn) has nobody to match against: no identity check at all.
+            const emptySource = people.length === 0;
+            if (judged?.ok === false && !judged.defect && !otherDefect && /identity or uniqueness mismatch/.test(String(judged.reason ?? '')) && (emptySource || (Array.isArray(judged.outputToSource) && judged.outputToSource.length === expectedPeople && new Set(mapped).size === mapped.length))) {
               sceneNotes.add(captureId, sceneKey.slice(-1).toUpperCase(), `同一性の判定が合わなかった（outputToSource=${JSON.stringify(judged.outputToSource)}）が、人数は合い重複も無いため却下しない`, 'warn');
               judged = { ...judged, ok: true, reason: 'identity not judged for a back view' };
+            }
+            // Position / size check (NOW has people): the single person must stay where they are and as big as they are in NOW.
+            if (judged?.ok === true && people.length === 1 && expectedPeople === 1 && sourcePeopleDetection?.persons?.length === 1 && Array.isArray((detection as any)?.persons) && (detection as any).persons.length === 1) {
+              try {
+                const sd = imageSize(decodeImageDataUrl(image).buffer), od = imageSize(decodeImageDataUrl(candidate).buffer);
+                const why = sd && od ? personFrameShift(sourcePeopleDetection.persons[0].box, sd, (detection as any).persons[0].box, od) : null;
+                if (why) {
+                  sceneNotes.add(captureId, sceneKey.slice(-1).toUpperCase(), `人物の位置・大きさがNOWと違う（${why}）→ 作り直し`, 'warn');
+                  judged = { ...judged, ok: false, defect: 'person_moved', reason: `person_moved: ${why}` };
+                }
+              } catch { /* geometry is best effort */ }
+            }
+            // Size check (empty-room recent-person scenes): the person's box must fit the scene's Presence (low Presence = small, far away).
+            if (judged?.ok === true && people.length === 0 && !sceneUnoccupied && Array.isArray((detection as any)?.persons) && (detection as any).persons.length) {
+              const presenceHere = resolveScenePresence(sceneParams, count)[index];
+              const cap = presenceHere < 0.35 ? 0.4 : presenceHere < 0.7 ? 0.6 : 1;
+              const dims = imageSize(decodeImageDataUrl(candidate).buffer);
+              const tallest = dims ? Math.max(...(detection as any).persons.map((p: any) => (Number(p.box?.[3]) - Number(p.box?.[1])) / dims.height)) : 0;
+              if (cap < 1 && tallest > cap) {
+                sceneNotes.add(captureId, sceneKey.slice(-1).toUpperCase(), `Presence ${presenceHere.toFixed(2)} なのに人物が大きすぎる（画面高の${Math.round(tallest * 100)}% > ${Math.round(cap * 100)}%）→ 作り直し`, 'warn');
+                judged = { ...judged, ok: false, defect: 'person_too_large', reason: `person_too_large: the person fills ${Math.round(tallest * 100)}% of the frame height (limit ${Math.round(cap * 100)}% at Presence ${presenceHere.toFixed(2)})` };
+              }
             }
             return people.some((p) => p.facing === 'away') && !sceneCast ? withBackViewFace(judged, nowFaces, candidate) : judged;
           },
@@ -2324,8 +2354,8 @@ const m=/^data:image\/[a-z]+;base64,(.+)$/i.exec(imageDataUrl);const small=m?'da
         let generated = await runUnique();
         // A CALM scene (Tone < 0.15, "nothing changes") that only failed the framing check is published as the NOW frame itself:
         // nothing changes, so the photo is the picture, and the screen is not left on a minutes-old image.
-        if ('defect' in generated && generated.defect === 'framing_drift' && toneAt(sceneParams, index) < 0.15 && !assetOnly && image) {
-          sceneNotes.add(captureId, String.fromCharCode(65 + index), '構図ずれ(framing_drift)で却下が続いたため、Tone 0(変化なし)なので元の画像(NOW)をそのまま出した', 'info');
+        if ('defect' in generated && ((generated.defect === 'framing_drift' && toneAt(sceneParams, index) < 0.15) || people.length === 0) && !assetOnly && image) {
+          sceneNotes.add(captureId, String.fromCharCode(65 + index), generated.defect === 'framing_drift' && people.length > 0 ? '構図ずれ(framing_drift)で却下が続いたため、Tone 0(変化なし)なので元の画像(NOW)をそのまま出した' : `無人の部屋の場面が検査で不合格（${generated.defect}）のまま続いたため、画面が古いままにならないよう元の画像(NOW=無人の部屋)を出した（人が出ないのも自然）`, 'info');
           generated = { image, verdict: { ...(generated.verdict as any), ok: true }, attempts: generated.attempts } as any;
         }
         // 2026-10-21: two rejections of the same scene must not leave the screen stale: one more try with a safe in-place arm /
@@ -2353,6 +2383,7 @@ const m=/^data:image\/[a-z]+;base64,(.+)$/i.exec(imageDataUrl);const small=m?'da
         const dataUrl = generated.image;
         {const fr=(generated.verdict as any)?.observationFacts?.framing;if(fr&&(fr.status!=='aligned'&&fr.status!=='no-alignment'?true:(Math.abs((fr.scale??1)-1)>0.03||Math.abs(fr.dx??0)>0.02||Math.abs(fr.dy??0)>0.02)))sceneNotes.add(captureId,String.fromCharCode(65+index),`構図の検査: ${fr.status==='aligned'?`枠がややずれた（拡大率${(fr.scale??1).toFixed(3)} / dx ${(fr.dx??0).toFixed(3)} / dy ${(fr.dy??0).toFixed(3)}）`:`枠のずれ検査ができなかった（${fr.status}）`}`,'warn');}
         {const bc=((generated.verdict as any)?.observationFacts?.people??[]).map((p:any)=>p.bodyCoherent);if(bc.length)sceneNotes.add(captureId,String.fromCharCode(65+index),`検査(VLM)の体の整合 bodyCoherent: ${bc.map((v:any)=>v===true?'OK':v===false?'NG':'未回答').join(' / ')}`,'info');}
+        if ((generated.verdict as any)?.actionNotShown) sceneNotes.add(captureId, String.fromCharCode(65 + index), '計画した動作が画像で確認できなかった（却下・作り直しはせず、字幕は計画のまま公開）', 'warn');
         {const missing=(generated.verdict as any)?.observationFacts?.belongings?.missing;if(Array.isArray(missing)&&missing.length)sceneNotes.add(captureId,String.fromCharCode(65+index),`持ち物が見えなくなった（却下せず公開）: ${missing.join('、')}`,'warn');}
         const executedImageModel=imageTrace.assetOnlyExecution?.modelExecuted===false?'cpu asset composition (no image model executed)':sceneImageModel;
         ensureActive();

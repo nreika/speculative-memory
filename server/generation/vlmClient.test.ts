@@ -194,3 +194,8 @@ test('caption clean-up: a dangling clause at the end is dropped', async () => {
   assert.equal(fixJapaneseCaption('30秒前、その人の手はケーブルを握っているが、姿勢はややリラックスしており、頭は。'),'30秒前、その人の手はケーブルを握っているが、姿勢はややリラックスしており。');
   assert.equal(fixJapaneseCaption('30秒後、両腕を前に伸ばす。'),'30秒後、両腕を前に伸ばす。');
 });
+
+test('caption clean-up: Chinese connectors are replaced', async () => {
+  const {fixJapaneseCaption}=await import('./vlmClient');
+  assert.equal(fixJapaneseCaption('箱を取る的同时、両手で持つ。'),'箱を取ると同時に、両手で持つ。');
+});

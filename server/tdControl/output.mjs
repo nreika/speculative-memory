@@ -85,7 +85,8 @@ function renderNotice() {
   if(/unavailable/.test(blur)&&visible&&reportedBlur!==visible.id){reportedBlur=visible.id;reportDisplayError({kind:'face-blur-unavailable',detail:String(visible.id).slice(0,80)});}
   // 'no face detected' is only information: it yields to loading / generating notices; 'unavailable' is a problem and outranks them.
   const info = /no face/i.test(blur) ? blur : '';
-  const rendered = errorNotice||(info?'':blur)||loading||displayStatusMessage(latest?.displayStatus, visible)||info;
+  // 'no face detected' is neither an error nor news: no badge for it on the screens (the server log has it).
+  const rendered = errorNotice||(info?'':blur)||loading||displayStatusMessage(latest?.displayStatus, visible);
   if(el.connection.textContent!==rendered)el.connection.textContent = rendered;
   el.connection.hidden = !rendered;
 }
@@ -101,6 +102,7 @@ function tick() {
   if (visible && clock) {
     const label = clock.known===false||visible.provenance==='uploaded'?temporalLabel(visible,0,false):visible.scope && visible.scope !== clock.scope ? {kind:'unknown',text:'Showing the previous scope image'} : temporalLabel(visible, worldTime(clock, clockAt, performance.now()));
     document.body.dataset.kind = label.kind;
+    if (latest?.standInFor) { const L = String(latest.standInFor).toUpperCase(); label.text = `${L} · NOW (waiting for ${L})`; }
     document.body.dataset.scene = visible.provenance==='actual'?'now':(/^gen_([abc])$/.exec(visible.sceneKey||'')||[])[1]||'';
     el.badge.textContent = label.text;
   }

@@ -850,6 +850,7 @@ export const CAPTION_GLOSSARY =
   'Glossary: "with their back to the camera" -> 背を向けて (never カメラの背中); "leans forward" -> 前かがみになる; "stretches" -> 伸びをする; "blinks" -> まばたきをする; "rolls the shoulders" -> 肩を回す; "reaches to the side" -> 横へ手を伸ばす. Write ONE short natural sentence; translate every English word, never leave Latin words in the sentence. ';
 const CAPTION_FIXES: Array<[RegExp, string]> = [
   [/カメラの背中を向いて/g, '背を向けて'], [/カメラに背中を向けて/g, '背を向けて'], [/カメラの背中/g, '背中'],
+  [/的同时/g, 'と同時に'], [/同时/g, '同時に'], [/股上/g, '膝の上'],
   [/\bblinks?\b/gi, 'まばたき'], [/\bblinking\b/gi, 'まばたき'],
 ];
 /** Mechanical clean-up of a translated caption (glossary leftovers); never changes a clean Japanese sentence. */
@@ -911,7 +912,7 @@ export async function translateDisplayTextToJapanese(
     if (!Array.isArray(items) || items.length !== subset.items.length) throw new Error("item count mismatch");
     const descriptions=subset.restore(items).map((d)=>typeof d==='string'?(retried&&requireJapaneseCaptions?fixJapaneseCaption(d).replace(/[A-Za-z]{4,}/g,'').replace(/\s{2,}/g,' '):fixJapaneseCaption(d)):d);
     // 2026-10-21: captions are always Japanese. A translation that came back with no Japanese at all (or failed, below) is retried once.
-    if(!retried&&requireJapaneseCaptions&&(descriptions.some((d,i)=>typeof d==='string'&&d.trim()&&(/[A-Za-z]{5,}/.test(d)||!/[\u3040-\u30ff\u4e00-\u9fff]/.test(d))&&!displayOverrides.has(i))||(typeof out?.scene==='string'&&out.scene.trim()&&!/[぀-ヿ一-鿿]/.test(out.scene)))){
+    if(!retried&&requireJapaneseCaptions&&(descriptions.some((d,i)=>typeof d==='string'&&d.trim()&&(/[A-Za-z]{5,}/.test(d)||/[时这个们说为进还对关开动头问间门机场]/.test(d)||!/[\u3040-\u30ff\u4e00-\u9fff]/.test(d))&&!displayOverrides.has(i))||(typeof out?.scene==='string'&&out.scene.trim()&&!/[぀-ヿ一-鿿]/.test(out.scene)))){
       console.warn('vlmClient: translation returned non-Japanese text; retrying once');
       return translateDisplayTextToJapanese(scenarios,signal,llm,displayOverrides,true);
     }

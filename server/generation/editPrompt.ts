@@ -8,7 +8,7 @@
  */
 import type { PersonInfo } from "./peopleDescribe";
 import { spanWords, type PastContinuityVerdict } from "./pastScene";
-import { uniqueActionPerson } from "./fidelity";
+import { uniqueActionPerson, withoutLightingChanges } from "./fidelity";
 import { isRelocationAction } from "./compactPeople";
 
 /** Room sentence that follows the rulebook framing anchor. */
@@ -23,8 +23,15 @@ const period = (s: string) => (/[.!?]$/.test(s) ? s : `${s}.`);
 export const isAway = (p?: Pick<PersonInfo, "facing">) => /\b(?:away|back)\b/i.test(p?.facing ?? "");
 export const isSeated = (p?: Pick<PersonInfo, "pose">) => /\b(?:sit|sits|sitting|seated)\b/i.test(p?.pose ?? "");
 /** A person the frame edge cuts: they cannot be relocated without inventing the missing half. */
-export const isEdgeCropped = (p?: Pick<PersonInfo, "position" | "pose">) =>
-  /\b(?:edge|cut off|cropped|partially|partial)\b/i.test(`${p?.position ?? ""} ${p?.pose ?? ""}`);
+export const isEdgeCropped = (p?: Pick<PersonInfo, "position" | "pose"> & { headBox?: PersonInfo["headBox"] }) => {
+  if (/\b(?:edge|cut off|cropped|partially|partial)\b/i.test(`${p?.position ?? ""} ${p?.pose ?? ""}`)) return true;
+  // head_box is 0..1000 of the frame: a head at the border means the body is cut by the image edge.
+  const b = p?.headBox;
+  if (!b || b.length !== 4) return false;
+  // The shoulders reach about one head width beyond the head (QA 14:04: head at x 75-215, arm cut by the left edge).
+  const w = Math.max(1, b[2] - b[0]);
+  return b[0] <= w || 1000 - b[2] <= w || b[1] <= 10;
+};
 
 /** Words that ask for a face, eyes, gaze, mouth or expression: impossible (and harmful) for a person seen from behind. */
 export const FACE_WORDS =
@@ -87,11 +94,22 @@ export function personLabel(p: PersonInfo): string {
   return p.clothes?.trim() ? `the person in the ${p.clothes.trim().replace(/^(?:a|an|the)\s+/i, "")}` : `the person at the ${p.position || "original place"}`;
 }
 
+/** The visible pose beyond seated/standing ("hands behind head"), so a small action keeps it (QA 14:16). */
+function posePhrase(p: PersonInfo): string {
+  const rest = (p.pose ?? "").replace(/\b(?:seated|sitting|sits|standing|stands)\b(?:\s+(?:in|on|at)\s+(?:a|the)\s+(?:chair|desk|seat))?/gi, "").replace(/^[\s,;]+|[\s,;.]+$/g, "").replace(/\s+/g, " ");
+  return rest && rest.length <= 80 ? `in image1 ${rest}` : "";
+}
+
+/** No arm, hand, torso or position change in the action: only the face or head moves (blink, gaze, small head turn). */
+const BODY_ACTION = /\b(?:arms?|hands?|fingers?|elbows?|shoulders?|torso|body|legs?|feet|foot|stands?|standing|sits?|sitting|leans?|leaning|reach\w*|lift\w*|rais\w*|lower\w*|stretch\w*|pick\w*|grasp\w*|tak(?:e|es|ing)|grab\w*|pull\w*|push\w*|put\w*|plac\w*|walk\w*|step\w*|turns?\s+(?:the\s+)?(?:chair|body)|typ\w*|writ\w*|drink\w*|eat\w*|hold\w*|open\w*|clos\w*|wav\w*|point\w*)\b/i;
+export const isStillAction = (action: string) => !!action.trim() && !BODY_ACTION.test(action);
+
 function personClause(p: PersonInfo): string {
   const bits = [
     personLabel(p),
     p.position ? `${isSeated(p) ? "seated " : ""}at the ${p.position.replace(/^the\s+/i, "")}` : isSeated(p) ? "seated" : "",
     facingPhrase(p),
+    posePhrase(p),
     // Which hand is left out: the action may free a hand or put the object down (no grip commitment).
     p.holding ? `in image1 holding ${p.holding.replace(/\s+(?:in|with)\s+(?:the\s+|their\s+)?(?:both|left|right|one|two)\s+hands?\b/gi, "")}` : "",
   ].filter(Boolean);
@@ -121,7 +139,8 @@ export function temporalSentence(spanSec: number, continuity?: PastContinuityVer
     return `This is ${span} later: ${what}.`;
   }
   const what =
-    a <= 45
+    a <= 45 && emptyRoom ? "a slightly earlier moment of the same room"
+    : a <= 45
       ? continuity === "new" ? "the moment just before the latest change seen in image1"
         : continuity === "ongoing" ? "the same activity one step earlier"
         : "a slightly earlier moment of the same activity"
@@ -137,12 +156,19 @@ export function temporalSentence(spanSec: number, continuity?: PastContinuityVer
 const TONE_PEOPLE = [
   "Amount of movement: a small natural movement.",
   "Amount of movement: a modest natural movement of a hand, the head or the shoulders.",
-  "Amount of movement: a clear, ordinary everyday movement; the posture visibly changes in place (leaning in, turning on the chair or reaching out).",
-  "Amount of movement: a big but ordinary everyday movement, as a real person would do in this room; the whole posture clearly changes in place, for example leaning far back in the chair, half standing up, turning the chair to another direction or stretching both arms forward.",
+  "Amount of movement: a clear, ordinary everyday movement; the posture visibly changes in place ({mid}).",
+  "Amount of movement: a big but ordinary everyday movement, as a real person would do in this room; the whole posture clearly changes in place, for example {big}.",
 ];
-export function toneSentence(tone: number): string {
+/** Examples follow the actor's posture (QA 14:00: chair examples next to a standing person eating). */
+const TONE_EXAMPLES = {
+  seated: { mid: "leaning in, turning on the chair or reaching out", big: "leaning far back in the chair, half standing up, turning the chair to another direction or stretching both arms forward" },
+  standing: { mid: "leaning in, turning the upper body or reaching out", big: "bending forward, turning the whole body, shifting the weight to one leg or stretching both arms forward" },
+  any: { mid: "leaning in, turning the upper body or reaching out", big: "leaning far back, turning the whole body or stretching both arms forward" },
+};
+export function toneSentence(tone: number, posture: "seated" | "standing" | "any" = "seated"): string {
   const t = Number.isFinite(tone) ? Math.min(1, Math.max(0, tone)) : 0.3;
-  return TONE_PEOPLE[t < 0.25 ? 0 : t < 0.5 ? 1 : t < 0.75 ? 2 : 3];
+  const ex = TONE_EXAMPLES[posture];
+  return TONE_PEOPLE[t < 0.25 ? 0 : t < 0.5 ? 1 : t < 0.75 ? 2 : 3].replace("{mid}", ex.mid).replace("{big}", ex.big);
 }
 
 /** Presence 0..1 = how much the person is present in the picture (never adds a person). */
@@ -182,7 +208,22 @@ export function actionActor(action: string, people: PersonInfo[]): PersonInfo | 
   return owners.length === 1 ? owners[0] : undefined;
 }
 
+/** "The person ..." with 2+ people and no clothing or object clue: the first described person acts (never "The person" alone). */
+export function resolveActor(action: string, people: PersonInfo[]): PersonInfo | undefined {
+  const generic = /^(?:the|a)\s+person\b(?!\s+(?:in|wearing|on|at)\b)/i.test(action);
+  return actionActor(action, people) ?? (people.length > 1 && generic ? people[0] : undefined);
+}
+
 /** The action stated once, made possible for the actor (back view, seated, edge) and naming the actor with 2+ people. */
+/** QA 14:04: "grasps the blue water bottle" drew a second bottle in the hand. Name the object as the one from its spot. */
+export function movedObjectSentence(action: string): string {
+  const m = lower(action).match(/\b(?:picks?\s+up|picking\s+up|grasps?|grasping|takes?|taking|grabs?|grabbing|lifts?|lifting|pulls?|pulling|reaches?\s+for|reaching\s+for)\s+((?:the|a|an|their|his|her)\s+(?:[\w-]+\s+){0,3}?[\w-]+)(?=\s+(?:from|off|on|in|at|with|to|and|while|then)\b|[,.;]|$)/i);
+  if (!m) return "";
+  const obj = m[1].replace(/^(?:a|an|their|his|her)\s+/i, "the ");
+  if (/\b(?:hand|arm|head|chair|desk|table|object|item|thing)s?$/i.test(obj)) return "";
+  return `${cap(obj)} in the hand is the same one that was on the desk; its old spot is now empty.`;
+}
+
 /** peopleIntegrity's retry correction is appended to the action (server.ts); its sentences start with these fixed openings. */
 const CORRECTION_START = /\s+(?=The requested action must be clearly visible in the pose:|Keep the exact framing, scale and rotation|Draw each person as ONE coherent body|The person is seen from behind: keep|Each person has exactly two hands and two arms|No person may appear anywhere|Render each original individual exactly once|Every bag, jacket and personal item on the furniture must|The [^.]{1,120} must remain fully visible exactly where)/;
 /** Splits the planned action from an appended retry correction; the correction's restatement of the action is dropped. */
@@ -196,10 +237,10 @@ export function splitCorrection(text: string): { action: string; correction: str
 export const withoutActionRestatement = (action: string) => splitCorrection(action).action;
 
 export function coherentAction(action: string, people: PersonInfo[], spanSec = 0): string {
-  let a = withoutActionRestatement(action) || "The people keep their poses.";
+  // QA 14:42: "takes a visible object" made the model sweep an arm at nothing; a generic object is dropped, the reach stays.
+  let a = withoutActionRestatement(action).replace(/\s*,?\s*(?:and\s+)?(?:takes?|taking|picks?\s+up|grabs?|grabbing)\s+(?:a|an|some)\s+(?:visible\s+|nearby\s+|small\s+)?(?:object|item|thing)s?\b/gi, "") || "The people keep their poses.";
   // "The person ..." with 2+ people and no clothing or object clue: the first described person acts (never "The person" alone).
-  const generic = /^(?:the|a)\s+person\b(?!\s+(?:in|wearing|on|at)\b)/i.test(a);
-  const actor = actionActor(a, people) ?? (people.length > 1 && generic ? people[0] : undefined);
+  const actor = resolveActor(a, people);
   if (Math.abs(spanSec) <= SHORT_SPAN_SEC) a = physicallyPossibleAction(a, actor);
   if (people.length > 1 && actor && /^(?:the|a)\s+person\b(?!\s+(?:in|wearing)\b)/i.test(a)) a = a.replace(/^(?:the|a)\s+person\b/i, cap(personLabel(actor)));
   const backView = actor ? isAway(actor) : people.some(isAway);
@@ -220,7 +261,7 @@ export function referenceSentence(people: PersonInfo[], references?: Array<numbe
 
 /** World rule (user, 2026-10-21): anything seen in this room's recent footage may appear; held movable objects may be put down. */
 export const WORLD_RULE =
-  "Objects seen earlier in this room may appear and held movable objects may be put down or moved, but nothing that was never in this room, and no duplicate copy of any person or object: an object that moves (desk to hand, hand to desk) is gone from its old place.";
+  "Objects seen earlier in this room may appear and held movable objects may be put down or moved, but nothing that was never in this room, and no duplicate copy of any person or object: a held or moved object is the existing one (desk to hand, hand to desk) and is gone from its old place.";
 
 export function constraintSentences(count: number, people: PersonInfo[]): string {
   const n = count === 1 ? "Exactly one person is" : `Exactly ${count} people are`;
@@ -232,8 +273,19 @@ export function constraintSentences(count: number, people: PersonInfo[]): string
 /** The whole prompt for a scene with its original people (the normal occupied path). */
 export function composeCoherentEdit(x: CoherentEditInput): string {
   const count = x.personCount && x.personCount > 0 ? x.personCount : Math.max(1, x.people.length);
+  // QA 13:51: a person cut off at the left edge was re-centred in every scene. Short spans pin the frame position.
+  const short = Math.abs(x.spanSec) <= SHORT_SPAN_SEC;
+  const edge = x.people.filter((p) => isEdgeCropped(p));
+  const edgeClause = !edge.length ? ""
+    : x.people.length === 1 ? ", still cut off by the image edge as in image1"
+    : `; ${edge.map(personLabel).join(" and ")} ${edge.length > 1 ? "stay" : "stays"} cut off by the image edge as in image1`;
+  const pin = !short || !x.people.length ? ""
+    : ` ${x.people.length > 1 ? "Each person keeps" : "The person keeps"} the ${edge.length ? "exact same position and size" : "same place"} in the frame${edgeClause}; only the described body parts move.`;
+  const actor = resolveActor(lower(splitCorrection(x.action).action), x.people);
+  const still = x.people.length > 0 && isStillAction(splitCorrection(x.action).action);
+  const posture = actor ? (isSeated(actor) ? "seated" : "standing") : x.people.length && x.people.every(isSeated) ? "seated" : "any";
   const who = x.people.length
-    ? `${count === 1 ? "There is one person" : `There are ${count} people`}: ${x.people.map(personClause).join("; ")}.`
+    ? `${count === 1 ? "There is one person" : `There are ${count} people`}: ${x.people.map(personClause).join("; ")}.${pin}`
     : `Keep the ${count === 1 ? "person" : `${count} people`} already in image1 in their places.`;
   const parts = [
     (x.lead ?? "") + (x.anchor ?? EDIT_ANCHOR),
@@ -241,7 +293,10 @@ export function composeCoherentEdit(x: CoherentEditInput): string {
     who,
     referenceSentence(x.people, x.references),
     coherentAction(x.action, x.people, x.spanSec),
-    x.tone !== undefined ? toneSentence(x.tone) : "",
+    movedObjectSentence(splitCorrection(x.action).action),
+    // A face/head-only action (blink, gaze) pins the body; a "big movement" sentence would contradict it.
+    still ? "Everything except the described head and face movement holds exactly the same pose as in image1; the hands and arms stay where they are." : "",
+    x.tone !== undefined ? toneSentence(still ? 0 : x.tone, posture) : "",
     presenceSentence(x.presence, count),
     constraintSentences(count, x.people),
   ];
@@ -249,14 +304,30 @@ export function composeCoherentEdit(x: CoherentEditInput): string {
   return parts.filter(Boolean).join(" ") + (fix ? " Fix from the previous attempt: " + fix : "") + (x.tail ?? "");
 }
 
-/** Size and place of the recent person drawn from behind, from Presence (never close to the camera). */
-export function behindViewPlacementByPresence(presence: number): string {
+/** A concrete far spot that exists in this room (scene text, English or Japanese); the edit model follows places, not sizes. */
+export function farAnchor(scene?: string): string {
+  const t = scene ?? "";
+  if (/shel(?:f|ves)|rack|棚/i.test(t)) return "by the far shelves at the back of the room";
+  if (/curtain|カーテン/i.test(t)) return "half hidden behind the curtain at the back of the room";
+  if (/\bdoor|ドア|扉/i.test(t)) return "by the door at the back of the room";
+  return "against the back wall of the room";
+}
+
+/**
+ * Size and place of the recent person drawn from behind, from Presence (never close to the camera). QA 14:19: an abstract
+ * "small far figure" was drawn large on the near chair, so low Presence names a concrete far spot and keeps the near chair empty.
+ * a50010's size post-check retry uses behindViewRetryAnchor with the same words.
+ */
+export function behindViewPlacementByPresence(presence: number, scene?: string): string {
   const p = Number.isFinite(presence) ? presence : 0.5;
-  const where =
-    p <= 0.35 ? "a small figure far in the background near the shelves, partly out of frame, back to the camera"
-    : p <= 0.7 ? "at mid-distance by the far desk, normal size, back to the camera"
-    : "near the front desk, fully in view, back to the camera";
-  return `Place them as ${where}; never close to the camera and never filling the frame.`;
+  if (p <= 0.35) return `Place them ${farAnchor(scene)}, small in the distance and partly out of view, back to the camera; the chair at the near desk stays empty; never close to the camera and never filling the frame.`;
+  if (p <= 0.7) return "Place them at mid-distance by the far desk, normal size, back to the camera; never close to the camera and never filling the frame.";
+  return "Place them near the front desk, fully in view, back to the camera; never close to the camera and never filling the frame.";
+}
+
+/** Fix line for a size retry: the same concrete anchor as the first attempt. */
+export function behindViewRetryAnchor(presence: number, scene?: string): string {
+  return `The person was drawn too large or too close. ${behindViewPlacementByPresence(presence, scene)}`;
 }
 
 /** "left front" -> "on the left side": the recent spot gives only the side; Presence sets the depth. */
@@ -271,7 +342,7 @@ export function composeBehindViewEdit(x: {
   action: string; look: { clothes?: string; hair?: string; position?: string }; placement: string; tone?: number; presence: number;
   spanSec: number; pastContinuity?: PastContinuityVerdict; referencePerson: boolean; lead?: string; anchor?: string; tail?: string;
 }): string {
-  const look = [x.look.clothes ? `wearing ${x.look.clothes}` : "", x.look.hair ? `with ${x.look.hair}` : ""].filter(Boolean).join(", ");
+  const look = [x.look.clothes ? `wearing ${x.look.clothes}` : "", x.look.hair ? (/\bhair\b/i.test(x.look.hair) ? `with ${x.look.hair}` : x.look.hair) : ""].filter(Boolean).join(", ");
   const side = sideOf(x.look.position);
   const who = `Add exactly one person${x.referencePerson ? ", the person shown in image2" : ""}${look ? `, ${look}` : ""}, ${side ? `${side}, ` : ""}seen from behind, back of head to camera, face never visible.`;
   const action = backViewAction(withoutActionRestatement(x.action) || "The person stands quietly.");
@@ -302,10 +373,23 @@ export function referenceOwners(args: { people: PersonInfo[]; refFrames: string[
 
 /** References are optional: keep only those of people whose face is visible (never an away person's, never ambiguous ones next to an away person). */
 export function keepReferenceIndexes(people: PersonInfo[], owners: Array<number | null>): number[] {
-  if (people.length && people.every(isAway)) return [];
-  const anyAway = people.some(isAway);
-  return owners.map((o, i) => (o === null ? (anyAway ? -1 : i) : people[o] && !isAway(people[o]) ? i : -1)).filter((i) => i >= 0);
+  // QA 14:42: a face reference for a person cut off by the frame edge invites the model to complete the face and re-centre
+  // the person, so edge-cropped people get none either (like people seen from behind).
+  const noRef = (p: PersonInfo) => isAway(p) || isEdgeCropped(p);
+  if (people.length && people.every(noRef)) return [];
+  const anyNoRef = people.some(noRef);
+  return owners.map((o, i) => (o === null ? (anyNoRef ? -1 : i) : people[o] && !noRef(people[o]) ? i : -1)).filter((i) => i >= 0);
 }
 
 /** cfg 1.0 (Turbo, 8 steps) ignores the negative prompt entirely; a few words keep the trace honest. */
 export const TURBO_NEGATIVE = "blurry, extra people, extra limbs, face on the back of a head";
+
+/**
+ * An empty-room scene whose action changes nothing ("The room stays empty; nothing in it has been moved"). Running the edit
+ * model on it only adds framing drift or drops objects (QA 15:02/15:03), so generateImage returns the NOW frame instead.
+ */
+export function isEmptyRoomNoChange(action: string): boolean {
+  const parts = (withoutLightingChanges(splitCorrection(action).action) || "nothing changes").replace(/[.!]+$/, "").split(/\s*(?:;|,|\band\b|\.\s+)\s*/i).map((x) => x.trim()).filter(Boolean);
+  const still = /\b(?:stays?|remains?|is still|are still)\b.*\b(?:empty|unchanged|the same|in place|where (?:it|they) (?:is|are|was|were))\b|\bnothing\b.*\b(?:moved|changes?|moves|happens)\b|\bno (?:visible )?change\b|\bunchanged\b/i;
+  return parts.length > 0 && parts.every((x) => still.test(x));
+}

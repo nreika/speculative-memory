@@ -10,6 +10,8 @@ export interface BrowserOutputCatalog {
  fadeBatches?:Record<string,NonNullable<BrowserDisplaySnapshot['fadeBatch']>>;
  /** Generation status of each live source (generating / failed / completed) so every screen showing it can say so. */
  currentStatus?:Partial<Record<'now'|'a'|'b'|'c',NonNullable<BrowserDisplaySnapshot['displayStatus']>>>;
+ /** Slots that currently show the NOW frame while their own image has not arrived (right after an input switch). */
+ standIn?:Partial<Record<'a'|'b'|'c',true>>;
 }
 export interface BrowserOutputSourcesOptions {
  readEvents:()=>CaptureEvent[]|Promise<CaptureEvent[]>;
@@ -34,14 +36,16 @@ export function createBrowserOutputSources(options:BrowserOutputSourcesOptions){
   const memoKey=JSON.stringify([records.length,records[0]?.id??'',records[records.length-1]?.id??'',uploads.map(u=>u.id),snapshots],(k,v)=>k==='serverNowMs'||k==='worldNowMs'||k==='revision'?undefined:v);
   if(lastCatalog&&lastCatalog.events===events&&lastCatalog.key===memoKey)return lastCatalog.value;
   const contents=new Map<string,BrowserDisplayContent>(),current:BrowserOutputCatalog['current']={},clocks:BrowserOutputCatalog['clocks']={},sourceScopes:BrowserOutputCatalog['sourceScopes']={};
-  const scopes=new Set<string>(),currentStatus:NonNullable<BrowserOutputCatalog['currentStatus']>={};
+  const scopes=new Set<string>(),currentStatus:NonNullable<BrowserOutputCatalog['currentStatus']>={},standIn:NonNullable<BrowserOutputCatalog['standIn']>={};
   for(const key of ['now','a','b','c']as const){
    const snapshot=snapshots[key];if(!snapshot?.content)continue;
    if(snapshot.displayStatus)currentStatus[key]=snapshot.displayStatus;
    try{
     const [content]=validateBrowserDisplayContents([snapshot.content]);
     if(content.scope!==snapshot.clock.scope||!Number.isSafeInteger(snapshot.clock.serverNowMs)||!Number.isSafeInteger(snapshot.clock.worldNowMs)||!Number.isFinite(snapshot.clock.rate))continue;
-    if(key==='now'?content.provenance!=='actual':content.provenance!=='generated')continue;
+    const standing=key!=='now'&&(snapshot as any).standInFor===key&&content.provenance==='actual'&&content.sceneKey==='now';
+    if(!standing&&(key==='now'?content.provenance!=='actual':content.provenance!=='generated'))continue;
+    if(standing)standIn[key as 'a'|'b'|'c']=true;
     contents.set(content.id,content);current[key]=content.id;scopes.add(content.scope);
     clocks[content.scope]??={serverAnchorMs:snapshot.clock.serverNowMs,worldAnchorMs:snapshot.clock.worldNowMs,rate:snapshot.clock.rate};
     if(key==='now')sourceScopes['actual-past']=content.scope;
@@ -105,7 +109,7 @@ export function createBrowserOutputSources(options:BrowserOutputSourcesOptions){
    const started=Date.parse(event.startedAt);
    if(event.browserFollow?.updateMode==='each'&&!fadeBatches[event.captureId]&&Number.isSafeInteger(started)&&started>=0&&/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(event.captureId))fadeBatches[event.captureId]={captureId:event.captureId,completedAtMs:started};
   }
-  const value={contents:result,current,sourceScopes,clocks,fadeBatches,currentStatus};
+  const value={contents:result,current,sourceScopes,clocks,fadeBatches,currentStatus,standIn};
   lastCatalog={events,key:memoKey,value};
   return value;
  }};

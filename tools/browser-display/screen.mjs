@@ -19,7 +19,7 @@ let errorNotice='',loadingSince=0;
 function renderNotice() {
   const loading=loadingSince&&performance.now()-loadingSince>=1000?'Loading image…':'';
   const blur = faceBlurNotice(visible,latest?.view), info = /no face/i.test(blur) ? blur : '';
-  const rendered = errorNotice||(info?'':blur)||loading||displayStatusMessage(latest?.displayStatus, visible)||info;
+  const rendered = errorNotice||(info?'':blur)||loading||displayStatusMessage(latest?.displayStatus, visible);
   el.connection.textContent = rendered; el.connection.hidden = !rendered;
 }
 function message(text) { errorNotice=text||''; renderNotice(); }

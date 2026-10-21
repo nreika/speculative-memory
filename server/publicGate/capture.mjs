@@ -1,12 +1,14 @@
 // Remote camera page: rear camera -> 1280x720 JPEG (q 0.8) -> POST /capture/frame every N seconds.
 const $=id=>document.getElementById(id);
 const video=$('video'),canvas=document.createElement('canvas');canvas.width=1280;canvas.height=720;
-let stream=null,timer=null,wake=null,facing='environment',lastSent=0,running=false;
+let blockedAt=0,stream=null,timer=null,wake=null,facing='environment',lastSent=0,running=false;
+const clientId=(()=>{try{let v=sessionStorage.getItem('capClientId');if(!v){v=Array.from(crypto.getRandomValues(new Uint8Array(12)),b=>b.toString(16).padStart(2,'0')).join('');sessionStorage.setItem('capClientId',v);}return v;}catch{return Array.from(crypto.getRandomValues(new Uint8Array(12)),b=>b.toString(16).padStart(2,'0')).join('');}})();
 const fmtAge=ms=>ms<1000?'just now':Math.round(ms/1000)+' s ago';
 function setState(text,cls=''){$('state').textContent=text;$('state').className=cls;}
 async function status(){
   try{const r=await fetch('/capture/status',{cache:'no-store'});if(!r.ok)throw Error(r.status===401?'Session expired: open the capture link again':'HTTP '+r.status);const s=await r.json();
     if(!running&&s.intervalSec&&[5,10,20].includes(s.intervalSec)&&!$('interval').dataset.touched)$('interval').value=String(s.intervalSec);
+    if(Date.now()-blockedAt<15000)return;
     setState(`${s.selected?'In use (Remote device selected)':'Standby (not selected in Control)'} · server: ${s.state}${s.ageSec!=null?' · last frame '+s.ageSec+' s ago':''}`,s.state==='stale'?'stale':'ok');
   }catch(e){setState(e.message,'error');}
 }
@@ -22,8 +24,8 @@ async function send(){
   if(vw/vh>target)sw=vh*target;else sh=vw/target; // centre-crop to 16:9 (portrait phones too)
   const ctx=canvas.getContext('2d');ctx.drawImage(video,(vw-sw)/2,(vh-sh)/2,sw,sh,0,0,1280,720);
   const image=canvas.toDataURL('image/jpeg',0.8);
-  try{const r=await fetch('/capture/frame',{method:'POST',headers:{'Content-Type':'application/json','X-Capture-Request':'1'},body:JSON.stringify({image})});
-    const body=await r.json().catch(()=>({}));if(!r.ok)throw Error(body.error||('HTTP '+r.status));lastSent=Date.now();
+  try{const r=await fetch('/capture/frame',{method:'POST',headers:{'Content-Type':'application/json','X-Capture-Request':'1'},body:JSON.stringify({image,clientId})});
+    const body=await r.json().catch(()=>({}));if(r.status===409){blockedAt=Date.now();setState('Another device is sending. Waiting…','stale');return;}if(!r.ok)throw Error(body.error||('HTTP '+r.status));lastSent=Date.now();blockedAt=0;
     setState(body.selected?'In use (Remote device selected)':'Standby (not selected in Control)','ok');
   }catch(e){setState('Send failed: '+e.message,'error');}
 }

@@ -6,7 +6,7 @@ import {generateTurboCandidate,generateTurboProduction,type TurboCandidateParams
 import {defaultLocalImageEngine,selectedLocalImageUrl,type LocalImageEngine} from './imageEngine';
 import type { PeopleEditRegion } from './peopleEditRegion';
 import { isPastDistance, type PastContinuityVerdict } from './pastScene';
-import { behindViewPlacementByPresence, composeBehindViewEdit, composeCoherentEdit, keepReferenceIndexes, referenceOwners, ROOM_ANCHOR, temporalSentence, TURBO_NEGATIVE } from './editPrompt';
+import { behindViewPlacementByPresence, composeBehindViewEdit, isEmptyRoomNoChange, splitCorrection, composeCoherentEdit, keepReferenceIndexes, referenceOwners, ROOM_ANCHOR, temporalSentence, TURBO_NEGATIVE } from './editPrompt';
 import { parseHeadBox } from './referenceCrop';
 /**
  * Server-side generation orchestrator.
@@ -384,7 +384,7 @@ export function composeEditInstruction(args: {
     const when = past ? temporalSentence(spanSec, args.pastContinuity, true) : "";
     return (
       lead + framingAnchor(rb) + (when ? when + "\n\n" : "") +
-      `${er.head}${sanitizeEmptyRoomPrediction(args.predictionPrompt)}. ` +
+      `${er.head}${sanitizeEmptyRoomPrediction(splitCorrection(args.predictionPrompt).action)}. ` +
       `${er.scope} ` +
       `${er.keep} ` +
       `${er.preserve} ` +
@@ -404,7 +404,7 @@ export function composeEditInstruction(args: {
   const anchor = fa ? `${fa} ${ROOM_ANCHOR}` : undefined;
   if (args.behindView) {
     // QA 13:39: at Presence 0.28 the behind-view figure filled the frame; Presence now sets depth and size explicitly.
-    const placement = behindViewPlacementByPresence(presence) + (isStandingAction(args.predictionPrompt) && presence > 0.35 ? " " + behindViewFreeSpotSentence(args.behindView) : "");
+    const placement = behindViewPlacementByPresence(presence, args.behindView.scene) + (isStandingAction(args.predictionPrompt) && presence > 0.35 ? " " + behindViewFreeSpotSentence(args.behindView) : "");
     return composeBehindViewEdit({
       action: args.predictionPrompt, look: { clothes: args.behindView.clothes, hair: behindViewHairPhrase(args.behindView.hair), position: args.behindView.position },
       placement, tone: args.tone, presence, spanSec, pastContinuity: args.pastContinuity, referencePerson: !!args.referencePerson, lead, anchor, tail,
@@ -506,6 +506,16 @@ export async function generateImage(args: {
   turboContext?:Pick<TurboCandidateParams,'sourceActors'|'protectedBoxes'|'sourceEvidenceComplete'|'expectedPeople'>;
 }): Promise<string> {
   const localImageEngine=args.localImageEngine??defaultLocalImageEngine();
+  // 2026-10-21: a scene planned EMPTY (presence 0, no behind-view person) gets no person image at all. server.ts still passed
+  // the recent-person photo for unoccupied NOW frames, and the edit drew that person into "The room stays empty" scenes.
+  if (!args.referenceCast && (args.presence ?? SERVER_SCENE_DEFAULTS.presence) <= 0 && args.referencePerson !== true)
+    args = { ...args, faceImageDataUrl: undefined, faceCrop: undefined, referenceImages: [], referenceCrops: undefined };
+  // An empty room where nothing changes: the NOW frame is the exact answer; the edit model would only drift the framing.
+  if (!args.referenceCast && !args.assetOnlyInstruction && !args.assetOnlyFrame && !args.behindView && args.referencePerson !== true &&
+      (args.presence ?? SERVER_SCENE_DEFAULTS.presence) <= 0 && isEmptyRoomNoChange(args.predictionPrompt)) {
+    if (args.trace) Object.assign(args.trace, { editInstruction: "(no edit: empty room, nothing changes; the NOW frame is returned)", negativePrompt: null, seed: null, denoise: null, referenceImage: "none" });
+    return args.originalImageDataUrl;
+  }
   const clockEdit = !!args.clock && shouldEditClock(args.clock.visible);
   // Reference frames are a ComfyUI-only feature (Gemini takes at most the single recent-person photo).
   const refFramesAll = (args.imageBackend ?? DEFAULT_STEP_BACKENDS.image) === "gemini" ? [] : isTurboEngineForReferences(localImageEngine) ? (args.referenceImages ?? []) : (args.referenceImages ?? []).slice(0, 2);

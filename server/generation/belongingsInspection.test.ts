@@ -39,3 +39,18 @@ test('missing_belongings in the single inspection call: schema + instruction onl
  assert.equal(bad.ok,true);assert.equal(bad.defect,undefined);assert.deepEqual(bad.observationFacts.belongings!.missing,['blue backpack']);
  assert.equal(calls,3);
 });
+
+test('mechanical duplicate check: objects named in the action are counted in the original and the output; more in the output rejects',async t=>{
+ let body:any;let answer:any;
+ t.mock.method(globalThis,'fetch',async(_i:unknown,init?:RequestInit)=>{body=JSON.parse(String(init?.body));return Response.json({response:JSON.stringify(answer),done_reason:'stop'});});
+ answer={people:[person],duplicateObject:false,objectCounts:{bottle:{original:1,output:2}}};
+ const bad=await inspectAndCaption(img,img,1,15,[],undefined,img,[],'The person picks up the blue bottle and holds it.',false);
+ assert.equal(body.images.length,2);assert.deepEqual(body.format.properties.objectCounts.required,['bottle']);assert.ok(body.format.required.includes('objectCounts'));
+ assert.match(body.prompt,/OBJECT COUNTS/);
+ assert.equal(bad.ok,false);assert.equal(bad.defect,'duplicate_object');assert.match(bad.reason,/bottle: 1 -> 2/);
+ answer={people:[person],duplicateObject:false,objectCounts:{bottle:{original:1,output:1}}};
+ assert.equal((await inspectAndCaption(img,img,1,15,[],undefined,img,[],'The person picks up the blue bottle and holds it.',false)).ok,true);
+ answer={people:[person],duplicateObject:false};
+ const none=await inspectAndCaption(img,img,1,15,[],undefined,img,[],'The person stretches both arms forward.',true);
+ assert.equal(body.images.length,1);assert.equal(body.format.properties.objectCounts,undefined);assert.equal(none.ok,true);
+});

@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="dark light"><meta name="robots" content="noindex"><title>Scenario Submission</title>
+<link rel="stylesheet" href="/submit/submit.css"></head>
+<body><main>
+<h1>Send a scenario · Speculative Memory</h1>
+<p class="note">Upload an operator-scenario CSV (and the PNG images it references). It is checked here, then queued for the operator, who reviews it before anything plays.</p>
+<form id="form" novalidate>
+ <label>Your name <span class="hint">(up to 40 characters)</span><input id="name" name="name" maxlength="40" required autocomplete="nickname"></label>
+ <label>Note <span class="hint">(optional, up to 200 characters)</span><textarea id="note" name="note" maxlength="200" rows="3"></textarea></label>
+ <label>Scenario CSV <span class="hint">(.csv, up to 2 MB)</span><input id="csv" name="csv" type="file" accept=".csv,text/csv" required></label>
+ <label>Images <span class="hint">(optional PNG referenced by the CSV · up to 5 files, 5 MB each)</span><input id="images" name="images" type="file" accept=".png,.jpg,.jpeg,image/png,image/jpeg" multiple></label>
+ <div class="row"><button id="check" type="button">Check</button><button id="submit" type="submit" class="primary">Submit</button></div>
+</form>
+<section id="result" aria-live="polite" hidden><h2 id="result-title"></h2><p id="result-text"></p><ul id="result-list"></ul></section>
+</main><script type="module" src="/submit/submit.mjs"></script></body></html>

@@ -22,7 +22,8 @@ export function createOperatorLibrary(root:string,python:string,readOutputIds?:(
   }}
   await fs.mkdir(root,{recursive:true});await walk(root);return rows.sort((a,b)=>a.file.localeCompare(b.file));
  }
- async function upload(payload:any){
+ /** extraFiles: dot-named sidecars (e.g. .submission.json) written into the folder before it becomes selectable. */
+ async function upload(payload:any,extraFiles:Record<string,string>={}){
   cached=undefined;
   const safe=(name:unknown,ext:string)=>typeof name==='string'&&/^[A-Za-z0-9][A-Za-z0-9_. -]{0,120}$/.test(name)&&name.toLowerCase().endsWith(ext)&&!name.includes('..');
   if(!payload||!safe(payload.csv?.name,'.csv')||typeof payload.csv.text!=='string'||Buffer.byteLength(payload.csv.text)>2*1024*1024||!Array.isArray(payload.assets)||payload.assets.length>64)throw Error('Invalid scenario upload');
@@ -37,14 +38,17 @@ export function createOperatorLibrary(root:string,python:string,readOutputIds?:(
     await fs.writeFile(path.join(folder,asset.name),raw,{flag:'wx'});
    }
    // Validate paths and exact image protocol before making the import selectable.
-   const {formatWarnings}=await checkOperatorPlan(root,`browser-imports/.${id}/${payload.csv.name}`,python,readOutputIds);
+   for(const [name,text] of Object.entries(extraFiles)){if(!/^\.[A-Za-z0-9_-]{1,40}\.json$/.test(name))throw Error('Invalid sidecar name');await fs.writeFile(path.join(folder,name),text,{encoding:'utf8',flag:'wx'});}
+   const {plan,formatWarnings}=await checkOperatorPlan(root,`browser-imports/.${id}/${payload.csv.name}`,python,readOutputIds);
    await fs.rename(folder,final);
-   cached=undefined;return {ok:true,file:`browser-imports/${id}/${payload.csv.name}`,formatWarnings};
+   cached=undefined;return {ok:true,file:`browser-imports/${id}/${payload.csv.name}`,id,scenarioId:plan.id,formatWarnings};
   }catch(error){
    // Preserve a failed upload outside the selectable library for diagnosis.
    await fs.writeFile(path.join(folder,'.failed'),String((error as Error).message),'utf8').catch(()=>{});
    throw error;
   }
  }
- return {load,check,list,upload};
+ /** Drop the cached listing (after a folder was removed outside upload()). */
+ const forget=()=>{cached=undefined;};
+ return {load,check,list,upload,forget};
 }

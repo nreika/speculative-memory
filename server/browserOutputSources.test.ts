@@ -41,3 +41,9 @@ test('each-mode captures get a per-capture fade trigger from their first image; 
  const all=event(content('b'));(all.browserFollow as any).updateMode='all';all.result='running';
  assert.equal((await createBrowserOutputSources({readCurrent:()=>({}),readEvents:()=>[all]}).loadCatalog()).fadeBatches?.b,undefined);
 });
+
+test('a stand-in (NOW shown in an A/B/C slot after an input switch) gets a slot, a clock and a flag instead of content-missing', async () => {
+ const now=content('now','actual');const standA={...snapshot(now),standInFor:'a'} as any;
+ const c=await createBrowserOutputSources({readCurrent:()=>({now:snapshot(now),a:standA}),readEvents:()=>[]}).loadCatalog();
+ assert.equal(c.current.now,'now');assert.equal(c.current.a,'now');assert.equal(c.standIn?.a,true);assert.ok(c.clocks['scope-one']);
+});

@@ -15,7 +15,7 @@ export class OperatorInputError extends Error {
  constructor(public readonly code:OperatorInputErrorCode,message:string,public readonly indeterminate=false,public readonly httpStatus?:number){super(message);this.name='OperatorInputError';}
 }
 export interface OperatorInputOptions {env?:NodeJS.ProcessEnv;fetch?:typeof fetch;readToken?:(file:string)=>Promise<string>;timeoutMs?:number;now?:()=>number}
-export interface OperatorInputClient {readState():Promise<OperatorInputState>;readPreview():Promise<OperatorInputPreview>;readFrame():Promise<OperatorInputFrame>;select(request:{setId:OperatorInputSelection;requestId:string}):Promise<OperatorInputSelectResult>}
+export interface OperatorInputClient {readState():Promise<OperatorInputState>;readPreview():Promise<OperatorInputPreview>;openPreviewStream?(signal:AbortSignal,connectTimeoutMs?:number):Promise<Response>;readFrame():Promise<OperatorInputFrame>;select(request:{setId:OperatorInputSelection;requestId:string;cameraIndex?:number}):Promise<OperatorInputSelectResult>}
 const SETS=['TSC-001','TSC-002','TSC-003']as const;const SELECT=[...SETS,'cycle','camera'];const MAX_IMAGE_BYTES=32*1024*1024;
 function invalid():never{throw new OperatorInputError('INVALID_RESPONSE','Input bridge returned inconsistent data');}
 const object=(x:unknown):x is Record<string,any>=>!!x&&typeof x==='object'&&!Array.isArray(x);
@@ -81,7 +81,7 @@ async function jsonBody(response:Response):Promise<unknown>{
 export function createOperatorInputClient(options:OperatorInputOptions={}):OperatorInputClient {
  const env=options.env??process.env,http=options.fetch??fetch,read=options.readToken??(file=>fs.readFile(file,'utf8')),timeout=options.timeoutMs??5000;
  if(!Number.isInteger(timeout)||timeout<1||timeout>30000)throw new OperatorInputError('CONFIGURATION','Invalid input bridge timeout');
- async function request<T>(endpoint:'state'|'preview'|'frame'|'select',validate:(data:unknown)=>T,payload?:{setId:OperatorInputSelection;requestId:string}):Promise<T>{
+ async function request<T>(endpoint:'state'|'preview'|'frame'|'select',validate:(data:unknown)=>T,payload?:{setId:OperatorInputSelection;requestId:string;cameraIndex?:number}):Promise<T>{
   const {origin,file}=configured(env),mutation=endpoint==='select',ctrl=new AbortController();let dispatched=false,timer:ReturnType<typeof setTimeout>;
   const work=async()=>{try{let token:string;try{token=(await read(file)).trim();}catch{throw new OperatorInputError('AUTH_UNAVAILABLE','Input bridge authorization is unavailable');}ctrl.signal.throwIfAborted();if(!/^[A-Za-z0-9_-]{32,512}$/.test(token))throw new OperatorInputError('AUTH_UNAVAILABLE','Input bridge authorization is unavailable');
    const headers:Record<string,string>={Authorization:'Bearer '+token};if(mutation){headers['Content-Type']='application/json';headers['X-Control-Request']='1';}dispatched=true;
@@ -92,8 +92,44 @@ export function createOperatorInputClient(options:OperatorInputOptions={}):Opera
   const deadline=new Promise<T>((_,reject)=>{timer=setTimeout(()=>{ctrl.abort();reject(new OperatorInputError(mutation&&dispatched?'INDETERMINATE':'TIMEOUT',mutation&&dispatched?'Input selection outcome is unknown; do not resend automatically':'Input bridge request timed out',mutation&&dispatched));},timeout);});
   try{return await Promise.race([work(),deadline]);}finally{clearTimeout(timer!);}
  }
- return {readState:()=>request('state',validateState),readPreview:()=>request('preview',validatePreview),readFrame:()=>request('frame',value=>validateFrame(value,(options.now??Date.now)())),select:async payload=>{
-  if(!object(payload)||!SELECT.includes(payload.setId)||typeof payload.requestId!=='string'||!/^[A-Za-z0-9_-]{8,128}$/.test(payload.requestId)||Object.keys(payload).some(k=>!['setId','requestId'].includes(k)))throw new OperatorInputError('CONFIGURATION','Invalid input selection');
+ async function openPreviewStream(signal:AbortSignal,connectTimeoutMs=10000):Promise<Response>{
+  const {origin,file}=configured(env);let token:string;
+  try{token=(await read(file)).trim();}catch{throw new OperatorInputError('AUTH_UNAVAILABLE','Input bridge authorization is unavailable');}
+  if(!/^[A-Za-z0-9_-]{32,512}$/.test(token))throw new OperatorInputError('AUTH_UNAVAILABLE','Input bridge authorization is unavailable');
+  const ctrl=new AbortController(),onAbort=()=>ctrl.abort();if(signal.aborted)ctrl.abort();else signal.addEventListener('abort',onAbort,{once:true});
+  const timer=setTimeout(()=>ctrl.abort(),connectTimeoutMs);
+  try{const response=await http(origin+'/api/input/preview/stream',{method:'GET',headers:{Authorization:'Bearer '+token},signal:ctrl.signal,redirect:'error',cache:'no-store'});
+   if(!response.ok||!response.body){await response.body?.cancel().catch(()=>{});throw new OperatorInputError('HTTP_REJECTED','Input bridge rejected the preview stream',false,response.status);}return response;}
+  catch(error){signal.removeEventListener('abort',onAbort);if(error instanceof OperatorInputError)throw error;throw new OperatorInputError(ctrl.signal.aborted?'TIMEOUT':'TRANSPORT','Input bridge preview stream failed');}
+  finally{clearTimeout(timer);}
+ }
+ return {openPreviewStream,readState:()=>request('state',validateState),readPreview:()=>request('preview',validatePreview),readFrame:()=>request('frame',value=>validateFrame(value,(options.now??Date.now)())),select:async payload=>{
+  if(!object(payload)||!SELECT.includes(payload.setId)||typeof payload.requestId!=='string'||!/^[A-Za-z0-9_-]{8,128}$/.test(payload.requestId)||Object.keys(payload).some(k=>!['setId','requestId','cameraIndex'].includes(k))||payload.cameraIndex!==undefined&&(payload.setId!=='camera'||!Number.isInteger(payload.cameraIndex)||payload.cameraIndex<0||payload.cameraIndex>3))throw new OperatorInputError('CONFIGURATION','Invalid input selection');
   return request('select',data=>{if(!object(data))invalid();if(data.requestId!==undefined&&data.requestId!==payload.requestId)invalid();const state=validateState(object(data.state)?data.state:data);return {requestId:payload.requestId,setId:payload.setId,state};},payload);
  }};
+}
+
+/** Live-camera MJPEG pass-through. Caller guarantees the control access checks; this only bounds and pipes. */
+export const MAX_PREVIEW_STREAMS=3;
+let activePreviewStreams=0;
+export function previewStreamCount(){return activePreviewStreams;}
+export async function servePreviewStream(client:OperatorInputClient,isLive:()=>Promise<boolean>|boolean,req:any,res:any):Promise<void>{
+ const json=(status:number,body:unknown)=>{if(res.headersSent)return;res.setHeader('Cache-Control','no-store');res.status(status).json(body);};
+ if(!client.openPreviewStream)return json(409,{error:'not-live'});
+ if(activePreviewStreams>=MAX_PREVIEW_STREAMS)return json(429,{error:'too-many-streams'});
+ activePreviewStreams++;const ctrl=new AbortController();let released=false;
+ const release=()=>{if(released)return;released=true;activePreviewStreams--;ctrl.abort();};
+ res.on?.('close',release);req.on?.('close',release);
+ try{
+  if(!await isLive())return json(409,{error:'not-live'});
+  const upstream=await client.openPreviewStream(ctrl.signal);
+  if(released){await upstream.body?.cancel().catch(()=>{});return;}
+  res.status(200);res.setHeader('Content-Type',upstream.headers.get('content-type')||'multipart/x-mixed-replace');
+  res.setHeader('Cache-Control','no-store');res.setHeader('X-Content-Type-Options','nosniff');res.flushHeaders?.();
+  const reader=upstream.body!.getReader();
+  try{while(!released){const {value,done}=await reader.read();if(done)break;if(!res.write(Buffer.from(value))&&!released&&res.once)await new Promise<void>(resolve=>{const off=()=>{res.off?.('drain',off);res.off?.('close',off);resolve();};res.once('drain',off);res.once('close',off);});}}
+  finally{reader.cancel().catch(()=>{});}
+  res.end();
+ }catch(error){if(res.headersSent){res.end?.();}else json([404,503].includes((error as any)?.httpStatus)?(error as any).httpStatus:502,{error:'stream-unavailable'});}
+ finally{release();}
 }

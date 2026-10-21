@@ -39,3 +39,11 @@ test('invalid bridge authority/path/query/auth and allowed Host are rejected at 
  for(const bridgeUrl of ['http://127.0.0.1:8767','http://100.100.0.2:8767/x','http://100.100.0.2:8767/?x=1','http://user@100.100.0.2:8767','http://100.100.0.2:8768'])assert.throws(()=>installTdBrowserControl({use(){}},{bridgeUrl,tokenFile}));
  assert.throws(()=>installTdBrowserControl({use(){}},{bridgeUrl:'http://100.100.0.2:8767',tokenFile,allowedHosts:['attacker.example:3000']}));
 });
+test('input-preview/stream: 409 not-live without a native stream handler, delegates when present, rejects query',async()=>{
+ const sreq=request({originalUrl:'/api/td-control/input-preview/stream'});
+ const res=response();await handler(sreq,res,()=>{});assert.equal(res.code,409);assert.deepEqual(res.body,{error:'not-live'});
+ let sh,called=0;installTdBrowserControl({use:h=>{sh=h;}},{bridgeUrl:'http://100.100.0.2:8767',tokenFile,allowedHosts:['100.100.0.1:3000'],controlHandler:async()=>({body:{}}),streamHandler:async(_q,r)=>{called++;r.status(200).send('stream');}});
+ const ok=response();await sh(sreq,ok,()=>{});assert.equal(called,1);assert.equal(ok.body,'stream');
+ const bad=response();await sh(request({originalUrl:'/api/td-control/input-preview/stream?x=1'}),bad,()=>{});assert.equal(bad.code,400);
+ const host=response();await sh(request({originalUrl:'/api/td-control/input-preview/stream',headers:{host:'attacker.example'}}),host,()=>{});assert.equal(host.code,403);assert.equal(called,1);
+});

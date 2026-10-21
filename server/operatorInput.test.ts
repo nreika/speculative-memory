@@ -74,3 +74,33 @@ test('live-camera state with the bridge idle replay object is accepted and norma
  const bad={...live,replay:{active:true,setId:null,cycle:false,pendingSet:null}};
  await assert.rejects(client(()=>bad).readState(),OperatorInputError);
 });
+
+import {servePreviewStream,previewStreamCount,MAX_PREVIEW_STREAMS} from './operatorInput';
+const mockRes=()=>{const r:any={code:0,headers:{} as any,chunks:[] as Buffer[],headersSent:false,ended:false,handlers:{} as any,status(n:number){r.code=n;return r;},setHeader(k:string,v:string){r.headers[k.toLowerCase()]=v;},flushHeaders(){r.headersSent=true;},json(b:any){r.body=b;r.headersSent=true;r.ended=true;return r;},write(b:Buffer){r.chunks.push(b);return true;},end(){r.ended=true;},on(e:string,f:()=>void){r.handlers[e]=f;}};return r;};
+const mockReq=()=>({on(){}});
+test('preview stream passes multipart through with bridge auth, 409 when not live, caps clients',async()=>{
+ const body='--frame\r\nContent-Type: image/jpeg\r\n\r\nJPEGDATA\r\n--frame--';let seen:any;
+ const c=client(()=>({}),{fetch:async(url:any,options:any)=>{seen={url:String(url),auth:new Headers(options.headers).get('authorization')};return new Response(body,{headers:{'content-type':'multipart/x-mixed-replace; boundary=frame'}});}});
+ const res=mockRes();await servePreviewStream(c,()=>true,mockReq(),res);
+ assert.equal(res.code,200);assert.equal(res.headers['content-type'],'multipart/x-mixed-replace; boundary=frame');assert.equal(Buffer.concat(res.chunks).toString(),body);
+ assert.equal(new URL(seen.url).pathname,'/api/input/preview/stream');assert.equal(seen.auth,'Bearer '+secret);assert.equal(previewStreamCount(),0);
+ seen=undefined;const replay=mockRes();await servePreviewStream(c,()=>false,mockReq(),replay);assert.equal(replay.code,409);assert.deepEqual(replay.body,{error:'not-live'});assert.equal(seen,undefined);
+ const gone=mockRes();await servePreviewStream(client(()=>({}),{fetch:async()=>new Response('x',{status:404})}),()=>true,mockReq(),gone);assert.equal(gone.code,404);assert.equal(previewStreamCount(),0);
+ // cap: hold MAX streams open (never-ending upstream), the next one is refused, closing releases and aborts upstream
+ let aborted=0;const open=client(()=>({}),{fetch:async(_u:any,o:any)=>{o.signal.addEventListener('abort',()=>aborted++);return new Response(new ReadableStream({start(ctl){o.signal.addEventListener('abort',()=>{try{ctl.error(new Error('aborted'));}catch{}});}}),{headers:{'content-type':'multipart/x-mixed-replace; boundary=f'}});}});
+ const held=Array.from({length:MAX_PREVIEW_STREAMS},()=>{const r=mockRes();return {r,p:servePreviewStream(open,()=>true,mockReq(),r)};});
+ await new Promise(r=>setTimeout(r,30));assert.equal(previewStreamCount(),MAX_PREVIEW_STREAMS);
+ const extra=mockRes();await servePreviewStream(open,()=>true,mockReq(),extra);assert.equal(extra.code,429);
+ for(const h of held)h.r.handlers.close();await Promise.all(held.map(h=>h.p));assert.equal(previewStreamCount(),0);assert.equal(aborted,MAX_PREVIEW_STREAMS);
+});
+
+test('select forwards cameraIndex only for camera and validates it',async()=>{
+ let sent:any;const c=client(state,{fetch:async(_u:any,o:any)=>{sent=JSON.parse(o.body);return Response.json(state());}});
+ await c.select({setId:'cycle',requestId:'request_1234'});assert.deepEqual(sent,{setId:'cycle',requestId:'request_1234'});
+ await c.select({setId:'camera',requestId:'request_1234',cameraIndex:1});assert.deepEqual(sent,{setId:'camera',requestId:'request_1234',cameraIndex:1});
+ for(const bad of [{setId:'cycle',cameraIndex:1},{setId:'camera',cameraIndex:4},{setId:'camera',cameraIndex:1.5},{setId:'camera',cameraIndex:-1}])await rejects(c.select({...bad,requestId:'request_1234'} as any),'CONFIGURATION');
+});
+test('preview stream maps upstream 503 to 503 and uses /api/input/preview/stream',async()=>{
+ let path='';const res=mockRes();await servePreviewStream(client(()=>({}),{fetch:async(u:any)=>{path=new URL(String(u)).pathname;return new Response('x',{status:503});}}),()=>true,mockReq(),res);
+ assert.equal(path,'/api/input/preview/stream');assert.equal(res.code,503);
+});

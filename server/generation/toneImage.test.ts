@@ -15,8 +15,8 @@ test('tone adds an "amount of change" sentence to the image edit, one per band',
     const text = composeEditInstruction({ predictionPrompt: 'The man turns his head.', presence: 0.5, tone });
     // 2026-10-21 rebuild: occupied scenes use editPrompt's toneSentence (never theatrical).
     assert.match(text, /Amount of movement:/);
-    seen.add(toneSentence(tone));
-    assert.ok(text.includes(toneSentence(tone)));
+    seen.add(toneSentence(tone, 'any'));
+    assert.ok(text.includes(toneSentence(tone, 'any')));
     assert.doesNotMatch(text, /energetic|dramatic|clearly different/);
   }
   assert.equal(seen.size, 4);

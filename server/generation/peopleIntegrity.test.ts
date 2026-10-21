@@ -84,3 +84,12 @@ test('incoherent body or missing action gets one rebuild even with a single-atte
   const s=await generateUniquePeople({maxAttempts:1,onExhausted:'skip',generate:async()=>'i',rejected:()=>{},inspect:async()=>({ok:false,sourceCount:1,outputToSource:[0],reason:'incoherent_body: x',defect:'incoherent_body'} as any)});
   assert.equal((s as any).skipped,true);assert.equal((s as any).defect,'incoherent_body');
 });
+
+test('a person drawn too large gets one rebuild with the size anchor even on a single-attempt engine', async () => {
+  const {generateUniquePeople,targetedCorrection}=await import('./peopleIntegrity');
+  const calls:string[]=[];
+  const r=await generateUniquePeople({maxAttempts:1,onExhausted:'skip',sizeAnchor:'The person was drawn too large or too close. Small and far away.',generate:async(a,c)=>{calls.push(c);return 'img'+a;},rejected:()=>{},
+    inspect:async()=>({ok:false,sourceCount:0,outputToSource:[0],reason:'person_too_large: fills 70%',defect:'person_too_large'} as any)});
+  assert.equal(calls.length,2);assert.match(calls[1],/too large or too close/);assert.equal((r as any).skipped,true);assert.equal((r as any).defect,'person_too_large');
+  assert.match(targetedCorrection({ok:false,sourceCount:0,outputToSource:[],reason:'person_too_large: x',defect:'person_too_large'} as any,{sizeAnchor:'ANCHOR'}),/ANCHOR/);
+});

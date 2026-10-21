@@ -5,7 +5,7 @@ import {OperatorInputError,type OperatorInputClient,type OperatorInputFrame,type
 export const REMOTE_FRAME_WIDTH=1280,REMOTE_FRAME_HEIGHT=720,REMOTE_MAX_FRAME_BYTES=2*1024*1024;
 export type RemoteCameraState='none'|'fresh'|'stale';
 export interface RemoteFrame {image:Buffer;sha256:string;width:number;height:number;receivedAtMs:number}
-export interface RemoteCameraStatus {selected:boolean;state:RemoteCameraState;ageSec:number|null;receivedAt:string|null;staleSec:number;intervalSec:number}
+export interface RemoteCameraStatus {selected:boolean;state:RemoteCameraState;ageSec:number|null;receivedAt:string|null;staleSec:number;intervalSec:number;holder:string|null;holderShort:string|null;holderSince:string|null}
 
 function envSec(name:string,fallback:number,min:number,max:number){const n=Number(process.env[name]);return Number.isFinite(n)&&n>=min&&n<=max?n:fallback;}
 export const remoteStaleSec=()=>envSec('REMOTE_STALE_SEC',30,5,600);
@@ -25,7 +25,8 @@ export function jpegSize(bytes:Buffer):{width:number;height:number}|null{
  return width>0&&height>0?{width,height}:null;
 }
 
-export class RemoteFrameError extends Error{constructor(public readonly status:number,message:string){super(message);}}
+export class RemoteFrameError extends Error{constructor(public readonly status:number,message:string,public readonly detail:Record<string,unknown>={}){super(message);}}
+export const CLIENT_ID_RE=/^[A-Za-z0-9_-]{8,64}$/;
 
 export class RemoteCameraStore {
  private frame:RemoteFrame|null=null;
@@ -34,11 +35,21 @@ export class RemoteCameraStore {
  private now(){return (this.options.now??Date.now)();}
  staleSec(){return (this.options.staleSec??remoteStaleSec)();}
  /** Validates a 1280x720 JPEG and replaces the previous frame. */
- setFrame(bytes:Buffer):RemoteFrame{
+ private holderId:string|null=null;private holderSinceMs=0;
+ /** Active device id, or null when none / its frames stopped for the stale window (the slot is free). */
+ holder():string|null{return this.holderId&&this.frame&&this.now()-this.frame.receivedAtMs<=this.staleSec()*1000?this.holderId:null;}
+ /** Frees the slot (Control "Release device"); the latest frame is dropped so the old device's image is not reused. */
+ release():boolean{const had=this.holder()!==null;this.holderId=null;this.holderSinceMs=0;this.frame=null;return had;}
+ /** Validates a 1280x720 JPEG and replaces the previous frame. The first device holds the slot; others get 409 until it goes stale or is released. */
+ setFrame(bytes:Buffer,clientId:string):RemoteFrame{
+  if(typeof clientId!=='string'||!CLIENT_ID_RE.test(clientId))throw new RemoteFrameError(400,'Missing or invalid client id');
+  const held=this.holder();
+  if(held&&held!==clientId)throw new RemoteFrameError(409,'another device is active',{holderSince:new Date(this.holderSinceMs).toISOString(),ageSec:Math.max(0,Math.round((this.now()-this.frame!.receivedAtMs)/1000))});
   if(!Buffer.isBuffer(bytes)||!bytes.length)throw new RemoteFrameError(400,'Empty frame');
   if(bytes.length>REMOTE_MAX_FRAME_BYTES)throw new RemoteFrameError(413,'Frame too large');
   const size=jpegSize(bytes);if(!size)throw new RemoteFrameError(400,'Frame must be a JPEG image');
   if(size.width!==REMOTE_FRAME_WIDTH||size.height!==REMOTE_FRAME_HEIGHT)throw new RemoteFrameError(400,'Frame must be 1280x720');
+  if(held!==clientId){this.holderId=clientId;this.holderSinceMs=this.now();}
   this.frame={image:Buffer.from(bytes),sha256:createHash('sha256').update(bytes).digest('hex'),...size,receivedAtMs:this.now()};
   return this.frame;
  }
@@ -48,9 +59,9 @@ export class RemoteCameraStore {
  fresh():RemoteFrame|null{return this.state()==='fresh'?this.frame:null;}
  status():RemoteCameraStatus{
   const f=this.frame;
-  return {selected:this.selected,state:this.state(),ageSec:f?Math.max(0,Math.round((this.now()-f.receivedAtMs)/1000)):null,receivedAt:f?new Date(f.receivedAtMs).toISOString():null,staleSec:this.staleSec(),intervalSec:captureIntervalSec()};
+  return {selected:this.selected,state:this.state(),ageSec:f?Math.max(0,Math.round((this.now()-f.receivedAtMs)/1000)):null,receivedAt:f?new Date(f.receivedAtMs).toISOString():null,staleSec:this.staleSec(),intervalSec:captureIntervalSec(),holder:this.holder(),holderShort:this.holder()?this.holder()!.slice(0,4):null,holderSince:this.holder()?new Date(this.holderSinceMs).toISOString():null};
  }
- clear(){this.frame=null;}
+ clear(){this.frame=null;this.holderId=null;}
 }
 
 /** Process-wide store shared by the public gate (writer) and the native operator (reader). */
@@ -74,6 +85,7 @@ export function withRemoteCamera(base:OperatorInputClient,store:RemoteCameraStor
  };
  return {
   remote:()=>store.status(),
+  ...(base.openPreviewStream?{openPreviewStream:(signal:AbortSignal,ms?:number)=>base.openPreviewStream!(signal,ms)}:{}),
   readState:()=>store.selected?remoteState():base.readState(),
   readPreview:async()=>{
    if(!store.selected)return base.readPreview();

@@ -4,7 +4,7 @@ import path from 'node:path';
 import net from 'node:net';
 import {fileURLToPath} from 'node:url';
 const MAX_BODY=36*1024*1024;
-const ACTIONS=new Set(['settings.apply','generation.resume','generation.pause','generation.generate','generation.cancel','scenario.load','scenario.play','scenario.pause','scenario.stop','input.select','display.layout','display.shuffle','display.reset','display.show','display.hide','project.save']);
+const ACTIONS=new Set(['settings.apply','generation.resume','generation.pause','generation.generate','generation.cancel','scenario.load','scenario.play','scenario.pause','scenario.stop','input.select','input.release','display.layout','display.shuffle','display.reset','display.show','display.hide','project.save']);
 
 function privatePeer(address='') {
   address=address.replace(/^::ffff:/,'');
@@ -36,8 +36,8 @@ export function installTdBrowserControl(app, options={}) {
       res.setHeader('Content-Security-Policy',"default-src 'self'; img-src 'self' data:; script-src 'self'; style-src 'self'; frame-ancestors 'self'; connect-src 'self'");
       res.type(types[path.extname(name)]);return res.sendFile(path.join(assets,name));
     }
-    const get=req.method==='GET'&&/^\/api\/td-control\/(state|input-preview|outputs(?:\/[1-4])?)$/.test(route);
-    const post=req.method==='POST'&&/^\/api\/td-control\/(action|scenario-upload)$/.test(route);
+    const get=req.method==='GET'&&/^\/api\/td-control\/(state|input-preview(?:\/stream)?|outputs(?:\/[1-4])?)$/.test(route);
+    const post=req.method==='POST'&&/^\/api\/td-control\/(action|scenario-upload|scenario-submission)$/.test(route);
     if(!get&&!post)return res.status(404).json({ok:false,error:'Unknown control route'});
     if(url.search)return res.status(400).json({ok:false,error:'Query parameters are not supported'});
     if(post){
@@ -45,6 +45,11 @@ export function installTdBrowserControl(app, options={}) {
       if(req.headers['x-control-request']!=='1')return res.status(403).json({ok:false,error:'Missing control request headers'});
       if(String(req.headers['content-type']||'').split(';')[0].trim().toLowerCase()!=='application/json')return res.status(415).json({ok:false,error:'JSON is required'});
       if(!origin||!['http://'+req.headers.host,'https://'+req.headers.host].includes(origin))return res.status(403).json({ok:false,error:'Origin not allowed'});
+    }
+    if(route==='/api/td-control/input-preview/stream'){
+      // Raw multipart pass-through, never buffered as JSON. Only the native operator provides it.
+      if(!options.streamHandler)return res.status(409).json({error:'not-live'});
+      try{return await options.streamHandler(req,res);}catch{if(!res.headersSent)return res.status(502).json({error:'stream-unavailable'});return res.end?.();}
     }
     try{
       let body;

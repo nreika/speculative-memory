@@ -238,7 +238,7 @@ test('body coherence and planned-action checks reject only otherwise acceptable 
   assert.equal(withBodyCoherence(ok,[{bodyCoherent:true},{}]).ok,true);
   const bad=withBodyCoherence(ok,[{bodyCoherent:false}]);assert.equal(bad.ok,false);assert.equal((bad as any).defect,'incoherent_body');
   assert.equal(withBodyCoherence({ok:null as boolean|null,reason:'x'},[{bodyCoherent:false}]).ok,null);
-  assert.equal(withPlannedAction(ok,false,'turns around').ok,false);
+  assert.equal(withPlannedAction(ok,false,'turns around').ok,true);assert.equal((withPlannedAction(ok,false,'turns around') as any).actionNotShown,true);
   assert.equal(withPlannedAction(ok,true,'turns around').ok,true);
   assert.equal(withPlannedAction(ok,false,undefined).ok,true);
   const other={ok:false as boolean|null,reason:'extra_hand',defect:'extra_hand' as const};

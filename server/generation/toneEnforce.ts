@@ -14,6 +14,19 @@ const STRONG_EN = /\b(stands? up|stood up|walks?|walked|leaves?|left the|jumps?|
 const STATIC_EN = /\b(remains?|remained|stays?|stayed|unchanged|no (visible |noticeable )?(change|movement|motion)|does not (move|change)|did not (move|change)|motionless|keeps? the same)\b/i;
 const STATIC_JA = /(変化せず|変わらない|変わらず|変化(は)?(見られ|ない)|動き(は)?(見られ|ない)|動かない|変化なし|そのまま)/;
 
+/**
+ * Should the "is the planned action visible" question be asked at all? 2026-10-21 QA: ~58% of 121 action_not_shown rejections
+ * were false (head / gaze / small posture actions, back views where the hands are not visible). Only a clear arm / hand / object /
+ * whole-body action on a person who is not seen from behind is checked.
+ */
+export function actionIsCheckable(english: string, backView: boolean): boolean {
+  if (backView) return false;
+  const text = String(english ?? '');
+  const bodyAction = /\b(arms?|hands?|fingers?|stands?|stood|walks?|reach(es)?|lift(s|ed)?|pick(s|ed)?|grab(s|bed)?|push(es)?|pull(s|ed)?|carr(y|ies)|holds?|puts?|places?|open(s)?|close(s)?|drinks?|leans? (back|forward|in)|stretch(es)?|rais(es|ed))\b/i.test(text);
+  const headOnly = /\b(head|eyes?|gaze|blinks?|looks?|glances?|nods?|tilts?|face|smiles?|expression)\b/i.test(text);
+  return bodyAction && !(headOnly && !/\b(arms?|hands?|stands?|reach(es)?|lift(s)?|pick(s)?|grab(s)?)\b/i.test(text));
+}
+
 export type ToneMismatch = 'too_weak' | 'too_strong' | 'implausible' | null;
 
 /** Theatrical / unnatural movements nobody does in an office (2026-10-21 user feedback: "raises it high overhead with locked elbows"). */

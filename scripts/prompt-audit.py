@@ -23,7 +23,7 @@ SECTION = re.compile(r"^=== .* ===\s*$", re.M)
 AWAY = re.compile(r"facing away|seen from behind|back of (?:the )?head (?:to|toward) (?:the )?camera|back turned to the camera", re.I)
 FACE_ACTION = re.compile(r"\b(?:look(?:s|ing|ed)?|gaz\w*|glanc\w*|eyes?|smil\w*|laugh\w*|mouth|expression|grin\w*|frown\w*|stares?|staring|facial)\b", re.I)
 NEGATED = re.compile(r"\b(?:never|not|no|without|hidden|stays? hidden)\b", re.I)
-FACE_REF = re.compile(r"image2(?:/image3)?[^.]*\b(?:face|identity)\b", re.I)
+FACE_REF = re.compile(r"image2(?:/image3)?\s+(?:shows|show|are|is)\b[^.]*\b(?:face|identity)\b", re.I)
 
 
 def section(text, head):

@@ -68,7 +68,7 @@ export function rejectionDefect(verdict: PeopleIntegrity): string {
  * the person drawn from behind covered the blue backpack on the chair; one output was shifted/tilted). Built from
  * verdict.defect and the notes in verdict.reason (withBelongings/withFraming/withHandCount append theirs to it).
  */
-export function targetedCorrection(verdict: PeopleIntegrity, opts: { expectedPeople?: number; plannedAction?: string } = {}): string {
+export function targetedCorrection(verdict: PeopleIntegrity, opts: { expectedPeople?: number; plannedAction?: string; sizeAnchor?: string } = {}): string {
   const reason = verdict.reason || '';
   const has = (d: string) => verdict.defect === d || reason.includes(d + ':');
   const parts: string[] = [];
@@ -79,7 +79,12 @@ export function targetedCorrection(verdict: PeopleIntegrity, opts: { expectedPeo
   }
   if (has('framing_drift')) parts.push('Keep the exact framing, scale and rotation of the input; do not zoom, shift or tilt the camera.');
   if (has('incoherent_body')) parts.push('Draw each person as ONE coherent body: the face on the front of the head, the arms attached at the shoulders and bending naturally for the torso; never a face on the back of the head and never an arm coming out of the back.');
-  if (has('duplicate_object')) parts.push('Every object appears exactly once: the object that is moved is no longer at its old place (that spot is empty); never draw the same bottle, mug or notebook twice.');
+  if (has('person_too_large') && opts.sizeAnchor) parts.push(opts.sizeAnchor);
+  if (has('person_moved')) parts.push('The person keeps exactly the same position, size and distance from the camera as in the input: do not move, enlarge or re-centre them; only the pose changes.');
+  if (has('duplicate_object')) {
+    const named = (reason.match(/duplicate_object: [^(]*\(([^)]*)\)/)?.[1] ?? '').split(',').map((x) => x.split(':')[0].trim()).filter(Boolean);
+    parts.push((named.length ? 'The ' + named.join(' and the ') + ' appears exactly once; its old place is empty. ' : '') + 'Every object appears exactly once: the object that is moved is no longer at its old place (that spot is empty); never draw the same bottle, mug or notebook twice.');
+  }
   if (has('face_on_back_view')) parts.push('The person is seen from behind: keep the back of the head toward the camera. No face, eyes, nose or mouth may appear anywhere on this person.');
   if (has('action_not_shown') && opts.plannedAction) parts.push('The requested action must be clearly visible in the pose: ' + opts.plannedAction.trim().slice(0, 300));
   if (has('extra_hand')) parts.push('Each person has exactly two hands and two arms; no extra hand, arm or finger anywhere.');
@@ -104,6 +109,8 @@ export async function generateUniquePeople(args: {
   maxAttempts?:1|2;
   /** The planned action (prediction_prompt): asked of the inspection; passed to the correction of the retry. */
   plannedAction?: string;
+  /** Retry sentence for a person drawn too large / too close (empty-room recent-person scenes). */
+  sizeAnchor?: string;
   expectedPeople?: number;
   onExhausted?: 'throw' | 'skip';
   signal?: AbortSignal;
@@ -112,7 +119,7 @@ export async function generateUniquePeople(args: {
   let last: PeopleIntegrity | undefined, lastImage = '';
   for (let attempt = 0; attempt < limit; attempt++) {
     args.signal?.throwIfAborted();
-    const correction = attempt && last ? targetedCorrection(last, { expectedPeople: args.expectedPeople, plannedAction: args.plannedAction }) : '';
+    const correction = attempt && last ? targetedCorrection(last, { expectedPeople: args.expectedPeople, plannedAction: args.plannedAction, sizeAnchor: args.sizeAnchor }) : '';
     const image = await args.generate(attempt, correction);
     lastImage = image;
     let verdict: PeopleIntegrity;
@@ -127,7 +134,7 @@ export async function generateUniquePeople(args: {
     last = verdict;
     // 2026-10-21: a body that does not hang together, or a planned action that is not visible, gets ONE rebuild even where the
     // engine normally runs a single attempt (turbo).
-    if (attempt + 1 >= limit && limit < 2 && (verdict.defect === 'incoherent_body' || verdict.defect === 'action_not_shown' || verdict.defect === 'face_on_back_view' || verdict.defect === 'duplicate_object')) limit = 2;
+    if (attempt + 1 >= limit && limit < 2 && (verdict.defect === 'incoherent_body' || verdict.defect === 'action_not_shown' || verdict.defect === 'face_on_back_view' || verdict.defect === 'duplicate_object' || verdict.defect === 'person_too_large' || verdict.defect === 'person_moved')) limit = 2;
   }
   // The only rejection that still publishes: the action was not drawn after the rebuild. The caller replaces the subtitle by what is visible.
   if (args.onExhausted === 'skip' && last?.ok === false && last.defect === 'action_not_shown' && lastImage) {

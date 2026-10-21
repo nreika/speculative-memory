@@ -61,7 +61,7 @@ test('public gate: deny matrix (methods, listings, control main, internal APIs, 
  const f=await fixture();
  try{
   const cookie=f.cookieOf(await f.login());const before=f.seen.length;
-  for(const p of ['/control','/control/','/control/mapping','/control/history','/control/control.mjs','/display-assets/','/display-assets/screen.test.mjs','/display-assets/index.html','/captures/','/captures/latest.json','/captures/prediction_data.md','/captures/qa_flagged/x.png','/captures/browser-output-thumbnails/x.jpg','/api/td-control/state','/api/td-control/input-preview','/api/generate','/api/health','/api/browser-outputs','/api/browser-outputs/catalog','/api/displays/current-now/events','/api/events','/api/mobile/archive','/m','/logs','/@vite/client','/src/index.tsx','/catalog','/assets/x.js','/control/output/5'])
+  for(const p of ['/control','/control/','/control/mapping','/control/history','/control/control.mjs','/display-assets/','/display-assets/screen.test.mjs','/display-assets/index.html','/captures/','/captures/latest.json','/captures/prediction_data.md','/captures/qa_flagged/x.png','/captures/browser-output-thumbnails/x.jpg','/api/td-control/state','/api/td-control/input-preview','/api/td-control/input-preview/stream','/api/generate','/api/health','/api/browser-outputs','/api/browser-outputs/catalog','/api/displays/current-now/events','/api/events','/api/mobile/archive','/m','/logs','/@vite/client','/src/index.tsx','/catalog','/assets/x.js','/control/output/5'])
    assert.equal((await f.req(p,{headers:{cookie}})).status,404,p);
   for(const p of ['/display/current-now?x=1','/api/displays/current-now?cursor=1','/display/%2e%2e/control','/captures/..%2fsecret.png','/display/../control','/captures/a%5cb.png','/captures/a\\b.png','/display//x'])assert.equal(await f.raw(p,cookie),400,p);
   for(const [m,p] of [['POST','/display/current-now'],['POST','/api/generate'],['PUT','/api/displays/current-now'],['DELETE','/captures/Gen_a_1.png'],['POST','/api/td-control/action']])assert.equal((await f.req(p,{method:m,headers:{cookie}})).status,405,m+' '+p);
@@ -114,10 +114,10 @@ test('public gate: remote capture token, role separation and frame upload',async
   const view=f.cookieOf(await f.login());assert.equal((await f.req('/capture/',{headers:{cookie:view}})).status,401,'view role cannot capture');
   const post=(body:unknown,headers:Record<string,string>={})=>f.req('/capture/frame',{method:'POST',headers:{cookie:cap,'Content-Type':'application/json','X-Capture-Request':'1',...headers},body:JSON.stringify(body)});
   assert.equal((await post({image:'x'},{'X-Capture-Request':'0'})).status,403);
-  assert.equal((await post({image:'data:image/jpeg;base64,'+jpeg(640,480).toString('base64')})).status,400,'must be 1280x720');
-  const sent=await post({image:'data:image/jpeg;base64,'+jpeg(1280,720).toString('base64')});assert.equal(sent.status,200);assert.equal((await sent.json()).selected,false);
+  assert.equal((await post({image:'data:image/jpeg;base64,'+jpeg(640,480).toString('base64'),clientId:'phone-test-1'})).status,400,'must be 1280x720');
+  const sent=await post({image:'data:image/jpeg;base64,'+jpeg(1280,720).toString('base64'),clientId:'phone-test-1'});assert.equal(sent.status,200);assert.equal((await sent.json()).selected,false);
   assert.equal(f.remote.state(),'fresh');
-  assert.equal((await post({image:'data:image/jpeg;base64,'+jpeg(1280,720).toString('base64')})).status,429,'one frame / 3 s');
+  assert.equal((await post({image:'data:image/jpeg;base64,'+jpeg(1280,720).toString('base64'),clientId:'phone-test-1'})).status,429,'one frame / 3 s');
   const status=await (await f.req('/capture/status',{headers:{cookie:cap}})).json();assert.equal(status.state,'fresh');
   assert.equal((await f.req('/capture/frame',{method:'GET',headers:{cookie:cap}})).status,405);
  }finally{f.close();}
@@ -131,4 +131,33 @@ test('public gate is inert without secrets; cookie signer rejects other roles',(
  const signer=createCookieSigner(SECRET);const value=signer.issue('view');
  assert.equal(signer.verify(value,'view'),true);assert.equal(signer.verify(value,'capture'),false);
  assert.equal(createCookieSigner(SECRET+'x').verify(value,'view'),false);
+});
+
+test('public gate: external scenario submit (/submit/ + POST /api/scenario-submit) behind the capture token; control stays blocked',async()=>{
+ const f=await fixture();
+ try{
+  assert.equal((await f.req('/submit/')).status,401,'no token');
+  assert.equal((await f.req('/api/scenario-submit',{method:'POST',headers:{'X-Submit-Request':'1'},body:new FormData()})).status,401);
+  assert.equal((await f.req('/submit/?token=wrong-token-value-000000')).status,401);
+  const before=f.seen.length;
+  const ok=await f.req('/submit/?token='+TOKEN);assert.equal(ok.status,303);assert.equal(ok.headers.get('location'),'/submit/');
+  const set=ok.headers.get('set-cookie')!;for(const flag of ['sm_sub=','HttpOnly','Secure','SameSite=Lax','Path=/submit','Path=/api/scenario-submit'])assert.ok(set.includes(flag),flag);
+  assert.equal(f.seen.length,before,'token exchange never reaches :3000');
+  const cookie=set.split(';')[0];
+  for(const p of ['/submit/','/submit/submit.mjs','/submit/submit.css'])assert.equal((await f.req(p,{headers:{cookie}})).status,200,p);
+  assert.equal(f.seen.at(-1)!.url,'/submit/submit.css');
+  for(const p of ['/submit/index.html','/submit/../control','/submit/x.mjs'])assert.notEqual((await f.req(p,{headers:{cookie}})).status,200,p);
+  const form=new FormData();form.append('name','x');form.append('csv',new Blob(['seconds,action,target,value\n']),'a.csv');
+  assert.equal((await f.req('/api/scenario-submit',{method:'POST',headers:{cookie},body:form})).status,403,'needs X-Submit-Request');
+  assert.equal((await f.req('/api/scenario-submit',{method:'POST',headers:{cookie,'X-Submit-Request':'1','Content-Type':'application/json'},body:'{}'})).status,415);
+  assert.equal((await f.req('/api/scenario-submit?x=1',{method:'POST',headers:{cookie,'X-Submit-Request':'1'},body:form})).status,400);
+  const sent=await f.req('/api/scenario-submit',{method:'POST',headers:{cookie,'X-Submit-Request':'1'},body:form});
+  assert.equal(sent.status,200);const last=f.seen.at(-1)!;assert.equal(last.method,'POST');assert.equal(last.url,'/api/scenario-submit');assert.equal(last.cookie,undefined);
+  assert.equal((await f.req('/api/scenario-submit',{headers:{cookie}})).status,405);
+  // The submit cookie opens nothing else: control, td-control APIs (incl. scenario-submission approve/delete) and capture stay closed.
+  const n=f.seen.length;
+  for(const p of ['/api/td-control/state','/api/td-control/scenario-submission','/api/td-control/scenario-upload','/control/','/capture/','/api/scenario-submissions'])assert.notEqual((await f.req(p,{headers:{cookie}})).status,200,p);
+  for(const p of ['/api/td-control/action','/api/td-control/scenario-submission','/api/td-control/scenario-upload'])assert.equal((await f.req(p,{method:'POST',headers:{cookie,'X-Control-Request':'1','Content-Type':'application/json'},body:'{}'})).status,405,p);
+  assert.equal(f.seen.length,n,'blocked requests never reach :3000');
+ }finally{f.close();}
 });

@@ -51,6 +51,10 @@ export const DEFECT_TYPES = [
   'face_on_back_view',
   // Pre-publish inspection (2026-10-21): the same object appears twice (moved object also at its old place)
   'duplicate_object',
+  // Mechanical size check (2026-10-21): the person drawn into an empty room is larger / closer than its Presence allows
+  'person_too_large',
+  // Mechanical check (2026-10-21): the person was enlarged / pulled to another place compared with NOW
+  'person_moved',
   'other',
 ] as const;
 export type DefectType = (typeof DEFECT_TYPES)[number];
