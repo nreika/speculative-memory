@@ -52,3 +52,19 @@ test('label shows the Tone / Presence the scene was generated with',()=>{
  assert.equal(temporalLabel(gen,80000).text,'A · FUTURE +30s · T1.0 P0.7 · 1 min 20 sec ago');
  assert.equal(temporalLabel({...gen,sceneKey:'gen_c',distanceSecSigned:-30,tone:0},3000).text,'C · PAST −30s · T0.0 P0.7 · 3 sec ago');
 });
+
+test('scenario format check box reports OK/errors with row text and is dismissable; External list shows stored warnings', async () => {
+  const src = await (await import('node:fs/promises')).readFile(new URL('./control.mjs', import.meta.url), 'utf8');
+  assert.match(src, /Format check: OK \(\$\{scenario\.formatRows/);
+  assert.match(src, /Format check: \$\{errors\.length\} error/);
+  assert.match(src, /issue\.text/);
+  assert.match(src, /scenario-format-dismiss/);
+  assert.match(src, /x\.formatWarnings/);
+});
+test('Control keeps the direction fields editable while a scenario owns the layout',()=>{
+ const src=fs.readFileSync(new URL('./control.mjs',import.meta.url),'utf8');
+ assert.match(src,/const isDirectionSetting=key=>.*continuous\|oneShot\|continuousPersonReferenceIds\|oneShotPersonReferenceIds/);
+ assert.match(src,/key\.startsWith\('scenes\.'\)&&!isDirectionSetting\(key\)/);
+ assert.match(src,/Editable during the scenario; applies at the next generation\./);
+ assert.match(src,/scheduleDirectionSave\(\)/);assert.match(src,/},1000\)/);
+});

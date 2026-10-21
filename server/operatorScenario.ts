@@ -16,7 +16,7 @@ const layoutNames:Record<string,Layout[number]>={display_a:'A',display_b:'B',dis
 const inside=(root:string,file:string)=>{const rel=path.relative(root,file);return rel!==''&&!rel.startsWith('..'+path.sep)&&rel!=='..'&&!path.isAbsolute(rel);};
 
 /** One CSV problem; row is the 1-based CSV line (header = 1), 0 = the file as a whole. */
-export interface ScenarioFormatIssue {row:number;column?:string;message:string;severity:'error'|'warning'}
+export interface ScenarioFormatIssue {row:number;column?:string;message:string;severity:'error'|'warning';/** the offending CSV line (when known) */text?:string}
 /** Full-file format check failed: nothing was loaded (HTTP 400 with formatErrors/formatWarnings). */
 export class ScenarioFormatError extends Error{
  readonly statusCode=400;
@@ -99,7 +99,7 @@ export function createOperatorScenario(options:OperatorScenarioOptions){
  let prompts:Partial<Record<Scene,string>>={},images:Partial<Record<Scene,any[]>>={},modes:Partial<Record<Scene,string>>={};
  const pending=new Map<string,{scene:Scene;text:string}>();let applied:string[]=[];
  let currentLayout:Layout|undefined,processing=false,lastOutputError='';
- let format:{formatErrors:ScenarioFormatIssue[];formatWarnings:ScenarioFormatIssue[];formatCheckedAt:string;formatFile:string}={formatErrors:[],formatWarnings:[],formatCheckedAt:'',formatFile:''};
+ let format:{formatErrors:ScenarioFormatIssue[];formatWarnings:ScenarioFormatIssue[];formatCheckedAt:string;formatFile:string;formatRows:number}={formatErrors:[],formatWarnings:[],formatCheckedAt:'',formatFile:'',formatRows:0};
  const generations:{cueId:string;captureId?:string;skipped?:string;status:string}[]=[];
  type SettingsRow={cueId:string;atSec:number;change:string;status:'applied'|'skipped'|'failed';skipped?:string;error?:string};
  const settingsRows:SettingsRow[]=[];let lastSettingsError='',settingsOwned=false;
@@ -181,8 +181,8 @@ export function createOperatorScenario(options:OperatorScenarioOptions){
  }
  return {
   /** Keeps the last full-file check visible until the next clean load clears it; the loaded plan is untouched. */
-  recordFormat(checkedFile:string,result:{formatErrors?:ScenarioFormatIssue[];formatWarnings?:ScenarioFormatIssue[]}){format={formatErrors:structuredClone(result.formatErrors??[]),formatWarnings:structuredClone(result.formatWarnings??[]),formatCheckedAt:new Date().toISOString(),formatFile:checkedFile};},
-  load(next:OperatorPlan,nextFile:string,formatWarnings:ScenarioFormatIssue[]=[]){if(owned)throw Error('Stop the scenario before loading');plan=structuredClone(next);file=nextFile;format={formatErrors:[],formatWarnings:structuredClone(formatWarnings),formatCheckedAt:new Date().toISOString(),formatFile:nextFile};state='ready';elapsed=0;runId='';lastOutputError='';lastSettingsError='';settingsRows.length=0;generations.length=0;reset();},
+  recordFormat(checkedFile:string,result:{formatErrors?:ScenarioFormatIssue[];formatWarnings?:ScenarioFormatIssue[]}){format={formatErrors:structuredClone(result.formatErrors??[]),formatWarnings:structuredClone(result.formatWarnings??[]),formatCheckedAt:new Date().toISOString(),formatFile:checkedFile,formatRows:0};},
+  load(next:OperatorPlan,nextFile:string,formatWarnings:ScenarioFormatIssue[]=[]){if(owned)throw Error('Stop the scenario before loading');plan=structuredClone(next);file=nextFile;format={formatErrors:[],formatWarnings:structuredClone(formatWarnings),formatCheckedAt:new Date().toISOString(),formatFile:nextFile,formatRows:next.cues.length};state='ready';elapsed=0;runId='';lastOutputError='';lastSettingsError='';settingsRows.length=0;generations.length=0;reset();},
   async play(dry:boolean,layout:Layout){if(!plan)throw Object.assign(Error('Load a scenario first'),{statusCode:409});if(processing)throw Object.assign(Error('Scenario is updating; retry'),{statusCode:409});const nextRunId=randomUUID().replaceAll('-','');if(plan.cues.some(c=>c.outputs)){if(!options.outputMapping)throw Error('Scenario output mapping is unavailable');await options.outputMapping.begin({preview:dry,runId:nextRunId});}if(!dry&&hasSettings()){if(!options.settings)throw Error('Scenario settings control is unavailable');await options.settings.begin({runId:nextRunId});settingsOwned=true;}autoMode=undefined;baseline??=[...layout];owned=true;preview=dry;runId=nextRunId;lastOutputError='';lastSettingsError='';settingsRows.length=0;state='running';elapsed=0;anchor=now();cycle=0;reset();generations.length=0;emit('run.started');await tick();},
   pause(){if(state==='running'){elapsed=time();state='paused';emit('run.paused');}else if(state==='paused'){anchor=now();state='running';emit('run.resumed');}},
   async stop(){const wasOwned=owned;elapsed=time();state='stopped';emit('run.stopped');const {outputError,settingsErrors}=await release('stop',wasOwned);if(outputError)throw outputError;if(settingsErrors.length)throw Object.assign(Error(lastSettingsError),{statusCode:409});},

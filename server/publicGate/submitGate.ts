@@ -13,6 +13,8 @@ import {SUBMIT_MAX_BODY} from '../scenarioSubmit';
 
 export const SUBMIT_COOKIE='sm_sub';
 const PAGES=['/submit/','/submit/submit.mjs','/submit/submit.css'];
+// Read-only authoring guide for external authors: served by :3000 from the /control/guide/ routes (loopback only).
+const GUIDE:Record<string,string>={'/submit/guide/':'/control/guide/','/submit/guide/guide.css':'/control/guide/guide.css','/submit/guide/guide.md':'/control/guide/guide.md'};
 export const isSubmitRoute=(route:string)=>route==='/submit'||route.startsWith('/submit/')||route==='/api/scenario-submit';
 
 export function createSubmitGate(o:{
@@ -62,8 +64,8 @@ export function createSubmitGate(o:{
    return res.redirect(303,'/submit/');
   }
   if(query)return text(res,400,'Bad request');
-  if(!PAGES.includes(route))return text(res,404,'Not found');
+  if(!PAGES.includes(route)&&!GUIDE[route])return text(res,404,'Not found');
   if(!submitter(req))return text(res,401,'Open the submission link (with its token) on this device first.');
-  return upstream(req,res,method,route,{accept:'*/*'});
+  return upstream(req,res,method,GUIDE[route]??route,{accept:'*/*'});
  };
 }

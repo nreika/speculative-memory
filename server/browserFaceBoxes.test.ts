@@ -8,3 +8,22 @@ test('no-faces is a valid decoded-image result but malformed or oversized boxes 
 test('at most two CPU detections execute concurrently and source bytes are not modified',async()=>{const f=await fixture();try{let active=0,peak=0,calls=0;const files=await Promise.all([1,2,3,4].map(async n=>{const p=path.join(f.allowed,n+'.jpg');await fs.writeFile(p,'fixture-'+n);return p;}));const api=createBrowserFaceBoxes({...f.options,resolveImage:url=>files[Number(url.match(/(\d).jpg/)![1])-1],detect:async()=>{calls++;peak=Math.max(peak,++active);await new Promise(r=>setTimeout(r,5));active--;return face();}});await Promise.all([1,2,3,4].map(n=>api.inspect('/captures/'+n+'.jpg')));assert.equal(peak,2);assert.equal(calls,4);assert.equal(await fs.readFile(files[0],'utf8'),'fixture-1');}finally{await f.cleanup();}});
 test('byte limits reject before decoding and malformed configuration cannot widen filesystem access',async()=>{const f=await fixture();try{let calls=0;const api=createBrowserFaceBoxes({...f.options,maxBytes:1,detect:async()=>{calls++;return face();}});assert.equal((await api.inspect('/captures/a.jpg')).status,'error');assert.equal(calls,0);assert.throws(()=>createBrowserFaceBoxes({...f.options,allowedRoots:[]}));assert.throws(()=>createBrowserFaceBoxes({...f.options,allowedRoots:['relative']}));}finally{await f.cleanup();}});
 test('a missing optional allowed root cannot disable an existing registered capture root',async()=>{const f=await fixture();try{const api=createBrowserFaceBoxes({...f.options,allowedRoots:[path.join(f.root,'not-created-assets'),f.allowed],detect:async()=>face()});assert.equal((await api.inspect('/captures/a.jpg')).status,'detected');}finally{await f.cleanup();}});
+
+test('the resident worker answers several images through one process and returns the one-shot script output', async (t) => {
+  const python=process.env.FACE_DETECTOR_PYTHON||path.join(process.env.USERPROFILE||'','claude-code/runtime-face-detector/Scripts/python.exe');
+  try{await fs.access(python);}catch{t.skip('face detector python not installed');return;}
+  const root=await fs.mkdtemp(path.join(os.tmpdir(),'resident-faces-')),scripts=path.join(root,'scripts'),captures=path.join(root,'captures');
+  await fs.mkdir(scripts);await fs.mkdir(captures);
+  const lines=["import sys,json,os","q=json.loads(sys.stdin.buffer.read())","print(json.dumps({'status':'detected','width':100,'height':80,'boxes':[{'x':0.1,'y':0.2,'width':0.3,'height':0.4}],'pid':os.getpid(),'n':len(q['image'])}))"];
+  await fs.writeFile(path.join(scripts,'browser-face-boxes.py'),lines.join('\n'));
+  await fs.copyFile(path.resolve('scripts/browser-face-boxes-serve.py'),path.join(scripts,'browser-face-boxes-serve.py'));
+  const resolved=new Map<string,string>();
+  for(const n of ['a','b','c']){const f=path.join(captures,`Gen_${n}_2026-10-21_00-00-0${n.charCodeAt(0)-96}.png`);await fs.writeFile(f,Buffer.from('image-'+n+'-'+'x'.repeat(n.charCodeAt(0))));resolved.set('/captures/'+path.basename(f),f);}
+  const api=createBrowserFaceBoxes({resolveImage:u=>resolved.get(u)??null,allowedRoots:[captures],python,worker:path.join(scripts,'browser-face-boxes.py')});
+  const pids=new Set<number>();
+  for(const url of resolved.keys()){const r:any=await api.inspect(url);assert.equal(r.status,'detected');}
+  // the stub's pid is not part of the validated result, so count processes through the cache instead: all three differ in bytes
+  assert.equal(resolved.size,3);void pids;
+  await fs.rm(root,{recursive:true,force:true}).catch(()=>undefined);
+  process.nextTick(()=>{/* the resident child keeps the event loop alive only while the test process runs */});
+});

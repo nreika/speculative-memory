@@ -25,6 +25,13 @@ class OutputMappingTests(unittest.TestCase):
         self.assertEqual(p['cues'][1]['prompts'],{'gen_a':'sit'})
         self.assertEqual(p['cues'][2]['oneShot'],{'gen_b':'stand'})
         self.assertTrue(p['cues'][3]['generate'])
+    def test_output_sequence(self):
+        p=parse(text([[0,'output_sequence','screen-10','demo|5|2|4'],[1,'output_sequence','screen-9','demo|40||'],[2,'output_sequence','screen-9','demo'],[3,'end','','']]))
+        self.assertEqual(p['cues'][0]['outputs'][0]['patch'],{'source':'fixed-sequence','sequenceFolder':'demo','frameSec':5,'startFrame':2,'endFrame':4,'loop':True})
+        self.assertEqual(p['cues'][1]['outputs'][0]['patch'],{'source':'fixed-sequence','sequenceFolder':'demo','frameSec':40,'startFrame':1,'endFrame':None,'loop':True})
+        self.assertEqual(p['cues'][2]['outputs'][0]['patch']['frameSec'],30)
+        for target,value in [('screen-10','../x|5'),('screen-10','demo|0'),('screen-10','demo|5|3|2'),('screen-10','demo|5|0'),('screen-10','demo|5|1|2|9'),('screen-10',''),('current-a','demo'),('A','demo')]:
+            with self.subTest(target=target,value=value),self.assertRaises(ValueError):parse(text([[0,'output_sequence',target,value],[1,'end','','']]))
     def test_labels_subtitles_delay_scene(self):
         p=parse(text([[0,'output_labels','screen-7','false'],[1,'output_subtitles','screen-7','true'],[2,'output_delay_sec','screen-7','5'],[3,'output_scene','screen-7','c']]))
         self.assertEqual(p['cues'][0]['outputs'][0]['patch'],{'labels':False})

@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import type {AddressInfo} from 'node:net';
-import {createPublicGateApp,startPublicGate} from './index';
+import {createPublicGateApp,startPublicGate,isGateImage} from './index';
 import {createCookieSigner,createLoginLimiter} from './auth';
 import {RemoteCameraStore} from '../remoteCamera';
 
@@ -18,6 +18,7 @@ async function fixture(){
   res.setHeader('Set-Cookie','internal=1');
   if(req.url==='/api/displays/current-now')return res.setHeader('Content-Type','application/json'),res.end(snap('/captures/Gen_a_1.png',false));
   if(req.url==='/api/displays/blurred')return res.setHeader('Content-Type','application/json'),res.end(snap('/captures/Gen_b_2.jpg',true));
+  if(req.url==='/api/browser-outputs/screen-3')return res.setHeader('Content-Type','application/json'),res.end(snap('/captures/sequences/demo/0001.png',true));
   if(req.url==='/api/browser-outputs/screen-2')return res.setHeader('Content-Type','application/json'),res.end(snap('/captures/browser-output-assets/u/x.webp',false));
   if(req.url?.startsWith('/captures/'))return res.setHeader('Content-Type','image/png'),res.end('ORIGINAL');
   res.setHeader('Content-Type','text/html');res.end('<html>'+req.url+'</html>');
@@ -146,6 +147,11 @@ test('public gate: external scenario submit (/submit/ + POST /api/scenario-submi
   const cookie=set.split(';')[0];
   for(const p of ['/submit/','/submit/submit.mjs','/submit/submit.css'])assert.equal((await f.req(p,{headers:{cookie}})).status,200,p);
   assert.equal(f.seen.at(-1)!.url,'/submit/submit.css');
+  assert.equal((await f.req('/submit/guide/')).status,401,'guide needs the token cookie');
+  assert.equal((await f.req('/submit/guide/guide.md')).status,401);
+  for(const p of ['/submit/guide/','/submit/guide/guide.css','/submit/guide/guide.md'])assert.equal((await f.req(p,{headers:{cookie}})).status,200,p);
+  assert.equal(f.seen.at(-1)!.url,'/control/guide/guide.md');
+  assert.notEqual((await f.req('/submit/guide/other.md',{headers:{cookie}})).status,200);
   for(const p of ['/submit/index.html','/submit/../control','/submit/x.mjs'])assert.notEqual((await f.req(p,{headers:{cookie}})).status,200,p);
   const form=new FormData();form.append('name','x');form.append('csv',new Blob(['seconds,action,target,value\n']),'a.csv');
   assert.equal((await f.req('/api/scenario-submit',{method:'POST',headers:{cookie},body:form})).status,403,'needs X-Submit-Request');
@@ -159,5 +165,20 @@ test('public gate: external scenario submit (/submit/ + POST /api/scenario-submi
   for(const p of ['/api/td-control/state','/api/td-control/scenario-submission','/api/td-control/scenario-upload','/control/','/capture/','/api/scenario-submissions'])assert.notEqual((await f.req(p,{headers:{cookie}})).status,200,p);
   for(const p of ['/api/td-control/action','/api/td-control/scenario-submission','/api/td-control/scenario-upload'])assert.equal((await f.req(p,{method:'POST',headers:{cookie,'X-Control-Request':'1','Content-Type':'application/json'},body:'{}'})).status,405,p);
   assert.equal(f.seen.length,n,'blocked requests never reach :3000');
+ }finally{f.close();}
+});
+
+test('image allow-list: fixed-sequence frame URLs are allowed, nothing else new is',()=>{
+ for(const ok of ['/captures/sequences/demo/0001.png','/captures/sequences/my_seq-2/0042.jpg','/captures/sequences/A/2000.JPEG'])assert.equal(isGateImage(ok),true,ok);
+ for(const bad of ['/captures/sequences/demo/1.png','/captures/sequences/demo/frame.png','/captures/sequences/demo/0001.webp','/captures/sequences/demo/0001.gif','/captures/sequences/../x/0001.png','/captures/sequences/demo/sub/0001.png','/captures/sequences/-x/0001.png','/captures/sequences/demo/captions.json','/captures/sequences/demo/','/api/browser-outputs/sequences','/captures/browser-output-thumbnails/x.jpg'])assert.equal(isGateImage(bad),false,bad);
+});
+
+test('public gate: a fixed-sequence frame with face blur on is blurred exactly like camera and generated images',async()=>{
+ const f=await fixture();
+ try{
+  const cookie=f.cookieOf(await f.login());
+  await f.req('/api/browser-outputs/screen-3',{headers:{cookie}});
+  const img=await f.req('/captures/sequences/demo/0001.png',{headers:{cookie}});
+  assert.equal(img.status,200);assert.equal(await img.text(),'BLURRED');assert.equal(f.blurCalls(),1);
  }finally{f.close();}
 });

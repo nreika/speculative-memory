@@ -14,6 +14,8 @@ export interface BrowserDisplayContent {
  tone?:number;presence?:number;
  faceRegions?:Array<{x:number;y:number;width:number;height:number}>;
  faceRegionStatus?:'detected'|'no-faces'|'unavailable'|'error';
+ /** Fixed sequence frames only: the screen badge, e.g. "SEQ · demo · 3/5". */
+ sequenceLabel?:string;
 }
 export type BrowserDisplaySelection = {mode:'pinned';contentId:string}|{mode:'recorded-offset';offsetMs:number}|{mode:'latest-generated'};
 export interface BrowserDisplayScreen {

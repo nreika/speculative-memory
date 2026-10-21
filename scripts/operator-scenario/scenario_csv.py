@@ -65,7 +65,21 @@ def _apply(action, row, cue, used, plan):
         blank_target()
         cue['layout']=[v.strip() for v in value.split('|')]
     elif action.startswith('output_'):
-        if action not in OUTPUTS:raise FormatIssue('Unknown output action: '+action+' (allowed: '+', '.join(OUTPUTS)+')','action')
+        if action=='output_sequence':
+            if target in CAPTION_CHANNELS or not re.fullmatch(r'screen-[1-9][0-9]{0,2}',target):raise FormatIssue('output_sequence target must be screen-N','target')
+            parts=[v.strip() for v in value.split('|')]
+            if len(parts)>4 or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,63}',parts[0]):raise FormatIssue('output_sequence value is folder|frame_sec|start|end (folder: A-Z a-z 0-9 _ -; later parts optional, blank end = last frame)','value')
+            parts+=['']*(4-len(parts))
+            sec=_num(parts[1] or '30','output_sequence frame_sec',1,86400)
+            frames=[]
+            for label,text,default in (('start',parts[2],1),('end',parts[3],None)):
+                if not text:frames.append(default);continue
+                if not re.fullmatch(r'\d{1,4}',text) or not 1<=int(text)<=2000:raise FormatIssue('output_sequence '+label+' is a whole number from 1 to 2000 (got "'+text+'")','value')
+                frames.append(int(text))
+            if frames[1] is not None and frames[1]<frames[0]:raise FormatIssue('output_sequence end must not be before start','value')
+            cue['outputs']=[{'id':target,'patch':{'source':'fixed-sequence','sequenceFolder':parts[0],'frameSec':sec,'startFrame':frames[0],'endFrame':frames[1],'loop':True}}]
+            return
+        if action not in OUTPUTS:raise FormatIssue('Unknown output action: '+action+' (allowed: '+', '.join(OUTPUTS)+', output_sequence)','action')
         key=OUTPUTS[action]
         if target in CAPTION_CHANNELS and key not in ('labels','subtitles'):
             raise FormatIssue(action+' target must be screen-N; '+target+' accepts only output_labels / output_subtitles','target')
@@ -266,7 +280,12 @@ def check(path):
     try:text=path.read_bytes().decode('utf-8-sig')
     except UnicodeDecodeError:return None,[_issue(0,'CSV must be UTF-8 text')]
     # One logical line per row so row numbers match a spreadsheet (CR CR LF appears after autocrlf).
-    return collect(re.sub(r'\r+\n|\r','\n',text),path.stem,path.parent)
+    text=re.sub(r'\r+\n|\r','\n',text)
+    plan,issues=collect(text,path.stem,path.parent)
+    lines=text.split('\n')
+    for i in issues:  # the offending CSV line, so the operator sees what to fix without opening the file
+        if 1<=i['row']<=len(lines):i['text']=lines[i['row']-1].strip()[:200]
+    return plan,issues
 
 def load(path):
     plan,issues=check(path)

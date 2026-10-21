@@ -54,3 +54,18 @@ test('mechanical duplicate check: objects named in the action are counted in the
  const none=await inspectAndCaption(img,img,1,15,[],undefined,img,[],'The person stretches both arms forward.',true);
  assert.equal(body.images.length,1);assert.equal(body.format.properties.objectCounts,undefined);assert.equal(none.ok,true);
 });
+
+test('wrong_person: the drawn person is described in the same call and compared with the recent person; a mismatch rejects',async t=>{
+ let body:any;let answer:any;
+ t.mock.method(globalThis,'fetch',async(_i:unknown,init?:RequestInit)=>{body=JSON.parse(String(init?.body));return Response.json({response:JSON.stringify(answer),done_reason:'stop'});});
+ const look={hair:'bald',clothes:'dark shirt'};
+ answer={people:[person],duplicateObject:false,personLook:{hair:'long brown hair',clothes:'navy sleeveless dress'}};
+ const bad=await inspectAndCaption(img,img,1,15,[],undefined,img,[],undefined,true,look);
+ assert.ok(body.format.required.includes('personLook'));assert.match(body.prompt,/DRAWN PERSON LOOK/);
+ assert.equal(bad.ok,false);assert.equal(bad.defect,'wrong_person');
+ answer={people:[person],duplicateObject:false,personLook:{hair:'bald head',clothes:'black shirt'}};
+ assert.equal((await inspectAndCaption(img,img,1,15,[],undefined,img,[],undefined,true,look)).ok,true);
+ answer={people:[person],duplicateObject:false};
+ const off=await inspectAndCaption(img,img,1,15,[],undefined,img,[],undefined,true,undefined);
+ assert.equal(body.format.properties.personLook,undefined);assert.equal(off.ok,true);
+});

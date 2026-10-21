@@ -350,7 +350,8 @@ export function composeBehindViewEdit(x: {
     (x.lead ?? "") + (x.anchor ?? EDIT_ANCHOR),
     temporalSentence(x.spanSec, x.pastContinuity, false, false),
     who,
-    x.referencePerson ? "image2 shows this person's clothes and hair only." : "",
+    // 17:20: an invented woman appeared; the reference is named as the SAME person, hair and clothes taken from it.
+    x.referencePerson ? "image2 shows this same person from behind; same hair and clothes as in image2, never a different person." : "",
     x.placement,
     action,
     x.tone !== undefined ? toneSentence(x.tone) : "",

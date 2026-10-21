@@ -1,7 +1,26 @@
 import {localImagePath} from './timeline.mjs';
 const API='/api/browser-outputs';
 const $=id=>document.getElementById(id);
-const sources={now:'Current source',a:'Latest A',b:'Latest B',c:'Latest C','actual-past':'Recorded past','generated-history':'Generated history',fixed:'Fixed image'};
+const sources={now:'Current source',a:'Latest A',b:'Latest B',c:'Latest C','actual-past':'Recorded past','generated-history':'Generated history',fixed:'Fixed image','fixed-sequence':'Fixed sequence'};
+const SEQUENCE_KEYS=['sequenceFolder','frameSec','startFrame','endFrame','loop','sequenceStartedAtMs'];
+const SEQUENCE_NAME=/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
+// Folders under <data>/sequences (GET /api/browser-outputs/sequences): [{name,frameCount,thumbnailUrl}].
+let sequences=[];
+function dropSequence(output){for(const key of SEQUENCE_KEYS)delete output[key];}
+/** English problem text for a sequence output, or '' when it can be applied. */
+function sequenceProblem(output){
+ const folder=sequences.find(item=>item.name===output.sequenceFolder);
+ if(!output.sequenceFolder)return 'Choose a sequence folder.';
+ if(!folder)return `Folder "${output.sequenceFolder}" is not in sequences/ (Refresh the list).`;
+ if(!folder.frameCount)return `Folder "${folder.name}" has no PNG or JPEG frames.`;
+ if(!(output.frameSec>=1&&output.frameSec<=86400))return 'Frame · sec must be from 1 to 86400.';
+ if(!Number.isInteger(output.startFrame)||output.startFrame<1)return 'Start must be a whole number from 1.';
+ if(output.startFrame>folder.frameCount)return `Start is after the last frame (${folder.frameCount}).`;
+ if(output.endFrame!==undefined&&(!Number.isInteger(output.endFrame)||output.endFrame<output.startFrame))return 'End must be a whole number not before Start.';
+ if(output.endFrame!==undefined&&output.endFrame>folder.frameCount)return `End is after the last frame (${folder.frameCount}); it will play to ${folder.frameCount}.`;
+ return '';
+}
+async function loadSequences(){try{sequences=(await request('/sequences')).sequences||[];}catch(error){status('Sequences: '+error.message,true);}}
 const fadeModes={original:'TD · black',crossfade:'Crossfade',none:'None'};
 const directChannels=[
  ['current-now','NOW','/display/current-now'],['current-a','A','/display/current-a'],['current-b','B','/display/current-b'],['current-c','C','/display/current-c']
@@ -96,12 +115,12 @@ async function assignImage(outputId){
  const committed=structuredClone(savedOutputs);
  let output=committed.find(item=>item.id===outputId);
  if(!output){output=structuredClone(target);committed.push(output);}
- output.source='fixed';output.contentId=imageId;
+ output.source='fixed';output.contentId=imageId;dropSequence(output);
  busy=true;buttons();status('Assigning image to '+target.label+'…');
  try{
   const data=await request('',{baseRevision:revision,outputs:committed,channelFadeModes:savedChannelFadeModes,channelFadeTimings:savedChannelFadeTimings,channelFaceBlurs:savedChannelFaceBlurs,channelCaptions:savedChannelCaptions,requestId:requestId()});
   adoptConfiguration(data);
-  target.source='fixed';target.contentId=imageId;
+  target.source='fixed';target.contentId=imageId;dropSequence(target);
   outputs=draft;channelFadeModes=draftFades;channelFadeTimings=draftTimings;channelFaceBlurs=draftBlurs;channelCaptions=draftCaptions;
   dirty=JSON.stringify(outputs)!==JSON.stringify(savedOutputs)||JSON.stringify(channelFadeModes)!==JSON.stringify(savedChannelFadeModes)||JSON.stringify(channelFadeTimings)!==JSON.stringify(savedChannelFadeTimings)||JSON.stringify(channelFaceBlurs)!==JSON.stringify(savedChannelFaceBlurs)||JSON.stringify(channelCaptions)!==JSON.stringify(savedChannelCaptions);
   renderChannelFades();renderCards();
@@ -153,10 +172,11 @@ function renderCards(){
   const fixed=catalog.get(output.contentId);if(fixed)safeImage(img,fixed.thumbnailUrl||fixed.imageUrl);else img.hidden=true;
   assign.append(img,node('span','Assign selected image'));
   assign.onclick=()=>assignImage(output.id);
-  const assignment=node('p',output.source==='fixed'?detail(fixed||{id:output.contentId,provenance:'unknown'}):sources[output.source], 'assignment');
+  const assignment=node('p',output.source==='fixed'?detail(fixed||{id:output.contentId,provenance:'unknown'}):output.source==='fixed-sequence'?'SEQ · '+output.sequenceFolder:sources[output.source], 'assignment');
   assignment.id='assignment-'+output.id;
-  const source=select(sources,output.source,value=>{if(value==='fixed'&&!output.contentId){if(!selected){status('Select an image before choosing Fixed image.',true);source.value=output.source;return;}output.contentId=selected.id;}if(value!=='fixed')delete output.contentId;if(['now','a','b','c','td-1','td-2','td-3','td-4'].includes(value))output.delaySec=0;output.source=value;edited();renderCards();});source.setAttribute('aria-label',output.label+' source');
+  const source=select(sources,output.source,value=>{if(value==='fixed'&&!output.contentId){if(!selected){status('Select an image before choosing Fixed image.',true);source.value=output.source;return;}output.contentId=selected.id;}if(value==='fixed-sequence'&&output.source!=='fixed-sequence'){const first=sequences.find(item=>item.frameCount>0);if(!first){status('No sequence folders yet · put PNG/JPEG frames in speculative-memory_data/sequences/<name>/ or use Import sequence.',true);source.value=output.source;return;}Object.assign(output,{sequenceFolder:first.name,frameSec:30,startFrame:1,loop:true});delete output.endFrame;}if(value!=='fixed-sequence')dropSequence(output);if(value!=='fixed')delete output.contentId;if(['now','a','b','c','td-1','td-2','td-3','td-4','fixed-sequence'].includes(value))output.delaySec=0;output.source=value;edited();renderCards();});source.setAttribute('aria-label',output.label+' source');
   card.append(head,assign,assignment,labeled('Source',source));
+  if(output.source==='fixed-sequence')card.append(sequenceFields(output,card));
   if(['actual-past','generated-history'].includes(output.source)){
    const delay=node('input');delay.type='number';delay.min='0';delay.max='86400';delay.step='1';delay.value=output.delaySec??30;delay.setAttribute('aria-label',output.label+' delay seconds');
    delay.oninput=()=>{if(delay.value===''||!delay.checkValidity())return;output.delaySec=Number(delay.value);edited(TYPING_SAVE_DELAY_MS);};card.append(labeled('Delay · sec',delay));
@@ -171,6 +191,26 @@ function renderCards(){
  }
  buttons();
 }
+function sequenceFields(output,card){
+ const box=node('div',undefined,'sequence-fields'),problem=node('p','','sequence-problem');
+ const check=()=>{const text=sequenceProblem(output);problem.textContent=text;problem.hidden=!text;return !text||/it will play to/.test(text);};
+ const change=(delay=0)=>{card.classList.add('is-dirty');if(check())edited(delay);else status('Not applied · '+sequenceProblem(output),true);};
+ const options=Object.fromEntries(sequences.map(item=>[item.name,`${item.name} · ${item.frameCount} frames`]));
+ if(output.sequenceFolder&&!options[output.sequenceFolder])options[output.sequenceFolder]=output.sequenceFolder+' · missing';
+ const folder=select(options,output.sequenceFolder,value=>{output.sequenceFolder=value;output.startFrame=1;delete output.endFrame;change();renderCards();});folder.setAttribute('aria-label',output.label+' sequence folder');
+ const count=sequences.find(item=>item.name===output.sequenceFolder)?.frameCount??0;
+ const number=(value,min,max,step,label,placeholder)=>{const input=node('input');input.type='number';input.min=String(min);input.max=String(max);input.step=String(step);input.value=value??'';if(placeholder)input.placeholder=placeholder;input.setAttribute('aria-label',output.label+' '+label);return input;};
+ const sec=number(output.frameSec??30,1,86400,'any','frame seconds');
+ sec.oninput=()=>{if(sec.value==='')return;output.frameSec=Number(sec.value);change(TYPING_SAVE_DELAY_MS);};
+ const start=number(output.startFrame??1,1,Math.max(count,1),1,'start frame');
+ start.oninput=()=>{if(start.value==='')return;output.startFrame=Number(start.value);change(TYPING_SAVE_DELAY_MS);};
+ const end=number(output.endFrame,1,Math.max(count,1),1,'end frame',count?String(count):'last');end.title='Empty = last frame';
+ end.oninput=()=>{if(end.value==='')delete output.endFrame;else output.endFrame=Number(end.value);change(TYPING_SAVE_DELAY_MS);};
+ const loop=node('input');loop.type='checkbox';loop.checked=output.loop!==false;loop.setAttribute('aria-label',output.label+' loop');loop.onchange=()=>{output.loop=loop.checked;change();};
+ const readout=node('p',`${count} frames · now showing –`,'sequence-readout');readout.id='sequence-now-'+output.id;
+ box.append(labeled('Folder',folder),labeled('Frame · sec',sec),labeled('Start',start),labeled(`End (of ${count})`,end),labeled('Loop',loop),readout,problem);check();
+ return box;
+}
 async function previews(){
  await Promise.allSettled(outputs.map(async output=>{
   const observedRevision=revision;
@@ -182,7 +222,10 @@ async function previews(){
    if(label)label.textContent='Scenario · '+(sources[snapshot.scenarioOverride.source]||snapshot.scenarioOverride.source);
    return;
   }
-  if(output.source==='fixed'&&snapshot.content?.id===output.contentId){
+  const now=$('sequence-now-'+output.id);
+  if(now)now.textContent=snapshot.sequence?`Now showing ${snapshot.sequence.frame}/${snapshot.sequence.count} · plays ${snapshot.sequence.start}–${snapshot.sequence.end}${snapshot.sequence.loop?' · loop':''}`:'Now showing – · '+(snapshot.outputStatus?.reason||'waiting');
+  if(output.source==='fixed-sequence'){if(label)label.textContent=snapshot.content?.sequenceLabel||('SEQ · '+(output.sequenceFolder||'?'));}
+  else if(output.source==='fixed'&&snapshot.content?.id===output.contentId){
    const item={...snapshot.content,label:snapshot.content.caption||output.contentId};catalog.set(output.contentId,item);
    if(label)label.textContent=detail(item);
   }else if(label){
@@ -217,6 +260,8 @@ function parsePreset(text){
   if(!output||!/^screen-[1-9][0-9]{0,2}$/.test(output.id)||ids.has(output.id)||typeof output.label!=='string'||output.label.length>80||!Object.hasOwn(sources,output.source))throw Error('Invalid output in preset.');
   ids.add(output.id);
   if(output.source==='fixed'&&(typeof output.contentId!=='string'||!output.contentId||output.contentId.length>512))throw Error('Fixed image reference is missing.');
+  if(output.source==='fixed-sequence'&&(typeof output.sequenceFolder!=='string'||!SEQUENCE_NAME.test(output.sequenceFolder)))throw Error('Fixed sequence folder is missing.');
+  if(output.source!=='fixed-sequence'&&SEQUENCE_KEYS.some(key=>output[key]!==undefined))throw Error('Sequence settings on a non-sequence output.');
   if(output.fadeMode!==undefined&&!Object.hasOwn(fadeModes,output.fadeMode))throw Error('Invalid fade mode.');
   for(const field of ['fadeDurationMs','blackHoldMs'])if(output[field]!==undefined&&(!Number.isInteger(output[field])||output[field]<0||output[field]>10000))throw Error('Invalid fade timing.');
   if(output.faceBlur!==undefined&&(typeof output.faceBlur?.enabled!=='boolean'||!Number.isInteger(output.faceBlur.strengthPx)||output.faceBlur.strengthPx<0||output.faceBlur.strengthPx>40))throw Error('Invalid face blur setting.');
@@ -247,7 +292,10 @@ $('make-ten').onclick=()=>{while(outputs.length<10)add();renderCards();};
 $('reload-mapping').onclick=load;
 
 $('save-mapping').onclick=async()=>{
- if(!dirty||busy||saving)return;busy=true;buttons();
+ if(!dirty||busy||saving)return;
+ const bad=outputs.find(output=>output.source==='fixed-sequence'&&sequenceProblem(output)&&!/it will play to/.test(sequenceProblem(output)));
+ if(bad){status(`Not applied · ${bad.label}: ${sequenceProblem(bad)}`,true);return;}
+ busy=true;buttons();
  try{const data=await request('',{baseRevision:revision,outputs,channelFadeModes,channelFadeTimings,channelFaceBlurs,channelCaptions,requestId:requestId()});adoptConfiguration(data);dirty=false;renderChannelFades();renderCards();status('Mapping applied. Generation settings are unchanged.');void previews();}
  catch(error){status(error.message+' — mapping has not been confirmed. Reload before retrying.',true);}finally{busy=false;buttons();}
 };
@@ -266,6 +314,23 @@ $('import-images').onchange=async event=>{
   $('library-kind').value='uploaded';await loadLibrary();$('selected-image').textContent=detail(selected)+' — click an output to assign.';status(`${files.length} image(s) imported. Select an output to assign.`);
  }catch(error){status(error.message,true);}finally{event.target.value='';}
 };
+$('import-sequence').onchange=async event=>{
+ const files=[...event.target.files].sort((a,b)=>a.name.localeCompare(b.name,'en',{numeric:true,sensitivity:'base'}));if(!files.length)return;
+ const name=$('sequence-name').value.trim();
+ try{
+  if(!SEQUENCE_NAME.test(name))throw Error('Type a sequence name first: 1-64 characters of A-Z a-z 0-9 _ - (no spaces).');
+  if(sequences.some(item=>item.name===name))throw Error(`Sequence "${name}" already exists; choose a new name.`);
+  if(files.length>2000)throw Error('A sequence holds at most 2000 frames.');
+  for(const file of files)if(!['image/png','image/jpeg'].includes(file.type)||file.size>8*1024*1024)throw Error('Sequences accept PNG or JPEG images up to 8 MB ('+file.name+').');
+  for(const [i,file] of files.entries()){
+   status(`Importing sequence ${name} · ${i+1}/${files.length}…`);
+   const imageDataUrl=await new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(reader.result);reader.onerror=reject;reader.readAsDataURL(file);});
+   await request('/sequences',{folder:name,index:i+1,imageDataUrl});
+  }
+  await loadSequences();if(!dirty)renderCards();status(`Sequence ${name} imported · ${files.length} frames. Choose Source = Fixed sequence on an output.`);$('sequence-name').value='';
+ }catch(error){status(error.message,true);}finally{event.target.value='';}
+};
+$('refresh-sequences').onclick=async()=>{await loadSequences();if(!dirty)renderCards();status(`${sequences.length} sequence folder(s) in speculative-memory_data/sequences.`);};
 window.addEventListener('beforeunload',event=>{if(dirty||saving){event.preventDefault();event.returnValue='';}});
-await load();await loadLibrary();
+await loadSequences();await load();await loadLibrary();
 setInterval(()=>{if(!document.hidden&&!dirty&&!busy&&!saving)void previews();},5000);

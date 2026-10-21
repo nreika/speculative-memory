@@ -5,6 +5,7 @@
 <p id="map-status" role="status">Loading outputs…</p>
 <main class="mapping-workspace">
  <section class="image-library"><header><h2>Images</h2><label class="import-button">Import images<input id="import-images" type="file" accept="image/png,image/jpeg,image/webp" multiple hidden></label></header>
+ <div class="sequence-tools"><input id="sequence-name" placeholder="Sequence name" maxlength="64" aria-label="New sequence name"><label class="import-button">Import sequence<input id="import-sequence" type="file" accept="image/png,image/jpeg" multiple hidden></label><button id="refresh-sequences" title="Re-read speculative-memory_data/sequences">Sequences ↻</button></div>
  <div class="library-tools"><select id="library-kind" aria-label="Image library filter"><option value="all">All images</option><option value="actual">Recorded</option><option value="generated">Generated</option><option value="uploaded">Imported</option></select><button id="refresh-library">Refresh</button></div>
  <p id="selected-image">Select an image, then assign it to an output. Assignment updates the output immediately.</p><div id="image-pool"></div><button id="more-images" hidden>Load more</button>
  </section>

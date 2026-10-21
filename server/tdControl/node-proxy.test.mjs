@@ -47,3 +47,17 @@ test('input-preview/stream: 409 not-live without a native stream handler, delega
  const bad=response();await sh(request({originalUrl:'/api/td-control/input-preview/stream?x=1'}),bad,()=>{});assert.equal(bad.code,400);
  const host=response();await sh(request({originalUrl:'/api/td-control/input-preview/stream',headers:{host:'attacker.example'}}),host,()=>{});assert.equal(host.code,403);assert.equal(called,1);
 });
+test('authoring guide and versions are served as read-only pages',async()=>{
+ const html=response();await handler(request({originalUrl:'/control/guide/'}),html,()=>{});
+ assert.equal(html.code,200);assert.match(html.body,/<h1 id="[^"]*">Speculative Memory: Scenario CSV Authoring Guide<\/h1>/);assert.match(html.body,/v1.1 · 2026-10-21/);assert.match(html.body,/Download \.md/);
+ const md=response();await handler(request({originalUrl:'/control/guide/guide.md'}),md,()=>{});assert.equal(md.code,200);assert.match(md.body,/^# Speculative Memory/);
+ const css=response();await handler(request({originalUrl:'/control/guide/guide.css'}),css,()=>{});assert.ok(css.file.endsWith('guide.css'));
+ const versions=response();await handler(request({originalUrl:'/control/versions.json'}),versions,()=>{});assert.equal(versions.body.manual.version,'1.1');assert.equal(versions.body.guide.version,'1.1');
+ const denied=response();await handler(request({originalUrl:'/control/guide/',socket:{remoteAddress:'8.8.8.8'}}),denied,()=>{});assert.equal(denied.code,403);
+ const other=response();await handler(request({originalUrl:'/control/guide/other.md'}),other,()=>{});assert.equal(other.code,404);
+});
+test('guide is 404-safe when the markdown is missing',async()=>{
+ let h;installTdBrowserControl({use:x=>{h=x;}},{bridgeUrl:'http://100.100.0.2:8767',tokenFile,allowedHosts:['100.100.0.1:3000'],repoRoot:dir});
+ const res=response();await h(request({originalUrl:'/control/guide/'}),res,()=>{});assert.equal(res.code,404);
+ const v=response();await h(request({originalUrl:'/control/versions.json'}),v,()=>{});assert.deepEqual(v.body,{});
+});

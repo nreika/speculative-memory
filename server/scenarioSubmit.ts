@@ -24,7 +24,7 @@ const PNG_MAGIC=Buffer.from([137,80,78,71,13,10,26,10]);
 export class SubmitError extends Error{
  constructor(readonly statusCode:number,message:string,readonly extra:Record<string,unknown>={}){super(message);}
 }
-export interface Submission{id:string;file:string;scenarioId:string;submittedAt:string;name:string;note:string;origin:'external';approved:boolean;approvedAt?:string}
+export interface Submission{id:string;file:string;scenarioId:string;submittedAt:string;name:string;note:string;origin:'external';approved:boolean;approvedAt?:string;formatWarnings?:{row:number;column?:string;message:string;text?:string}[]}
 export interface UploadedFile{field:string;filename:string;data:Buffer}
 interface Library{
  upload(payload:any,extraFiles?:Record<string,string>):Promise<{file:string;id:string;scenarioId:string;formatWarnings:unknown[]}>;
@@ -150,17 +150,17 @@ export function createScenarioSubmissions(options:{root:string;library:Library;n
    let stored;
    try{stored=await options.library.upload({csv:input.csv,assets:input.assets},{[SUBMISSION_SIDECAR]:JSON.stringify(meta,null,1)});}
    catch(error){throw formatFailure(error);}
-   const submission:Submission={...meta,id:stored.id,file:stored.file,scenarioId:stored.scenarioId};
+   const submission:Submission={...meta,id:stored.id,file:stored.file,scenarioId:stored.scenarioId,...(stored.formatWarnings.length?{formatWarnings:stored.formatWarnings as Submission['formatWarnings']}:{})};
    // scenarioId/file are added to the sidecar after the import so the folder stays self-describing.
-   await fs.writeFile(sidecarPath(stored.id),JSON.stringify({...meta,file:stored.file,scenarioId:stored.scenarioId},null,1),'utf8').catch(()=>{});
+   await fs.writeFile(sidecarPath(stored.id),JSON.stringify({...meta,file:stored.file,scenarioId:stored.scenarioId,...(stored.formatWarnings.length?{formatWarnings:stored.formatWarnings}:{})},null,1),'utf8').catch(()=>{});
    known.set(submission.id,submission);options.onSubmitted?.(submission);
    return {ok:true,id:submission.id,scenarioId:submission.scenarioId,warnings:stored.formatWarnings};
   },
   list():Submission[]{return [...known.values()].map(s=>({...s})).sort((a,b)=>b.submittedAt.localeCompare(a.submittedAt));},
   /** Library rows plus {external} for submissions (label/approved for Control). */
-  decorate<T extends {file:string;name:string}>(rows:T[]):(T&{external?:{id:string;name:string;note:string;submittedAt:string;approved:boolean;scenarioId:string}})[]{
+  decorate<T extends {file:string;name:string}>(rows:T[]):(T&{external?:{id:string;name:string;note:string;submittedAt:string;approved:boolean;scenarioId:string;formatWarnings?:Submission['formatWarnings']}})[]{
    return rows.map(row=>{const id=/^browser-imports\/([0-9a-f-]{36})\//.exec(row.file)?.[1],s=id?known.get(id):undefined;
-    return s?{...row,external:{id:s.id,name:s.name,note:s.note,submittedAt:s.submittedAt,approved:s.approved,scenarioId:s.scenarioId}}:row;});
+    return s?{...row,external:{id:s.id,name:s.name,note:s.note,submittedAt:s.submittedAt,approved:s.approved,scenarioId:s.scenarioId,...(s.formatWarnings?.length?{formatWarnings:s.formatWarnings}:{})}}:row;});
   },
   /** Throws 403 when the file is an external submission that is not approved (read from disk: authoritative). */
   async assertPlayable(file:unknown){

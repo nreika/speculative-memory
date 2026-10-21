@@ -6,7 +6,7 @@ function show(kind,title,text='',rows=[]){
   $('result').hidden=false;$('result').className=kind;$('result-title').textContent=title;$('result-text').textContent=text;
   $('result-list').replaceChildren(...rows.slice(0,30).map(r=>{const li=document.createElement('li');li.textContent=r;return li;}));
 }
-const issue=w=>`${w.row?'row '+w.row:'file'}${w.column?' ['+w.column+']':''}: ${w.message}`;
+const issue=w=>`${w.row?'row '+w.row:'file'}${w.column?' ['+w.column+']':''}: ${w.message}${w.text?'  ⟶  '+w.text:''}`;
 function localCheck(){
   const name=$('name').value.trim(),csv=$('csv').files[0],images=[...$('images').files];
   if(!name)return 'Enter your name.';

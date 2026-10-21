@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
-import {completedConeResult,availableConeScenes,coneGeometry,localImagePath} from './timeline.mjs';
+import {completedConeResult,availableConeScenes,coneGeometry,localImagePath,generatingScene} from './timeline.mjs';
 
 function event(id,count=3,ended=10000){
   const scope='test:run',images={},browserBatch=[];
@@ -71,11 +71,11 @@ test('unknown offsets stay unknown and first-visit provisional data never mixes 
   assert.equal(provisional.b,null);assert.equal(provisional.c,null);
 });
 
-test('generation keeps previous scenes at their recorded distance, blinking, and marks skipped ones afterwards',()=>{
+test('generation keeps previous scenes at their recorded distance, only the generating scene blinks, and marks skipped ones afterwards',()=>{
   const source=fs.readFileSync(new URL('./control.mjs',import.meta.url),'utf8');let resets=0;const texts=[],animations=[];
   const elements={cone:{replaceChildren(){resets++;texts.length=0;animations.length=0;},append(){}},'cone-result':{setAttribute(){}},'cone-settings':{setAttribute(){}},'cone-status':{}};
   const completed=completedConeResult([old]);
-  const context={availableConeScenes,coneGeometry,localImagePath,JSON,Number,Object,
+  const context={availableConeScenes,coneGeometry,localImagePath,generatingScene,JSON,Number,Object,
     $:id=>elements[id],
     svgNode:(tag,attrs,content)=>{if(tag==='text')texts.push(content);if(tag==='animate')animations.push(attrs);return {append(child){if(child)animations.push(child);}};},
     field:()=>({value:99}),scenes:['a','b','c'],colors:{a:'orange',b:'pink',c:'blue'},
@@ -87,15 +87,16 @@ test('generation keeps previous scenes at their recorded distance, blinking, and
   assert.ok(texts.some(t=>/^A\s+\+15 sec$/.test(t)),texts.join('|'));
   // A new capture starts: NOW changes, A/B/C still belong to "old". Distances stay known, frames blink.
   const freshScenes=completedConeResult([fresh]).scenes;
-  context.latest.capture={phase:'generating',captureId:'fresh'};
+  context.latest.capture={phase:'generating',captureId:'fresh'};context.captureProgress={active:{captureId:'fresh',stage:'sceneA'}};
   context.displayedScenes={...completed.scenes,now:freshScenes.now};
   context.renderCone();assert.equal(resets,2);
   assert.ok(!texts.some(t=>/time unknown/.test(t)),texts.join('|'));
   assert.ok(texts.some(t=>/^A\s+\+15 sec · previous$/.test(t)),texts.join('|'));
-  assert.equal(animations.filter(a=>a.attributeName==='stroke-width').length,3);
-  // A arrives: A stops blinking, B/C still blink.
-  context.displayedScenes={...context.displayedScenes,a:freshScenes.a};
-  context.renderCone();assert.equal(animations.filter(a=>a.attributeName==='stroke-width').length,2);
+  // 2026-10-21: only the scene being generated (A) blinks; B/C are marked previous without blinking.
+  assert.equal(animations.filter(a=>a.attributeName==='stroke-width').length,1);
+  // A arrives and B starts: only B blinks.
+  context.displayedScenes={...context.displayedScenes,a:freshScenes.a};context.captureProgress={active:{captureId:'fresh',stage:'sceneB'}};
+  context.renderCone();assert.equal(animations.filter(a=>a.attributeName==='stroke-width').length,1);
   // Generation ends with B/C skipped: no blink, small marker with the reason.
   context.latest.capture={phase:'idle',captureId:''};context.sceneSkips={b:'chance',c:'rejected:identity'};
   context.renderCone();assert.equal(animations.length,0);

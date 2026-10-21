@@ -21,13 +21,14 @@ export interface BrowserOutputSourcesOptions {
  thumbnailUrl?:(imageUrl:string)=>string|null;
 }
 /** Metadata only: no archive walks, inference, recording time inference, or new publication. */
+const RECORD_KEEP=5000;
 export function createBrowserOutputSources(options:BrowserOutputSourcesOptions){
  const validated=new WeakMap<object,BrowserDisplayContent>(),projectedOf=new WeakMap<BrowserDisplayContent,BrowserDisplayContent>();
  let lastProjected:BrowserDisplayContent[]|undefined,lastById=new Map<string,BrowserDisplayContent>();
  /** Capture events are cached by the store, so the same raw rows are validated once, not on every catalog build. */
  const validateOne=(raw:BrowserDisplayContent)=>{if(raw&&typeof raw==='object'){const hit=validated.get(raw);if(hit)return hit;const [content]=validateBrowserDisplayContents([raw]);validated.set(raw,content);return content;}return validateBrowserDisplayContents([raw])[0];};
  let lastCatalog:{events:unknown;key:string;value:BrowserOutputCatalog}|undefined;
- let recordCache:{sig:string;items:BrowserDisplayContent[];scopes:Set<string>}|undefined;
+ let recordCache:{sig:string;count:number;firstId:string;lastId:string;items:BrowserDisplayContent[];scopes:Set<string>}|undefined;
  const thumbs=new Map<string,string|null|undefined>();
  const thumbnailOf=(url:string)=>{if(!options.thumbnailUrl)return undefined;if(thumbs.has(url))return thumbs.get(url);const v=options.thumbnailUrl(url);if(thumbs.size>200000)thumbs.clear();thumbs.set(url,v);return v;};
  return {async loadCatalog():Promise<BrowserOutputCatalog>{
@@ -73,14 +74,20 @@ export function createBrowserOutputSources(options:BrowserOutputSourcesOptions){
   // 2026-10-21: the camera recording log has ~30k rows and readRecords() returns fresh copies every call; validating them all on
   // every catalog build blocked the server ~0.4 s. The validated rows are reused while the log is unchanged (length + first/last id).
   const recordSig=records.length+'|'+(records[0]?.id??'')+'|'+(records[records.length-1]?.id??'');
+  // The recording log is append-only and grows every second: when it only grew at the end, only the new rows are validated
+  // (2026-10-21 CPU profile: re-validating ~35k rows every second was ~30% of the server's CPU and stalled every API by ~1 s).
   if(recordCache?.sig!==recordSig){
-   const items:BrowserDisplayContent[]=[],scopes=new Set<string>();
-   for(const raw of records){try{const [content]=validateBrowserDisplayContents([raw]);if(content.provenance!=='actual')continue;items.push(content);
+   const prev=recordCache;
+   const grewOnly=!!prev&&records.length>=prev.count&&(records[0]?.id??'')===prev.firstId&&(prev.count===0||records[prev.count-1]?.id===prev.lastId);
+   const items:BrowserDisplayContent[]=grewOnly?prev!.items:[],scopes=grewOnly?prev!.scopes:new Set<string>();
+   for(const raw of grewOnly?records.slice(prev!.count):records){try{const [content]=validateBrowserDisplayContents([raw]);if(content.provenance!=='actual')continue;items.push(content);
     if(raw.recordingAutoScope===content.scope&&validRecordingScope(content.scope)&&content.recordedAtMs!==null)scopes.add(content.scope);
    }catch{}}
-   recordCache={sig:recordSig,items,scopes};
+   recordCache={sig:recordSig,count:records.length,firstId:String(records[0]?.id??''),lastId:String(records[records.length-1]?.id??''),items,scopes};
   }
-  for(const content of recordCache.items)contents.set(content.id,content);
+  // Only the newest recordings (~83 min at 1 fps) are catalogued: older ones are beyond any output delay and made every rebuild 7x heavier.
+  if(recordCache.items.length>RECORD_KEEP*1.2)recordCache.items.splice(0,recordCache.items.length-RECORD_KEEP);
+  for(const content of recordCache.items.length>RECORD_KEEP?recordCache.items.slice(-RECORD_KEEP):recordCache.items)contents.set(content.id,content);
   for(const scope of recordCache.scopes){cameraScopes.add(scope);clocks[scope]??={serverAnchorMs:0,worldAnchorMs:0,rate:1};}
   // Only explicit acquisition metadata binds live generation NOW to the 1-second camera recordings.
   const nowSnapshot=snapshots.now,nowContent=nowSnapshot?.content;

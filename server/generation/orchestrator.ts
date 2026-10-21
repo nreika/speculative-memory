@@ -506,6 +506,10 @@ export async function generateImage(args: {
   turboContext?:Pick<TurboCandidateParams,'sourceActors'|'protectedBoxes'|'sourceEvidenceComplete'|'expectedPeople'>;
 }): Promise<string> {
   const localImageEngine=args.localImageEngine??defaultLocalImageEngine();
+  // 17:20: the recent person is drawn only from an attached photo of them. Without it the scene stays an empty room
+  // (person rule: never invent a stranger); the no-change empty room then returns the NOW frame below.
+  if (args.behindView && !args.faceImageDataUrl)
+    args = { ...args, behindView: undefined, referencePerson: false, presence: 0, predictionPrompt: "The room stays empty; nothing in it has been moved." };
   // 2026-10-21: a scene planned EMPTY (presence 0, no behind-view person) gets no person image at all. server.ts still passed
   // the recent-person photo for unoccupied NOW frames, and the edit drew that person into "The room stays empty" scenes.
   if (!args.referenceCast && (args.presence ?? SERVER_SCENE_DEFAULTS.presence) <= 0 && args.referencePerson !== true)

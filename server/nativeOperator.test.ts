@@ -170,7 +170,7 @@ test('scenario FORMAT ERROR lists every problem, keeps the last good plan, persi
  }finally{await f.close();}
 });
 
-async function resyncFixture(stored:string|undefined,bridgeState:(calls:any[])=>any){
+async function resyncFixture(stored:string|undefined,bridgeState:(calls:any[])=>any,extra:Record<string,unknown>={}){
  const directory=await fs.mkdtemp(path.join(os.tmpdir(),'native-operator-resync-'));
  await fs.mkdir(path.join(directory,'scenarios'));
  await fs.writeFile(path.join(directory,'bootstrap-state.json'),JSON.stringify(initial()));
@@ -178,7 +178,7 @@ async function resyncFixture(stored:string|undefined,bridgeState:(calls:any[])=>
  if(stored!==undefined)await fs.writeFile(path.join(directory,'input-selection.json'),JSON.stringify({schema:1,setId:stored}));
  const calls:any[]=[];
  const input:OperatorInputClient={readState:async()=>bridgeState(calls),readPreview:async()=>{throw Error('unused');},readFrame:async()=>{throw Error('unused');},select:async r=>{calls.push(r);return{...r,state:bridgeState(calls)};}};
- const operator=await createNativeOperator({directory,python,input,isBusy:()=>false,capture:()=>({active:null}),cancel:()=>{},readScenes:async()=>({}),invokeGenerate:async()=>({status:200,body:{}})});
+ const operator=await createNativeOperator({directory,python,input,isBusy:()=>false,capture:()=>({active:null}),cancel:()=>{},readScenes:async()=>({}),invokeGenerate:async()=>({status:200,body:{}}),...extra} as any);
  await operator.inputResync;
  return{operator,calls,close:()=>operator.close()};
 }
@@ -203,9 +203,10 @@ test('startup resync honours a stored camera choice',async()=>{
  const f=await resyncFixture('camera',calls=>calls.length?cameraState():replayState('TSC-001'));
  try{assert.equal(f.calls.length,1);assert.equal(f.calls[0].setId,'camera');}finally{f.close();}
 });
-test('startup resync skips remote-device',async()=>{
+test('startup resync selects remote-device again (it lives in Node only) and never switches the bridge camera meanwhile',async()=>{
+ const store0=()=>{import('./remoteCamera').then(m=>{(m.remoteCamera as any).selected=false;});};
  const f=await resyncFixture('remote-device',()=>cameraState());
- try{assert.equal(f.calls.length,0);}finally{f.close();}
+ try{const {remoteCamera:store}=await import('./remoteCamera');assert.equal(f.calls.length,0);assert.equal(store.selected,true);}finally{store0();f.close();}
 });
 test('mismatch after resync and in the periodic check is recorded as an input error',async()=>{
  let live=false;
@@ -420,4 +421,24 @@ test('watchSettingsChange: MAIN edits fire after 3 s, scenario edits and restore
  r=watchSettingsChange(r,{key:'c',nowMs:9000,absorb:false,autoMode:true});assert.equal(r.fire,false);
  // a pending MAIN edit is dropped when the scenario takes over
  r=watchSettingsChange({lastKey:'c',changedAt:100},{key:'d',nowMs:200,absorb:true,autoMode:true});assert.equal(r.changedAt,null);assert.equal(r.fire,false);
+});
+
+test('with the remote-device input the History box is built from the own observation records of the server, not the laptop bridge',async()=>{
+ const text=['[17:30, 5 min ago] A person sits at the desk.','[17:35, 0 min ago] The room is empty.'].join('\n');
+ const f=await resyncFixture('remote-device',()=>({...cameraState(),history:''}),{readHistoryText:()=>text});
+ try{const {remoteCamera:store}=await import('./remoteCamera');assert.equal(store.selected,true);
+  const snap=(await f.operator.state.snapshot()) as any;assert.equal(snap.history,text);}
+ finally{(await import('./remoteCamera')).remoteCamera.selected=false;f.close();}
+});
+
+test('scenario.play while a generation is running is queued and starts at the next idle point (not refused)',async()=>{
+ let busy=true;
+ const f=await resyncFixture(undefined,()=>cameraState(),{isBusy:()=>busy});
+ try{
+  const loaded=await action(f.operator,'scenario.load','load-queued',{file:'SCN-001.csv'});assert.equal(loaded.body.ok,true);
+  const played=await action(f.operator,'scenario.play','play-queued',{});assert.equal(played.body.ok,true);assert.match(played.body.message,/starts after the current generation/);
+  assert.equal(((await f.operator.state.snapshot()) as any).scenario.ownsLayout,false);
+  busy=false;await new Promise(r=>setTimeout(r,1500));
+  assert.equal(((await f.operator.state.snapshot()) as any).scenario.ownsLayout,true);
+ }finally{f.close();}
 });

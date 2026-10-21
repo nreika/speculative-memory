@@ -41,7 +41,7 @@ export function createOperatorLibrary(root:string,python:string,readOutputIds?:(
    for(const [name,text] of Object.entries(extraFiles)){if(!/^\.[A-Za-z0-9_-]{1,40}\.json$/.test(name))throw Error('Invalid sidecar name');await fs.writeFile(path.join(folder,name),text,{encoding:'utf8',flag:'wx'});}
    const {plan,formatWarnings}=await checkOperatorPlan(root,`browser-imports/.${id}/${payload.csv.name}`,python,readOutputIds);
    await fs.rename(folder,final);
-   cached=undefined;return {ok:true,file:`browser-imports/${id}/${payload.csv.name}`,id,scenarioId:plan.id,formatWarnings};
+   cached=undefined;return {ok:true,file:`browser-imports/${id}/${payload.csv.name}`,id,scenarioId:plan.id,rows:plan.cues.length,formatWarnings};
   }catch(error){
    // Preserve a failed upload outside the selectable library for diagnosis.
    await fs.writeFile(path.join(folder,'.failed'),String((error as Error).message),'utf8').catch(()=>{});

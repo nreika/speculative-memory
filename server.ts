@@ -151,6 +151,7 @@ import {resolveLocalImageEngine,selectSceneImageEngine,isTurboEngine,productionT
 import {TurboCandidateGeometryError} from './server/generation/turboCandidate';
 import {createDisplayErrorLog} from './server/displayErrors';
 import {finalizeOrphanGenerations} from './server/archive/finalizeOrphans';
+import {createHistoryJa,translateWithOllama,peopleFooterJa,historyLinePrefixJa} from './server/history/historyJa';
 import {setRequireJapaneseCaptions} from './server/generation/vlmClient';
 setRequireJapaneseCaptions(true);
 
@@ -920,6 +921,8 @@ async function startServer() {
   const browserSettings=process.env.BROWSER_DISPLAY_SETTINGS_FILE;
   const browserContents=process.env.BROWSER_DISPLAY_CONTENTS_FILE;
   const instructionLookup=createInstructionCaptionLookup(archiveRootDir(),()=>captureEvents.readAll());
+  // MAIN's History box text is Japanese (archived translated scene text per capture, else a cached translation).
+  const historyJa=createHistoryJa({archiveRoot:archiveRootDir(),imageNowOf:(id)=>captureEvents.readAll().find((r)=>r.captureId===id)?.images?.now,translate:(english)=>translateWithOllama(english)});
   try { const fixedOrphans = finalizeOrphanGenerations(archiveRootDir()); if (fixedOrphans) console.log(`[archive] ${fixedOrphans} run(s) left "running" by a restart marked aborted`); } catch { /* best effort */ }
   const legacyDisplayTiming=createTdDisplayTimingReader();
   const readDisplayTiming=Object.assign(async()=>nativeOperatorMode?(await nativeOperator?.state.readSettings())?.displayTiming??'all':legacyDisplayTiming(),{readRouting:async()=>{
@@ -977,6 +980,8 @@ async function startServer() {
 const m=/^data:image\/[a-z]+;base64,(.+)$/i.exec(imageDataUrl);const small=m?'data:image/jpeg;base64,'+(await resizeToMaxPx(Buffer.from(m[1],'base64'),1280)).toString('base64'):imageDataUrl;const result=await describePeople(small,{signal});if(!result.ok)throw Error('Reference person observation unavailable');return {people:result.people};}});
     registerScenePersonReferenceRoutes(app,{service:personReferenceAssets,allowedHosts:new Set(process.env.TD_CONTROL_ALLOWED_HOSTS?.split(',').map(host=>host.trim()).filter(Boolean)??['localhost:3000','127.0.0.1:3000'])});
     const resolvePresentationImage=async(imageUrl:string)=>{
+      // Fixed-sequence frames (<data>/sequences/<folder>/<NNNN>): the same face detector / thumbnails read them.
+      if(imageUrl.startsWith('/captures/sequences/'))return (await browserOutputs?.sequences.resolve(imageUrl))?.absolutePath??null;
       if(imageUrl.startsWith('/captures/browser-output-assets/'))return (await outputAssets.resolve(imageUrl))?.absolutePath??null;
       if(!isBrowserDisplayImageUrl(imageUrl))return null;
       try {
@@ -987,7 +992,7 @@ const m=/^data:image\/[a-z]+;base64,(.+)$/i.exec(imageDataUrl);const small=m?'da
         return relative!==''&&relative!=='..'&&!relative.startsWith('..'+path.sep)&&!path.isAbsolute(relative)?actual:null;
       } catch {return null;}
     };
-    browserFaces=createBrowserFaceBoxes({resolveImage:resolvePresentationImage,allowedRoots:[capturesDir,path.join(privateOutputRoot,'browser-output-assets')],python:process.env.FACE_DETECTOR_PYTHON||path.join(process.env.USERPROFILE||'','claude-code/runtime-face-detector/Scripts/python.exe'),worker:path.resolve('scripts/browser-face-boxes.py')});
+    browserFaces=createBrowserFaceBoxes({resolveImage:resolvePresentationImage,allowedRoots:[capturesDir,path.join(privateOutputRoot,'browser-output-assets'),path.join(privateOutputRoot,'sequences')],python:process.env.FACE_DETECTOR_PYTHON||path.join(process.env.USERPROFILE||'','claude-code/runtime-face-detector/Scripts/python.exe'),worker:path.resolve('scripts/browser-face-boxes.py')});
     const outputThumbnails=createBrowserOutputThumbnails({cacheDirectory:path.join(privateOutputRoot,'browser-output-thumbnails'),resolveImage:resolvePresentationImage});
     const outputRecordings=createBrowserOutputRecordings({recordingsFile:path.join(process.cwd(),'logs','recordings.jsonl'),publicBaseUrl:process.env.PUBLIC_BASE_URL});
     const outputSources=createBrowserOutputSources({readEvents:()=>captureEvents.readAll(),readCurrent:async()=>{
@@ -1687,6 +1692,7 @@ const m=/^data:image\/[a-z]+;base64,(.+)$/i.exec(imageDataUrl);const small=m?'da
     console.log(`generate: capture ${captureId} controls ${describeSceneParams(sceneParams)}`);
     sceneNotes.start(captureId);
     for(const [i,key] of (['gen_a','gen_b','gen_c'] as const).entries())if(i>=count)sceneNotes.add(captureId,key,`生成しなかった: MAIN の Images が ${count} のため（${count===1?'A だけ':'A と B だけ'}を生成）`,'info');
+    for(const key of ['gen_a','gen_b','gen_c'] as const){const dir=(sceneExtras as Record<string,string|undefined>)[key];if(dir&&dir.trim())sceneNotes.add(captureId,key,`指示を反映: ${dir.trim().slice(0,160)}`,'info');}
     const signal = requestSignal(res, captureId, capture.signal, cm);
     const ensureActive = () => {
       if (!cm.isActive(captureId)) {
@@ -1761,7 +1767,7 @@ const m=/^data:image\/[a-z]+;base64,(.+)$/i.exec(imageDataUrl);const small=m?'da
         : [];
       // G-01/G-02: test playback reads its own loop's replayed observations (never the exhibition jsonl).
       // Test scope: in-memory loop history + the persisted occupied frames (restart-safe); if none, the archive of this scope.
-      const recentPerson = useHistory
+      const recentPersonFound = useHistory
         ? latestPerson(historyAll, recentPersonWindowMin())
         : historyContext.scope.kind === 'test'
           ? (() => {
@@ -1776,6 +1782,9 @@ const m=/^data:image\/[a-z]+;base64,(.+)$/i.exec(imageDataUrl);const small=m?'da
               return latestTestPerson([recovered.row], { windowMin: recentPersonWindowMin(), excludeFrameId });
             })()
           : null;
+      // Emergency switch only: EMPTY_ROOM_RECENT_PERSON=0 stops drawing the recently seen person into empty rooms (enabled by default;
+      // the 17-20 alarm was a false one: that person really was in the live room).
+      const recentPerson = process.env.EMPTY_ROOM_RECENT_PERSON === '0' ? null : recentPersonFound;
       // G-24/G-25: per-scene empty-room decisions (applied only if the frame turns out unoccupied): person roll vs
       // emptyRoomPersonChance, object change only after activity within EMPTY_ROOM_ACTIVITY_MIN + roll, else skip.
       const activityWindowMin = emptyRoomActivityMin();
@@ -2247,6 +2256,7 @@ const m=/^data:image\/[a-z]+;base64,(.+)$/i.exec(imageDataUrl);const small=m?'da
 
         const nowFaces: Promise<number | null> = people.some((p) => p.facing === 'away') ? countFacesWithWorker(image) : Promise.resolve(null);
         const runUnique = async () => generateUniquePeople({
+          lookNote: recentLook?.hair || recentLook?.clothes ? `Hair: ${recentLook?.hair ?? ''}. Clothes: ${recentLook?.clothes ?? ''}.` : undefined,
           sizeAnchor: behindViewRetryAnchor(resolveScenePresence(sceneParams, count)[index], vlmTrace.guard?.scene ?? scenarios[0]?.scene_now),
           plannedAction: actionIsCheckable(scenario.prediction_prompt, people.some((p) => p.facing === 'away') || recentPersonScene) ? scenario.prediction_prompt : undefined,
           generate: async (attempt, correction) => generateImage({
@@ -2289,7 +2299,7 @@ const m=/^data:image\/[a-z]+;base64,(.+)$/i.exec(imageDataUrl);const small=m?'da
             const detection = await detectPeople(candidate, signal);
             const backViewVerdict = await inspectCountedImage({detection,expectedPeople,sourceActors:countSourceActors,
               allowPartOverlap:!sceneCast&&selection.engine==='qwen21-turbo'&&!assetOnly&&!sceneDrawFromBehind&&expectedPeople===1&&people.length===1,
-              inspect:()=>sceneCast?inspectAndCaptionWithReferences(image,candidate,people,sceneCast.references,sceneDistances[index],signal,sceneCast.sourceIdentityImages,belongings,actionIsCheckable(scenario.prediction_prompt, people.some((p) => p.facing === 'away') || recentPersonScene) ? scenario.prediction_prompt : undefined):inspectAndCaption(sceneDrawFromBehind && sceneReference ? sceneReference : image, candidate, expectedPeople, sceneDistances[index], people, signal, image, belongings, scenario.prediction_prompt, actionIsCheckable(scenario.prediction_prompt, people.some((p) => p.facing === 'away') || recentPersonScene))});
+              inspect:()=>sceneCast?inspectAndCaptionWithReferences(image,candidate,people,sceneCast.references,sceneDistances[index],signal,sceneCast.sourceIdentityImages,belongings,actionIsCheckable(scenario.prediction_prompt, people.some((p) => p.facing === 'away') || recentPersonScene) ? scenario.prediction_prompt : undefined):inspectAndCaption(sceneDrawFromBehind && sceneReference ? sceneReference : image, candidate, expectedPeople, sceneDistances[index], people, signal, image, belongings, scenario.prediction_prompt, actionIsCheckable(scenario.prediction_prompt, people.some((p) => p.facing === 'away') || recentPersonScene), people.length === 0 && !sceneUnoccupied && (recentLook?.hair || recentLook?.clothes) ? { hair: recentLook?.hair, clothes: recentLook?.clothes } : undefined)});
             // Mechanical back-view check: a faceless (back view) original must not get a face in the output.
             // Identity (who is who) cannot be judged from behind: a back view is not rejected for it when the count is right.
             let judged: any = backViewVerdict;
@@ -2317,7 +2327,7 @@ const m=/^data:image\/[a-z]+;base64,(.+)$/i.exec(imageDataUrl);const small=m?'da
             // Size check (empty-room recent-person scenes): the person's box must fit the scene's Presence (low Presence = small, far away).
             if (judged?.ok === true && people.length === 0 && !sceneUnoccupied && Array.isArray((detection as any)?.persons) && (detection as any).persons.length) {
               const presenceHere = resolveScenePresence(sceneParams, count)[index];
-              const cap = presenceHere < 0.35 ? 0.4 : presenceHere < 0.7 ? 0.6 : 1;
+              const cap = presenceHere < 0.35 ? 0.35 : presenceHere < 0.7 ? 0.5 : 1;
               const dims = imageSize(decodeImageDataUrl(candidate).buffer);
               const tallest = dims ? Math.max(...(detection as any).persons.map((p: any) => (Number(p.box?.[3]) - Number(p.box?.[1])) / dims.height)) : 0;
               if (cap < 1 && tallest > cap) {
@@ -2610,14 +2620,14 @@ const m=/^data:image\/[a-z]+;base64,(.+)$/i.exec(imageDataUrl);const small=m?'da
       directory:process.env.OPERATOR_CONTROL_DIRECTORY||path.join(path.dirname(path.resolve(archiveRootDir())),'operator-control'),
       python:process.env.PEOPLE_DETECTOR_PYTHON||path.join(process.env.USERPROFILE||'','Documents/ComfyUI/.venv/Scripts/python.exe'),
       preflightPersonReferences:async body=>{await preflightScenePersonReferences(body);},
-      readDisplayErrors:()=>displayErrors.summary(),readSceneDetails:(identity)=>instructionLookup(identity),isBusy:()=>captureManager.current!==null,capture:()=>captureManager.snapshot(),cancel:()=>captureManager.cancel(null,'requested'),
+      readDisplayErrors:()=>displayErrors.summary(),readSceneDetails:(identity)=>instructionLookup(identity),readHistoryText:()=>{try{const f=formatHistory(recentEntries(readHistory(),{limit:historyLimit(),windowMin:historyWindowMin()}).map(e=>({...e,observation:historyJa.textFor(e)})));return [...f.lines.map(historyLinePrefixJa),...(f.people?[peopleFooterJa(String(f.people))]:[])].join('\n');}catch{return '';}},isBusy:()=>captureManager.current!==null,capture:()=>captureManager.snapshot(),cancel:()=>captureManager.cancel(null,'requested'),
       readScenes:mode=>browserOutputCurrent(captureEvents.readAll(),Date.now(),{instructionLookup,updateMode:mode}),
       readFadeMode:id=>browserOutputs?.channelFadeMode(id)??Promise.resolve('original'),
       readFadeTiming:id=>browserOutputs?.channelFadeTiming(id)??Promise.resolve(undefined),
       readFaceBlur:id=>browserOutputs?.channelFaceBlur(id)??Promise.resolve(undefined),
       readCaptions:id=>browserOutputs?.channelCaptions(id)??Promise.resolve(undefined),
       presentOutput:presentBrowserFaces,
-      outputMapping:browserOutputs?createOperatorScenarioOutputs(browserOutputs):undefined,
+      outputMapping:browserOutputs?createOperatorScenarioOutputs(browserOutputs,{warn:(message)=>{console.warn(`[mapping] ${new Date().toISOString()} ${message}`);operatorWarnings.push('mapping',message);}}):undefined,
       readOutputIds:browserOutputs?async()=>(await browserOutputs.configuration()).outputs.map((o:any)=>o.id):undefined,
       checkPersonReferences:async ids=>{if(!personReferenceAssets)throw Error('Private person reference service is unavailable');return (await personReferenceAssets.metadata(ids)).missingIds;},
       readCost:()=>costTracker.update(),
@@ -2763,6 +2773,15 @@ const m=/^data:image\/[a-z]+;base64,(.+)$/i.exec(imageDataUrl);const small=m?'da
 
   // Public output gate (127.0.0.1:3443, for Tailscale Funnel). Inert without PUBLIC_OUTPUT_PASSWORD/PUBLIC_COOKIE_SECRET.
   void import('./server/publicGate/index').then(m => m.startPublicGate()).catch(() => console.log('public gate disabled (load failed)'));
+  // Diagnostics only: SM_CPU_PROFILE_SEC=<n> writes logs/cpu-<time>.cpuprofile after n seconds (no effect otherwise).
+  let profileSec = Number(process.env.SM_CPU_PROFILE_SEC);
+  if (!(profileSec > 0)) { try { profileSec = Number(fs.readFileSync(path.join(process.cwd(), 'logs', 'cpu-profile-request.txt'), 'utf8')); } catch { /* none */ } }
+  if (profileSec > 0) {
+    const inspector = await import('node:inspector');
+    const session = new inspector.Session();session.connect();session.post('Profiler.enable');session.post('Profiler.start');
+    setTimeout(() => session.post('Profiler.stop', (error: Error | null, result: any) => { if (!error && result?.profile) fs.writeFileSync(path.join(process.cwd(), 'logs', `cpu-${Date.now()}.cpuprofile`), JSON.stringify(result.profile)); }), profileSec * 1000).unref();
+    console.log(`[diag] CPU profile will be written to logs/ after ${profileSec} s`);
+  }
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`Server running on http://localhost:${PORT}`);
     // Load the CPU-only detector before the first generated image needs it.

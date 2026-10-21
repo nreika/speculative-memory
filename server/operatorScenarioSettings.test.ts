@@ -43,7 +43,6 @@ test('person references use settings.apply validation (limit, union) and fail on
 }finally{await f.close();}});
 test('validator rejects out-of-range values and unsupported settings',()=>{for(const v of [{settings:{presence:1.1}},{settings:{intervalSec:4}},{settings:{mode:'auto'}},{settings:{scenes:{a:{distanceSec:3601}}}},{settings:{scenarioPreview:true}},{settings:{scenes:{a:{continuous:'x'}}}},{hold:'stop'},{settings:{tone:.1},hold:'pause'},{}]as any[])assert.throws(()=>validateScenarioSettingsChange(v));});
 test('runner + state: Live applies at cue time, a failing row is isolated, Stop restores everything it changed',async()=>{const f=await fixture();try{let clock=0;
- await f.state.action({action:'settings.apply',data:{scenes:{c:{continuousPersonReferenceIds:[ref1]}}},requestId:'pre-run',baseRevision:(await f.state.snapshot()).settingsRevision}).catch(()=>{});
  const s=createOperatorScenario({now:()=>clock,setLayout:()=>{},generate:async()=>{},settings:f.settings});
  s.load({version:1,id:'S',durationSec:20,loop:false,cues:[{id:'d',atSec:0,settings:{scenes:{a:{distanceSec:10}}}},{id:'refs',atSec:1,settings:{scenes:{c:{continuousPersonReferenceIds:[ref1]}}}},{id:'bad',atSec:2,settings:{scenes:{c:{oneShotPersonReferenceIds:fifteen()}}}},{id:'t',atSec:8,settings:{tone:.3}},{id:'h',atSec:12,hold:'resume'}]},'S.csv');
  await s.play(false,['A','B','C','NOW']);clock=12;await s.tick();const st=s.status();
@@ -68,4 +67,9 @@ test('per-scene presence/tone cue (CSV target A|B|C) applies through settings.ap
  await f.settings.begin({runId:'pst1'});await f.settings.apply({settings:{scenes:{b:{presence:.8}}}});await f.settings.apply({settings:{scenes:{c:{tone:.2}}}});
  const mid=(await f.state.readSettings()).scenes;assert.equal(mid.b.presence,.8);assert.equal(mid.c.tone,.2);
  assert.deepEqual(await f.settings.stop(),[]);const after=(await f.state.readSettings()).scenes;assert.equal(after.b.presence,undefined);assert.equal(after.c.tone,undefined);assert.equal(after.b.distanceSec,30);
+}finally{await f.close();}});
+test('scenario Stop does not wipe directions the operator typed during the run',async()=>{const f=await fixture();try{
+ await f.settings.begin({runId:'rd'});await f.settings.apply({settings:{scenes:{a:{distanceSec:10}}}});
+ await f.manual({scenes:{a:{continuous:'Operator direction',oneShot:'Once'}}});
+ assert.deepEqual(await f.settings.stop(),[]);const after=(await f.state.snapshot()).settings;assert.equal(after.scenes.a.distanceSec,15);assert.equal(after.scenes.a.continuous,'Operator direction');assert.equal(after.scenes.a.oneShot,'Once');
 }finally{await f.close();}});

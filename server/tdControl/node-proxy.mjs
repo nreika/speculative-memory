@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import net from 'node:net';
 import {fileURLToPath} from 'node:url';
+import {guidePage} from './guide-render.mjs';
 const MAX_BODY=36*1024*1024;
 const ACTIONS=new Set(['settings.apply','generation.resume','generation.pause','generation.generate','generation.cancel','scenario.load','scenario.play','scenario.pause','scenario.stop','input.select','input.release','display.layout','display.shuffle','display.reset','display.show','display.hide','project.save']);
 
@@ -22,6 +23,9 @@ export function installTdBrowserControl(app, options={}) {
   for(const host of allowedHosts){const parsed=new URL('http://'+host);if(parsed.host!==host||parsed.port!=='3000'||parsed.pathname!=='/'||parsed.search||parsed.hash||parsed.username||parsed.password||!(parsed.hostname==='localhost'||privatePeer(parsed.hostname)||/^[a-z0-9-]+\.[a-z0-9-]+\.ts\.net$/.test(parsed.hostname)))throw Error('Invalid TD control allowed Host');}
   const token=fs.readFileSync(file,'utf8').trim();if(token.length<32)throw Error('Invalid TD control bridge token');
   const files=new Map([['/control','index.html'],['/control/','index.html'],['/control/mapping','mapping.html'],['/control/mapping/','mapping.html'],['/control/history','history.html'],['/control/history/','history.html'],...['control.css','control.mjs','player.css','output.mjs','timeline.mjs','mapping.css','mapping.mjs','history.css','history.mjs','history-model.mjs','face-blur.mjs'].map(f=>['/control/'+f,f])]);
+  const repo=options.repoRoot||path.resolve(assets,'..','..');
+  const readText=f=>{try{return fs.readFileSync(f,'utf8');}catch{return null;}};
+  const guideFile=path.join(repo,'scripts','operator-scenario','SCENARIO-AUTHORING-GUIDE.md');const versionsFile=path.join(repo,'docs','versions.json');
   const types={'.html':'text/html; charset=utf-8','.css':'text/css; charset=utf-8','.mjs':'text/javascript; charset=utf-8'};
   app.use(async(req,res,next)=>{
     const url=new URL(req.originalUrl||req.url,'http://local');
@@ -30,6 +34,16 @@ export function installTdBrowserControl(app, options={}) {
     if(!allowedHosts.has(req.headers.host))return res.status(403).json({ok:false,error:'Unknown control host'});
     if(!privatePeer(req.socket.remoteAddress))return res.status(403).json({ok:false,error:'Use this control page over Tailscale or localhost'});
     res.removeHeader('Access-Control-Allow-Origin');res.setHeader('Cross-Origin-Resource-Policy','same-origin');
+    if(req.method==='GET'&&/^\/control\/(guide\/(guide\.css|guide\.md)?|versions\.json)$/.test(route)){
+      res.setHeader('Cache-Control','no-store');res.setHeader('X-Content-Type-Options','nosniff');
+      if(route==='/control/guide/guide.css')return res.type(types['.css']).sendFile(path.join(assets,'guide.css'));
+      const md=readText(guideFile);let versions={};try{versions=JSON.parse(readText(versionsFile)||'{}');}catch{}
+      if(route==='/control/versions.json')return res.json(versions);
+      if(md===null)return res.status(404).type('text/plain').send('Guide not found');
+      if(route==='/control/guide/guide.md')return res.type('text/markdown; charset=utf-8').send(md);
+      res.setHeader('Content-Security-Policy',"default-src 'none'; style-src 'self'; base-uri 'none'; frame-ancestors 'none'");
+      return res.type(types['.html']).send(guidePage(md,versions.guide));
+    }
     if(req.method==='GET'&&(files.has(route)||/^\/control\/output\/[1-4]\/?$/.test(route)||/^\/control\/screen\/screen-[1-9][0-9]{0,2}\/?$/.test(route))){
       const name=files.get(route)||'output.html';
       res.setHeader('Cache-Control','no-store');res.setHeader('X-Content-Type-Options','nosniff');

@@ -55,6 +55,8 @@ export const DEFECT_TYPES = [
   'person_too_large',
   // Mechanical check (2026-10-21): the person was enlarged / pulled to another place compared with NOW
   'person_moved',
+  // Mechanical check (2026-10-21): the person drawn into an empty room does not look like the recently seen person
+  'wrong_person',
   'other',
 ] as const;
 export type DefectType = (typeof DEFECT_TYPES)[number];

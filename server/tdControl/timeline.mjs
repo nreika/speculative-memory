@@ -57,7 +57,7 @@ export function duration(seconds) {
 }
 function temporalLabelCore(content, nowMs, known=true) {
   if (!content) return {kind:'empty', text:'Waiting for an image'};
-  if (content.provenance === 'uploaded') return {kind:'uploaded', text:'IMPORTED IMAGE'};
+  if (content.provenance === 'uploaded') return {kind:'uploaded', text:typeof content.sequenceLabel==='string'&&content.sequenceLabel?content.sequenceLabel.slice(0,128):'IMPORTED IMAGE'};
   if(!known)return {kind:'unknown',text:content.provenance==='actual'?'RECORDED · time reference unknown':'GENERATED · time reference unknown'};
   const timestamp=content.provenance==='actual'?content.recordedAtMs:content.targetAtMs;
   if (!Number.isFinite(timestamp)) return {kind:'unknown',text:content.provenance==='actual'?'RECORDED · time unknown':'GENERATED · target time unknown'};

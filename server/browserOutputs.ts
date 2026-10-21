@@ -6,9 +6,10 @@ import {createHash,randomUUID} from 'node:crypto';
 import type {Express} from 'express';
 import {buildBrowserDisplaySnapshot,validateBrowserDisplayContents,isBrowserDisplayImageUrl,type BrowserDisplayContent,type BrowserDisplaySnapshot} from './browserDisplay';
 import {renameRetry} from './renameRetry';
+import {createSequenceLibrary,SEQUENCE_FOLDER,SEQUENCE_MAX_FRAMES,type SequenceLibrary} from './browserOutputSequences';
 
 export const BROWSER_OUTPUT_MAX=64;
-const SOURCES=['now','a','b','c','actual-past','generated-history','fixed','td-1','td-2','td-3','td-4'] as const;
+const SOURCES=['now','a','b','c','actual-past','generated-history','fixed','fixed-sequence','td-1','td-2','td-3','td-4'] as const;
 export type BrowserOutputSource=typeof SOURCES[number];
 export type BrowserOutputFadeMode='original'|'crossfade'|'none';
 export const BROWSER_OUTPUT_FADE_CHANNELS=['current-now','current-a','current-b','current-c','control-output-1','control-output-2','control-output-3','control-output-4'] as const;
@@ -48,6 +49,29 @@ export function validateChannelCaptions(raw:unknown,base?:Partial<BrowserOutputC
 export interface BrowserOutputConfig {
  id:string;label:string;source:BrowserOutputSource;delaySec:number;scene:'a'|'b'|'c'|'any';
  contentId?:string;visible:boolean;labels:boolean;subtitles:boolean;fade:boolean;fadeMode?:BrowserOutputFadeMode;fadeDurationMs?:number;blackHoldMs?:number;faceBlur?:BrowserOutputFaceBlur;
+ /** source 'fixed-sequence' only: folder under <data>/sequences, seconds per frame, 1-based start/end (end absent = last), loop. */
+ sequenceFolder?:string;frameSec?:number;startFrame?:number;endFrame?:number;loop?:boolean;
+ /** Server clock when the sequence was assigned or its settings changed; playback is computed from it. */
+ sequenceStartedAtMs?:number;
+}
+const SEQUENCE_FIELDS=['sequenceFolder','frameSec','startFrame','endFrame','loop','sequenceStartedAtMs'] as const;
+type SequenceFields=Pick<BrowserOutputConfig,typeof SEQUENCE_FIELDS[number]>;
+/** Validates the fixed-sequence fields of one raw output (absent fields get defaults); other sources must not carry them. */
+export function validateSequenceFields(v:Record<string,any>):SequenceFields{
+ if(v.source!=='fixed-sequence'){if(SEQUENCE_FIELDS.some(k=>v[k]!==undefined))throw new OutputError(400,'Sequence fields require source fixed-sequence');return {};}
+ if(typeof v.sequenceFolder!=='string'||!SEQUENCE_FOLDER.test(v.sequenceFolder))throw new OutputError(400,'Fixed sequence requires a folder name (A-Z a-z 0-9 _ -)');
+ const frameSec=v.frameSec??30;if(typeof frameSec!=='number'||!Number.isFinite(frameSec)||frameSec<1||frameSec>86400)throw new OutputError(400,'Frame · sec must be from 1 to 86400');
+ const startFrame=v.startFrame??1;if(!Number.isInteger(startFrame)||startFrame<1||startFrame>SEQUENCE_MAX_FRAMES)throw new OutputError(400,'Start frame must be a whole number from 1 to '+SEQUENCE_MAX_FRAMES);
+ if(v.endFrame!==undefined&&(!Number.isInteger(v.endFrame)||v.endFrame<1||v.endFrame>SEQUENCE_MAX_FRAMES))throw new OutputError(400,'End frame must be a whole number from 1 to '+SEQUENCE_MAX_FRAMES);
+ if(v.endFrame!==undefined&&v.endFrame<startFrame)throw new OutputError(400,'End frame must not be before Start frame');
+ if(v.loop!==undefined&&typeof v.loop!=='boolean')throw new OutputError(400,'Loop must be true or false');
+ if(v.sequenceStartedAtMs!==undefined&&(!Number.isSafeInteger(v.sequenceStartedAtMs)||v.sequenceStartedAtMs<0))throw new OutputError(400,'Invalid sequence start time');
+ return {sequenceFolder:v.sequenceFolder,frameSec,startFrame,...(v.endFrame!==undefined?{endFrame:v.endFrame}:{}),loop:v.loop??true,sequenceStartedAtMs:v.sequenceStartedAtMs??0};
+}
+const sequenceKey=(o:BrowserOutputConfig|undefined)=>o?.source==='fixed-sequence'?JSON.stringify([o.sequenceFolder,o.frameSec,o.startFrame,o.endFrame??null,o.loop]):null;
+/** Restarts playback (sequenceStartedAtMs=now) of every sequence output that is new or whose sequence settings changed; keeps it otherwise. */
+export function stampSequenceStarts(outputs:BrowserOutputConfig[],previous:BrowserOutputConfig[],nowMs:number):BrowserOutputConfig[]{
+ return outputs.map(o=>{if(o.source!=='fixed-sequence')return o;const before=previous.find(p=>p.id===o.id);return {...o,sequenceStartedAtMs:before&&sequenceKey(before)===sequenceKey(o)?before.sequenceStartedAtMs??0:nowMs};});
 }
 export interface BrowserOutputTdRouting {
  slots:Partial<Record<'td-1'|'td-2'|'td-3'|'td-4','now'|'a'|'b'|'c'>>;
@@ -73,6 +97,8 @@ export interface BrowserOutputsOptions {
  presentSnapshot?:(snapshot:BrowserDisplaySnapshot)=>Promise<BrowserDisplaySnapshot>;
  thumbnails?:{thumbnailUrl:(imageUrl:string)=>string|null;resolveThumbnail:(urlPath:string)=>Promise<string|null>};
  allowedHosts?:string[];catalogTtlMs?:number;now?:()=>number;
+ /** Fixed-sequence folders; default <directory of configFile>/sequences. */
+ sequencesDirectory?:string;
  /** Serve the previous catalog while a refresh runs in the background (screens never wait for a rebuild). */
  staleWhileRevalidate?:boolean;
 }
@@ -89,14 +115,15 @@ export function validateBrowserOutputs(raw:unknown,base:BrowserOutputConfig[]=[]
  const ids=new Set<string>();
  return raw.map(v=>{
   if(!plain(v))throw new OutputError(400,'Invalid output');
-  fields(v,['id','label','source','delaySec','scene','contentId','visible','labels','subtitles','fade','fadeMode','fadeDurationMs','blackHoldMs','faceBlur']);
+  fields(v,['id','label','source','delaySec','scene','contentId','visible','labels','subtitles','fade','fadeMode','fadeDurationMs','blackHoldMs','faceBlur',...SEQUENCE_FIELDS]);
   if(typeof v.id!=='string'||!idPattern.test(v.id)||ids.has(v.id)||!text(v.label,128)||!SOURCES.includes(v.source)||!Number.isFinite(v.delaySec)||v.delaySec<0||v.delaySec>86400||!['a','b','c','any'].includes(v.scene)||!['visible','labels','subtitles'].every(k=>typeof v[k]==='boolean')||(v.fade!==undefined&&typeof v.fade!=='boolean')||(v.fadeMode!==undefined&&!['original','crossfade','none'].includes(v.fadeMode)))throw new OutputError(400,'Invalid output');
   if(/^td-[1-4]$/.test(v.source)&&v.delaySec!==0)throw new OutputError(400,'TD routing aliases require delaySec 0');
   if(v.source==='fixed'?!text(v.contentId):v.contentId!==undefined)throw new OutputError(400,'Fixed output requires a catalog contentId only');
+  const sequence=validateSequenceFields(v);
   const fadeMode:BrowserOutputFadeMode=v.fade===false?'none':v.fadeMode??'original';
   const timing=fadeTiming({...('fadeDurationMs' in v?{fadeDurationMs:v.fadeDurationMs}:{}),...('blackHoldMs' in v?{blackHoldMs:v.blackHoldMs}:{})});
   ids.add(v.id);
-  return {id:v.id,label:v.label,source:v.source,delaySec:v.delaySec,scene:v.scene,...(v.source==='fixed'?{contentId:v.contentId}:{}),visible:v.visible,labels:v.labels,subtitles:v.subtitles,fade:fadeMode!=='none',fadeMode,...timing,faceBlur:faceBlur(v.faceBlur,base.find(o=>o.id===v.id)?.faceBlur)};
+  return {id:v.id,label:v.label,source:v.source,delaySec:v.delaySec,scene:v.scene,...(v.source==='fixed'?{contentId:v.contentId}:{}),...sequence,visible:v.visible,labels:v.labels,subtitles:v.subtitles,fade:fadeMode!=='none',fadeMode,...timing,faceBlur:faceBlur(v.faceBlur,base.find(o=>o.id===v.id)?.faceBlur)};
  });
 }
 function peer(address=''):boolean {
@@ -119,13 +146,14 @@ type Pool={value:BrowserOutputsCatalog;contents:BrowserDisplayContent[];revision
 type Config={schema:1;revision:string;outputs:BrowserOutputConfig[];channelFadeModes:Record<BrowserOutputFadeChannel,BrowserOutputFadeMode>;channelFadeTimings:Record<BrowserOutputFadeChannel,BrowserOutputFadeTiming>;channelFaceBlurs:Record<BrowserOutputFadeChannel,BrowserOutputFaceBlur>;channelCaptions:BrowserOutputChannelCaptions};
 export class BrowserOutputsStore {
  private config?:{value:Config;expires:number};private configFlight?:Promise<Config>;private configEpoch=0;
- private derived?:{src:unknown;base:BrowserDisplayContent[];byId:Map<string,BrowserDisplayContent>;idsHash:string};private pool?:{value:Pool;expires:number};private poolFlight?:Promise<Pool>;private poolEpoch=0;
+ private validatedContent=new WeakMap<object,BrowserDisplayContent>();private derived?:{src:unknown;base:BrowserDisplayContent[];byId:Map<string,BrowserDisplayContent>;idsHash:string};private pool?:{value:Pool;expires:number};private poolFlight?:Promise<Pool>;private poolEpoch=0;
  private writes:Promise<void>=Promise.resolve();
  private scenarioPreview?:{owner:string;baseRevision:string;outputs:BrowserOutputConfig[];channelCaptions?:BrowserOutputChannelCaptions};
- readonly now:()=>number;readonly ttl:number;
+ readonly now:()=>number;readonly ttl:number;readonly sequences:SequenceLibrary;
  constructor(private options:BrowserOutputsOptions){
   if(!path.isAbsolute(options.configFile))throw Error('Output config path must be absolute');
-  this.now=options.now??Date.now;this.ttl=options.catalogTtlMs??1000;
+  this.now=options.now??Date.now;
+  this.sequences=createSequenceLibrary({directory:options.sequencesDirectory??path.join(path.dirname(options.configFile),'sequences'),now:this.now});this.ttl=options.catalogTtlMs??1000;
   if(!Number.isFinite(this.ttl)||this.ttl<50||this.ttl>5000)throw Error('Invalid catalog TTL');
  }
  async configuration(force=false):Promise<Config>{
@@ -163,7 +191,10 @@ export class BrowserOutputsStore {
    // The catalog source keeps the same array while nothing changed: validate / index / sort / hash it once.
    let derived=this.derived;
    if(!derived||derived.src!==raw.contents){
-    const validated=validateBrowserDisplayContents(raw.contents),time0=(c:BrowserDisplayContent)=>c.provenance==='actual'?c.recordedAtMs:c.provenance==='generated'?c.generatedAtMs:null;
+    // Known-valid content objects (the source keeps them stable) are not validated again; only new ones are.
+    const known=this.validatedContent,fresh:BrowserDisplayContent[]=[];for(const c of raw.contents as BrowserDisplayContent[])if(!known.has(c as object))fresh.push(c);
+    if(fresh.length){const checked=validateBrowserDisplayContents(fresh);fresh.forEach((c,i)=>known.set(c as object,checked[i]));}
+    const ids=new Set<string>(),validated=(raw.contents as BrowserDisplayContent[]).map(c=>{const v=known.get(c as object)!;if(ids.has(v.id))throw Error('Invalid display registry');ids.add(v.id);return v;}),time0=(c:BrowserDisplayContent)=>c.provenance==='actual'?c.recordedAtMs:c.provenance==='generated'?c.generatedAtMs:null;
     const base=validated.slice().sort((a,b)=>(time0(b)??-Infinity)-(time0(a)??-Infinity)||a.id.localeCompare(b.id));
     derived={src:raw.contents,base,byId:new Map(validated.map(c=>[c.id,c])),idsHash:hash(validated.map(c=>c.id+'|'+c.imageUrl+'|'+(c.thumbnailUrl??'')))};this.derived=derived;
    }
@@ -217,7 +248,8 @@ export class BrowserOutputsStore {
   this.writes=this.writes.then(async()=>{
    try{
     const current=await this.configuration(true);if(raw.baseRevision!==current.revision)throw new OutputError(409,'Configuration changed; reload before saving');
-    outputs=validateBrowserOutputs(raw.outputs,current.outputs);
+    outputs=stampSequenceStarts(validateBrowserOutputs(raw.outputs,current.outputs),current.outputs,this.now());
+    await this.checkSequences(outputs,current.outputs);
     if(outputs.some(o=>o.source==='fixed')){const pool=await this.catalog();if(outputs.some(o=>o.source==='fixed'&&!pool.byId.has(o.contentId!)))throw new OutputError(400,'Unknown catalog contentId');}
     const channelFadeModes=channelModes(raw.channelFadeModes,current.channelFadeModes),channelFadeTimings=channelTimings(raw.channelFadeTimings,current.channelFadeTimings),channelFaceBlurs=channelBlurs(raw.channelFaceBlurs,current.channelFaceBlurs),channelCaptions=validateChannelCaptions(raw.channelCaptions,current.channelCaptions);
     const directory=path.dirname(this.options.configFile),temporary=path.join(directory,'.browser-outputs-'+randomUUID()+'.tmp');
@@ -225,7 +257,9 @@ export class BrowserOutputsStore {
     let handle:Awaited<ReturnType<typeof fs.open>>|undefined;
     try{handle=await fs.open(temporary,'wx',0o600);await handle.writeFile(JSON.stringify({schema:1,outputs,channelFadeModes,channelFadeTimings,channelFaceBlurs,channelCaptions},null,2));await handle.sync();await handle.close();handle=undefined;await renameRetry(temporary,this.options.configFile);}
     catch(error){await handle?.close().catch(()=>undefined);await fs.unlink(temporary).catch(()=>undefined);throw error;}
-    const next:Config={schema:1,revision:hash({schema:1,outputs,channelFadeModes,channelFadeTimings,channelFaceBlurs,channelCaptions}),outputs,channelFadeModes,channelFadeTimings,channelFaceBlurs,channelCaptions};this.scenarioPreview=undefined;this.configEpoch++;this.config={value:next,expires:this.now()+this.ttl};resolve(next);
+    const next:Config={schema:1,revision:hash({schema:1,outputs,channelFadeModes,channelFadeTimings,channelFaceBlurs,channelCaptions}),outputs,channelFadeModes,channelFadeTimings,channelFaceBlurs,channelCaptions};this.scenarioPreview=undefined;this.configEpoch++;this.config={value:next,expires:this.now()+this.ttl};
+    console.log(`[mapping] ${new Date().toISOString()} update origin=${String(raw.requestId).startsWith('scenario-')?'scenario':'ui'} rev ${current.revision.slice(0,8)} -> ${next.revision.slice(0,8)}`);
+    resolve(next);
    }catch(error){reject(error);}
   });
   return result;
@@ -235,10 +269,20 @@ export class BrowserOutputsStore {
   const config=await this.configuration(true),epoch=this.configEpoch;
   if(config.revision!==baseRevision){this.scenarioPreview=undefined;throw new OutputError(409,'Output mapping changed manually; preview was cleared');}
   if(this.scenarioPreview&&this.scenarioPreview.owner!==owner)throw new OutputError(409,'Another output preview is active');
-  const outputs=validateBrowserOutputs(rawOutputs,config.outputs),channelCaptions=rawChannelCaptions===undefined?undefined:validateChannelCaptions(rawChannelCaptions,config.channelCaptions);
+  const previous=this.scenarioPreview?.baseRevision===baseRevision?this.scenarioPreview.outputs:config.outputs;
+  const outputs=stampSequenceStarts(validateBrowserOutputs(rawOutputs,config.outputs),previous,this.now()),channelCaptions=rawChannelCaptions===undefined?undefined:validateChannelCaptions(rawChannelCaptions,config.channelCaptions);
   if(outputs.some(o=>o.source==='fixed')){const pool=await this.catalog();if(outputs.some(o=>o.source==='fixed'&&!pool.byId.has(o.contentId!)))throw new OutputError(400,'Unknown catalog contentId');}
+  await this.checkSequences(outputs,previous);
   if(epoch!==this.configEpoch){this.scenarioPreview=undefined;throw new OutputError(409,'Output mapping changed manually; preview was cleared');}
   this.scenarioPreview={owner,baseRevision,outputs:structuredClone(outputs),...(channelCaptions?{channelCaptions}:{})};
+ }
+ /** A new or changed sequence output must name an existing folder with at least one frame (unchanged ones are not re-checked). */
+ private async checkSequences(outputs:BrowserOutputConfig[],previous:BrowserOutputConfig[]){
+  for(const o of outputs){
+   if(o.source!=='fixed-sequence'||sequenceKey(previous.find(p=>p.id===o.id))===sequenceKey(o))continue;
+   const folder=await this.sequences.folder(o.sequenceFolder!);
+   if(!folder||!folder.frameCount)throw new OutputError(400,`Unknown or empty sequence folder: ${o.sequenceFolder}`);
+  }
  }
  clearScenarioPreview(owner:string):void{if(this.scenarioPreview?.owner===owner)this.scenarioPreview=undefined;}
  /** Saved Label/Text switches for a fixed scene or routing slot; a Preview scenario's transient override wins. */
@@ -250,7 +294,7 @@ export class BrowserOutputsStore {
  async channelFaceBlur(id:string):Promise<BrowserOutputFaceBlur|undefined>{const blur=BROWSER_OUTPUT_FADE_CHANNELS.includes(id as BrowserOutputFadeChannel)?(await this.configuration()).channelFaceBlurs[id as BrowserOutputFadeChannel]:undefined;return blur?{...blur}:undefined;}
  async channelFadeTiming(id:string):Promise<BrowserOutputFadeTiming|undefined>{const timing=BROWSER_OUTPUT_FADE_CHANNELS.includes(id as BrowserOutputFadeChannel)?(await this.configuration()).channelFadeTimings[id as BrowserOutputFadeChannel]:undefined;return timing?{...timing}:undefined;}
  async channelFadeMode(id:string):Promise<BrowserOutputFadeMode|undefined>{return BROWSER_OUTPUT_FADE_CHANNELS.includes(id as BrowserOutputFadeChannel)?(await this.configuration()).channelFadeModes[id as BrowserOutputFadeChannel]:undefined;}
- async snapshot(id:string,at=this.now()):Promise<(BrowserDisplaySnapshot&{output:BrowserOutputConfig;view:{visible:boolean;labels:boolean;subtitles:boolean;fade:boolean;fadeMode:BrowserOutputFadeMode;fadeDurationMs:number;blackHoldMs:number;fadeOnImageChange:boolean;faceBlur:BrowserOutputFaceBlur};fadeBatch?:BrowserOutputFadeBatch;outputStatus:{state:'ready'|'not-ready'|'hidden';reason:string|null}})|null>{
+ async snapshot(id:string,at=this.now()):Promise<(BrowserDisplaySnapshot&{output:BrowserOutputConfig;view:{visible:boolean;labels:boolean;subtitles:boolean;fade:boolean;fadeMode:BrowserOutputFadeMode;fadeDurationMs:number;blackHoldMs:number;fadeOnImageChange:boolean;faceBlur:BrowserOutputFaceBlur};fadeBatch?:BrowserOutputFadeBatch;sequence?:{folder:string;frame:number;start:number;end:number;count:number;frameSec:number;loop:boolean;nextChangeAtMs:number|null};outputStatus:{state:'ready'|'not-ready'|'hidden';reason:string|null}})|null>{
   if(!idPattern.test(id))return null;
   const config=await this.configuration(),output=(this.scenarioPreview?.baseRevision===config.revision?this.scenarioPreview.outputs:config.outputs).find(o=>o.id===id);if(!output)return null;
   const pool=await this.catalog(),catalog=pool.value;
@@ -258,9 +302,13 @@ export class BrowserOutputsStore {
   const source=tdAlias?catalog.tdRouting?.slots[output.source as keyof BrowserOutputTdRouting['slots']]:output.source;
   const desiredView={visible:output.visible,labels:output.labels,subtitles:output.subtitles,fade:output.fade};
   if(tdAlias)for(const key of ['visible','labels','subtitles','fade'] as const)desiredView[key]=desiredView[key]&&(catalog.tdRouting?.view[key]??false);
-  let content:BrowserDisplayContent|undefined,scope:string|undefined,reason:string|null=null;
+  let content:BrowserDisplayContent|undefined,scope:string|undefined,reason:string|null=null,sequence:NonNullable<Awaited<ReturnType<SequenceLibrary['current']>>>['sequence']|undefined;
   if(source===undefined)reason='td-routing-unavailable';
   else if(source==='fixed'){content=pool.byId.get(output.contentId!);scope=content?.scope;}
+  else if(source==='fixed-sequence'){
+   const now=await this.sequences.current({folder:output.sequenceFolder!,frameSec:output.frameSec??30,startFrame:output.startFrame,endFrame:output.endFrame,loop:output.loop,startedAtMs:output.sequenceStartedAtMs??0,nowMs:at});
+   if(now){content=now.content;sequence=now.sequence;scope=content.scope;}else reason='sequence-unavailable';
+  }
   else if(['now','a','b','c'].includes(source)){
    const key=source as 'now'|'a'|'b'|'c';content=catalog.current[key]?pool.byId.get(catalog.current[key]!):undefined;scope=content?.scope;
    if(content&&output.delaySec>0){
@@ -277,7 +325,7 @@ export class BrowserOutputsStore {
   }
   if(content)scope=content.scope;
   const clock=scope?catalog.clocks[scope]:undefined;
-  if(!clock){if(source!=='fixed')content=undefined;if(!reason)reason='clock-unavailable';}
+  if(!clock){if(source!=='fixed'&&source!=='fixed-sequence')content=undefined;if(!reason)reason='clock-unavailable';}
   if(!content&&!reason)reason='source-unavailable';
   if(content?.provenance==='generated'){
    let caption='Generation instruction unavailable.';
@@ -293,13 +341,13 @@ export class BrowserOutputsStore {
   if(!clockKnown)snapshot.temporalRelation='unknown';
   if(reason==='time-unknown')snapshot.selectionStatus='time-unknown';
   const outputStatus={state:!output.visible?'hidden':!source?'not-ready':!desiredView.visible?'hidden':content?'ready':'not-ready',reason:!output.visible?'hidden':reason??(!desiredView.visible?'hidden':null)} as const;
-  const view={...desiredView,visible,fadeMode:desiredView.fade?(output.fadeMode??'original'):'none' as BrowserOutputFadeMode,fadeDurationMs:output.fadeDurationMs??800,blackHoldMs:output.blackHoldMs??120,fadeOnImageChange:output.source==='fixed',faceBlur:faceBlur(output.faceBlur)};
+  const view={...desiredView,visible,fadeMode:desiredView.fade?(output.fadeMode??'original'):'none' as BrowserOutputFadeMode,fadeDurationMs:output.fadeDurationMs??800,blackHoldMs:output.blackHoldMs??120,fadeOnImageChange:output.source==='fixed'||output.source==='fixed-sequence',faceBlur:faceBlur(output.faceBlur)};
   const fadeBatch=content?.captureId?catalog.fadeBatches?.[content.captureId]:undefined;
   // Generating / failed notice for screens that follow the live NOW/A/B/C sources.
   const standInFor=(['a','b','c'] as const).includes(source as any)&&catalog.standIn?.[source as 'a'|'b'|'c']?source as 'a'|'b'|'c':undefined;
   const displayStatus=['now','a','b','c'].includes(source as string)&&!(output.delaySec>0)?catalog.currentStatus?.[source as 'now'|'a'|'b'|'c']:undefined;
   const scenarioOverride=this.scenarioPreview?.baseRevision===config.revision?{runId:this.scenarioPreview.owner,source:output.source}:undefined;
-  const result={...snapshot,...(scenarioOverride?{scenarioOverride}:{}),clock:{...snapshot.clock,known:clockKnown},output,view,...(fadeBatch?{fadeBatch}:{}),...(displayStatus?{displayStatus}:{}),...(standInFor?{standInFor}:{}),outputStatus,revision:hash({snapshotRevision:snapshot.revision,clockKnown,output,view,outputStatus,fadeBatch,displayStatus,standInFor,scenarioOverride})};
+  const result={...snapshot,...(scenarioOverride?{scenarioOverride}:{}),clock:{...snapshot.clock,known:clockKnown},output,view,...(fadeBatch?{fadeBatch}:{}),...(displayStatus?{displayStatus}:{}),...(standInFor?{standInFor}:{}),...(sequence?{sequence}:{}),outputStatus,revision:hash({sequence,snapshotRevision:snapshot.revision,clockKnown,output,view,outputStatus,fadeBatch,displayStatus,standInFor,scenarioOverride})};
   if(!this.options.presentSnapshot)return result;
   const presented=await this.options.presentSnapshot(result);
   return {...result,...presented,output:result.output,view:result.view,outputStatus:result.outputStatus};
@@ -325,7 +373,7 @@ export function registerBrowserOutputsRoutes(app:Pick<Express,'use'>,options:Bro
  for(const host of allowedHosts){const parsed=new URL('http://'+host);if(parsed.host!==host||parsed.port!=='3000'||parsed.pathname!=='/'||parsed.search||parsed.hash||parsed.username||parsed.password||!(parsed.hostname==='localhost'||peer(parsed.hostname)||/^[a-z0-9-]+\.[a-z0-9-]+\.ts\.net$/.test(parsed.hostname)))throw Error('Invalid browser-output allowed Host');}
  app.use(async(req,res,next)=>{
   const url=new URL(req.originalUrl||req.url,'http://local'),route=url.pathname;
-  if(route!=='/api/browser-outputs'&&!route.startsWith('/api/browser-outputs/')&&!route.startsWith('/captures/browser-output-assets/')&&!route.startsWith('/captures/browser-output-thumbnails/'))return next();
+  if(route!=='/api/browser-outputs'&&!route.startsWith('/api/browser-outputs/')&&!route.startsWith('/captures/browser-output-assets/')&&!route.startsWith('/captures/browser-output-thumbnails/')&&!route.startsWith('/captures/sequences/'))return next();
   const forbidden=browserOutputsAccess(req as any,allowedHosts);if(forbidden)return res.status(forbidden).json({ok:false,error:'Browser-output access denied'});
   res.removeHeader('Access-Control-Allow-Origin');res.setHeader('Cross-Origin-Resource-Policy','same-origin');res.setHeader('Cache-Control','no-store');res.setHeader('X-Content-Type-Options','nosniff');
   try{
@@ -338,16 +386,27 @@ export function registerBrowserOutputsRoutes(app:Pick<Express,'use'>,options:Bro
     const asset=await options.assets?.resolve(route);if(!asset)return res.status(404).json({ok:false,error:'Asset not found'});
     res.type(asset.contentType);return res.sendFile(asset.absolutePath);
    }
+   if(req.method==='GET'&&route==='/api/browser-outputs/sequences'&&!url.search)return res.json({schema:1,directory:'sequences',sequences:await store.sequences.list()});
+   if(req.method==='GET'&&route.startsWith('/captures/sequences/')&&!url.search){
+    const frame=await store.sequences.resolve(route);if(!frame)return res.status(404).json({ok:false,error:'Frame not found'});
+    res.type(frame.contentType);return res.sendFile(frame.absolutePath);
+   }
    if(req.method==='GET'&&route.startsWith('/captures/browser-output-thumbnails/')&&!url.search){
     const file=await options.thumbnails?.resolveThumbnail(route);if(!file)return res.status(404).json({ok:false,error:'Thumbnail not found'});
     res.type('image/jpeg');return res.sendFile(file);
    }
    if(req.method==='GET'&&/^\/api\/browser-outputs\/screen-[1-9][0-9]{0,2}$/.test(route)&&!url.search){const snapshot=await store.snapshot(route.split('/').at(-1)!);return snapshot?res.json(snapshot):res.status(404).json({ok:false,error:'Output not found'});}
-   if(req.method==='POST'&&(route==='/api/browser-outputs'||route==='/api/browser-outputs/assets')&&!url.search){
+   if(req.method==='POST'&&(route==='/api/browser-outputs'||route==='/api/browser-outputs/assets'||route==='/api/browser-outputs/sequences')&&!url.search){
     let body:any=req.body;
-    const max=route.endsWith('/assets')?12*1024*1024:64*1024;
+    const max=route.endsWith('/assets')||route.endsWith('/sequences')?12*1024*1024:64*1024;
     if(body===undefined){const chunks:Buffer[]=[];let size=0;for await(const chunk of req){const part=Buffer.from(chunk);size+=part.length;if(size>max)throw new OutputError(413,'Request too large');chunks.push(part);}try{body=JSON.parse(Buffer.concat(chunks).toString());}catch{throw new OutputError(400,'Invalid JSON');}}
     else if(Buffer.byteLength(JSON.stringify(body))>max)throw new OutputError(413,'Request too large');
+    if(route.endsWith('/sequences')){
+     if(!plain(body))throw new OutputError(400,'JSON object required');fields(body,['folder','index','imageDataUrl']);
+     if(typeof body.folder!=='string'||typeof body.imageDataUrl!=='string')throw new OutputError(400,'Invalid sequence import');
+     try{return res.status(201).json({schema:1,...await store.sequences.importFrame({folder:body.folder,index:body.index,imageDataUrl:body.imageDataUrl})});}
+     catch(e:any){if(e?.statusCode)throw new OutputError(e.statusCode,e.message);throw e;}
+    }
     if(route.endsWith('/assets')){
      if(!options.assets)throw new OutputError(503,'Image import unavailable');
      if(!plain(body))throw new OutputError(400,'JSON object required');fields(body,['filename','imageDataUrl']);

@@ -1,6 +1,6 @@
 /** Display-only CPU boxes. This service never writes, removes or substitutes source images. */
 import{readDisplayFaces}from'./displayDerivatives';
-import fs from 'node:fs/promises';import path from 'node:path';import{createHash}from'node:crypto';import{spawn}from'node:child_process';
+import fs from 'node:fs/promises';import path from 'node:path';import{createHash}from'node:crypto';import{spawn,type ChildProcessWithoutNullStreams}from'node:child_process';import{existsSync}from'node:fs';
 export interface FaceBox{x:number;y:number;width:number;height:number}
 export interface FaceDetection{status:'detected'|'no-faces'|'unavailable'|'error';width?:number;height?:number;boxes:FaceBox[];detectorMs?:number;method?:string}
 export interface BrowserFaceBoxesResult extends FaceDetection{schema:1;imageUrl:string;imageSha256:string|null}
@@ -13,7 +13,31 @@ export function createBrowserFaceBoxes(options:BrowserFaceBoxesOptions){
  const cache=new Map<string,{value:FaceDetection;until:number}>(),inflight=new Map<string,Promise<FaceDetection>>();let active=0;const waiters:Array<()=>void>=[];
  const normalize=(p:string)=>process.platform==='win32'?p.toLowerCase():p;
  const allowed=async(file:string)=>{const actual=await fs.realpath(file),roots=await Promise.all(options.allowedRoots.map(p=>fs.realpath(p).catch(()=>null)));return roots.some(root=>{if(root===null)return false;const rel=path.relative(normalize(root),normalize(actual));return rel!==''&&rel!=='..'&&!rel.startsWith('..'+path.sep)&&!path.isAbsolute(rel);})?actual:null;};
- const detect=options.detect??((bytes:Buffer)=>new Promise<FaceDetection>((resolve)=>{
+ // 2026-10-21: one resident worker (same detector code, Python + OpenCV started once) answers requests serially: ~0.07 s per image instead of
+ // ~0.3-1 s for a fresh process, so a new screen image no longer waits for a spawn. Falls back to the one-shot process when the wrapper is absent.
+ const serveWorker=path.join(path.dirname(options.worker),'browser-face-boxes-serve.py');
+ const residentDetect=(()=>{
+  if(options.detect||!existsSync(serveWorker))return null;
+  let child:ChildProcessWithoutNullStreams|null=null,buffer='',waiter:{resolve:(r:FaceDetection)=>void;timer:NodeJS.Timeout}|null=null,chain:Promise<unknown>=Promise.resolve();
+  const settle=(r:FaceDetection)=>{const w=waiter;waiter=null;if(w){clearTimeout(w.timer);w.resolve(r);}};
+  const start=()=>{
+   const c=spawn(options.python,['-u',serveWorker,options.worker],{windowsHide:true,stdio:['pipe','pipe','pipe']});child=c;buffer='';
+   c.stderr.resume();c.stdin.on('error',()=>settle({status:'error',boxes:[]}));
+   c.stdout.on('data',chunk=>{buffer+=String(chunk);if(buffer.length>400000){c.kill();return settle({status:'error',boxes:[]});}for(let i=buffer.indexOf('\n');i>=0;i=buffer.indexOf('\n')){const line=buffer.slice(0,i);buffer=buffer.slice(i+1);try{settle(JSON.parse(line));}catch{settle({status:'error',boxes:[]});}}});
+   c.on('error',()=>{if(child===c)child=null;settle({status:'unavailable',boxes:[]});});
+   c.on('close',()=>{if(child===c)child=null;settle({status:'unavailable',boxes:[]});});
+  };
+  return (bytes:Buffer)=>{
+   const job=chain.then(()=>new Promise<FaceDetection>(resolve=>{
+    if(!child)start();
+    const timer=setTimeout(()=>{child?.kill();child=null;resolve({status:'error',boxes:[]});},timeout);
+    waiter={resolve,timer};
+    try{child!.stdin.write(JSON.stringify({image:bytes.toString('base64')})+'\n');}catch{settle({status:'error',boxes:[]});}
+   }));
+   chain=job.catch(()=>undefined);return job;
+  };
+ })();
+ const detect=options.detect??residentDetect??((bytes:Buffer)=>new Promise<FaceDetection>((resolve)=>{
   const child=spawn(options.python,['-u',options.worker],{windowsHide:true,stdio:['pipe','pipe','pipe']});let output='',done=false;const finish=(r:FaceDetection)=>{if(done)return;done=true;clearTimeout(timer);resolve(r);};const timer=setTimeout(()=>{child.kill();finish({status:'error',boxes:[]});},timeout);
   child.stderr.resume();child.on('error',()=>finish({status:'unavailable',boxes:[]}));child.stdin.on('error',()=>finish({status:'error',boxes:[]}));child.stdout.on('data',chunk=>{output+=String(chunk);if(output.length>100000){child.kill();finish({status:'error',boxes:[]});}});child.on('close',()=>{try{finish(JSON.parse(output));}catch{finish({status:'error',boxes:[]});}});child.stdin.end(JSON.stringify({image:bytes.toString('base64')}));
  }));

@@ -9,7 +9,7 @@
  <label class="interval-control">Interval<input id="interval" data-setting="intervalSec" form="settings-form" type="number" min="5" max="3600" step="1"><span>sec</span></label>
  <button id="run" type="button">Enable</button><button id="pause-generation" type="button">Pause</button><button id="cancel" class="danger" type="button" hidden>Cancel</button>
  <span id="generation-state" class="pill">Connecting</span><span id="generation-detail" class="subtle">Reading current settings…</span>
- <nav class="page-links" aria-label="Other control pages"><a href="/control/mapping/" target="_blank" rel="noopener">Mapping ↗</a><a href="/control/history/" target="_blank" rel="noopener">History ↗</a><a class="manual-link" href="https://claude.ai/artifact/41AkBzwauWM6fzfchKqodU" target="_blank" rel="noopener">Manual ↗</a></nav>
+ <nav class="page-links" aria-label="Other control pages"><a href="/control/mapping/" target="_blank" rel="noopener">Mapping ↗</a><a href="/control/history/" target="_blank" rel="noopener">History ↗</a><a class="manual-link" id="manual-link" href="https://claude.ai/artifact/41AkBzwauWM6fzfchKqodU" target="_blank" rel="noopener">Manual ↗</a><a class="manual-link" id="guide-link" href="/control/guide/" target="_blank" rel="noopener">Scenario Guide ↗</a></nav>
  <div class="session"><span id="connection-dot" class="dot"></span><span id="connection">Connecting to TD…</span></div>
  <button id="gui-fullscreen" class="quiet" type="button">Full screen</button><button id="apply-top" class="primary" type="submit" form="settings-form" disabled>Apply</button><button id="save-project" type="button">Save</button>
 </header>

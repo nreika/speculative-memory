@@ -61,7 +61,7 @@ let personReferenceFetching=false,personReferenceRetryAt=0;
 function referenceIds(input){try{const ids=JSON.parse(input.value||'[]');return Array.isArray(ids)?ids:[];}catch{return [];}}
 function editReferenceIds(input,ids){
   if(!dirty.size)baseRevision=latest?.settingsRevision;
-  input.value=JSON.stringify(ids);dirty.add(input.dataset.setting);dirtyLabel();renderPersonReferences();
+  input.value=JSON.stringify(ids);dirty.add(input.dataset.setting);dirtyLabel();renderPersonReferences();scheduleDirectionSave();
 }
 function personReferenceRow(scene,kind){
   const row=document.createElement('div');row.className='person-references';
@@ -126,7 +126,7 @@ async function loadPersonReferenceMetadata(){
 for(const scene of scenes){
   const article=document.createElement('article');
   article.className='scene panel';article.dataset.scene=scene;article.style.setProperty('--scene',colors[scene]);
-  article.innerHTML=`<div class="scene-header"><h3>${scene.toUpperCase()}</h3><span id="scene-time-${scene}">—</span></div><div class="scene-visual"><img id="scene-image-${scene}" alt="Scene ${scene.toUpperCase()} generated result" hidden><span id="scene-waiting-${scene}">Waiting for an image</span></div><div class="scene-content"><span class="description-label">Generation instruction</span><p id="scene-caption-${scene}" class="scene-caption">No generation instruction yet.</p><div class="scene-notes" id="scene-notes-${scene}" aria-label="What happened in the last generation"></div><label class="distance-label">Time distance <span class="field-note">Past − / Future +</span><div class="distance-field"><input type="number" min="-3600" max="3600" step="1" data-setting="scenes.${scene}.distanceSec" form="settings-form" aria-label="${scene.toUpperCase()} time distance"><span>sec</span></div></label><label>Instructions · Continuous <span class="field-note">Every generation</span><textarea data-setting="scenes.${scene}.continuous" form="settings-form" maxlength="4000" aria-label="${scene.toUpperCase()} continuous prompt" placeholder="Add a direction…"></textarea></label><label>Instructions · One shot <span class="field-note">Next generation</span><textarea data-setting="scenes.${scene}.oneShot" form="settings-form" maxlength="4000" aria-label="${scene.toUpperCase()} one shot prompt" placeholder="For the next image only…"></textarea></label><p class="scenario-prompt" id="scenario-prompt-${scene}"></p></div>`;
+  article.innerHTML=`<div class="scene-header"><h3>${scene.toUpperCase()}</h3><span id="scene-time-${scene}">—</span></div><div class="scene-visual"><img id="scene-image-${scene}" alt="Scene ${scene.toUpperCase()} generated result" hidden><span id="scene-waiting-${scene}">Waiting for an image</span></div><div class="scene-content"><span class="description-label">Generation instruction</span><p id="scene-caption-${scene}" class="scene-caption">No generation instruction yet.</p><div class="scene-notes" id="scene-notes-${scene}" aria-label="What happened in the last generation"></div><label class="distance-label">Time distance <span class="field-note">Past − / Future +</span><div class="distance-field"><input type="number" min="-3600" max="3600" step="1" data-setting="scenes.${scene}.distanceSec" form="settings-form" aria-label="${scene.toUpperCase()} time distance"><span>sec</span></div></label><label>Instructions · Continuous <span class="field-note">Every generation</span><textarea data-setting="scenes.${scene}.continuous" form="settings-form" maxlength="4000" aria-label="${scene.toUpperCase()} continuous prompt" placeholder="Add a direction…"></textarea></label><label>Instructions · One shot <span class="field-note">Next generation</span><textarea data-setting="scenes.${scene}.oneShot" form="settings-form" maxlength="4000" aria-label="${scene.toUpperCase()} one shot prompt" placeholder="For the next image only…"></textarea></label><p class="field-note direction-note" id="direction-note-${scene}"></p><p class="scenario-prompt" id="scenario-prompt-${scene}"></p></div>`;
   $('scene-cards').append(article);
   for(const [kind,key] of [['continuous','continuous'],['oneShot','oneShot']])article.querySelector(`[data-setting="scenes.${scene}.${key}"]`).closest('label').append(personReferenceRow(scene,kind));
   const indicator=document.createElement('span');indicator.className='generation-indicator';indicator.textContent='GENERATING';
@@ -237,13 +237,24 @@ document.addEventListener('input',event=>{
 });
 document.addEventListener('change',event=>{
   const el=event.target.closest('[data-setting]');
-  if(el){if(!dirty.size)baseRevision=latest?.settingsRevision;dirty.add(el.dataset.setting);dirtyLabel();}
+  if(el){if(!dirty.size)baseRevision=latest?.settingsRevision;dirty.add(el.dataset.setting);dirtyLabel();if(isDirectionSetting(el.dataset.setting))scheduleDirectionSave();}
 });
 function mmss(seconds){const n=Math.max(0,Math.floor(seconds||0));return `${Math.floor(n/60)}:${String(n%60).padStart(2,'0')}`;}
 function connection(connected,message){
   online=connected;document.body.classList.toggle('offline',!online);
   $('connection').textContent=message;$('connection-dot').className='dot '+(online?'online':'offline');
   dirtyLabel();updateButtons();
+}
+// Directions (Instructions · Continuous / One shot and their person images) stay editable while a scenario owns the layout.
+const isDirectionSetting=key=>/^scenes\.[abc]\.(continuous|oneShot|continuousPersonReferenceIds|oneShotPersonReferenceIds)$/.test(key||'');
+let directionSaveTimer=null;
+function scheduleDirectionSave(){
+  if(!latest?.scenario?.ownsLayout||!dirty.size||[...dirty].some(path=>!isDirectionSetting(path)))return;
+  clearTimeout(directionSaveTimer);
+  directionSaveTimer=setTimeout(async()=>{
+    if(busy||!online||uncertain){scheduleDirectionSave();return;}
+    try{await apply();notice('Direction saved · applies at the next generation.');}catch(error){notice(error.message,true);}
+  },1000);
 }
 function updateButtons(){
   const blocked=busy||!online||uncertain;
@@ -258,7 +269,7 @@ function updateButtons(){
   for(const id of ['apply-layout','shuffle','reset-layout'])$(id).disabled=blocked||scenarioOwns;
   for(const el of document.querySelectorAll('[data-setting]')){
     const key=el.dataset.setting;
-    el.disabled=blocked||(scenarioOwns&&(key==='mode'||key==='scenarioPreview'||key.startsWith('scenes.')));
+    el.disabled=blocked||(scenarioOwns&&(key==='mode'||key==='scenarioPreview'||key.startsWith('scenes.')&&!isDirectionSetting(key)));
   }
   $('per-scene-toggle').disabled=blocked||!!scenarioOwns;
   $('pause-scenario').disabled=blocked||!['running','paused'].includes(latest?.scenario?.state);
@@ -268,23 +279,40 @@ function updateButtons(){
   dirtyLabel();
 }
 // Scenario CSV format check: rendered from state, so the banner stays until a load without errors clears it.
-let formatShown='';
+let formatShown='',formatDismissed='';
 function renderScenarioFormat(scenario){
-  const box=$('scenario-format'),errors=scenario.formatErrors||[],warnings=scenario.formatWarnings||[],rows=errors.length?errors:warnings;
-  box.hidden=!rows.length;
-  if(!rows.length){formatShown='';return;}
+  const box=$('scenario-format'),errors=scenario.formatErrors||[],warnings=scenario.formatWarnings||[],rows=[...errors,...warnings];
   const key=[scenario.formatCheckedAt,scenario.formatFile,errors.length,warnings.length].join('|');
+  if(!scenario.formatCheckedAt||key===formatDismissed){box.hidden=true;formatShown='';return;}
+  box.hidden=false;
   if(key===formatShown)return;
   formatShown=key;box.open=true;
+  const colour=errors.length?'#c62828':warnings.length?'#f2c037':'#2e7d32';
   const title=$('scenario-format-title'),panel=$('scenario-format-box');
-  title.textContent=errors.length?`FORMAT ERROR · ${errors.length}`:`WARNING · ${warnings.length}`;
-  Object.assign(title.style,{background:errors.length?'#c62828':'#f2c037',color:errors.length?'#fff':'#111',fontWeight:'700',padding:'3px 8px',borderRadius:'3px',fontSize:'11px',letterSpacing:'.04em',whiteSpace:'nowrap'});
-  Object.assign(panel.style,{position:'fixed',bottom:'var(--bottom)',left:'15px',zIndex:'11',background:'#1c1c1c',border:'2px solid '+(errors.length?'#c62828':'#f2c037'),padding:'10px 12px',width:'min(560px,92vw)',maxHeight:'45vh',overflow:'auto',boxShadow:'0 -3px 10px #0008',fontSize:'12px'});
-  const checked=scenario.formatCheckedAt?new Date(scenario.formatCheckedAt).toLocaleTimeString():'';
-  $('scenario-format-file').textContent=`${scenario.formatFile||'CSV'} · ${checked}`+(errors.length?` · Not loaded${scenario.scenarioId?' (current plan: '+scenario.scenarioId+')':''}`+(warnings.length?` · +${warnings.length} warning${warnings.length===1?'':'s'}`:''):' · Loaded');
+  title.textContent=errors.length?`Format check: ${errors.length} error${errors.length===1?'':'s'}`:`Format check: OK (${scenario.formatRows||0} rows, ${warnings.length} warning${warnings.length===1?'':'s'})`;
+  Object.assign(title.style,{background:colour,color:errors.length||!warnings.length?'#fff':'#111',fontWeight:'700',padding:'3px 8px',borderRadius:'3px',fontSize:'11px',letterSpacing:'.04em',whiteSpace:'nowrap'});
+  Object.assign(panel.style,{position:'fixed',bottom:'var(--bottom)',left:'15px',zIndex:'11',background:'#1c1c1c',border:'2px solid '+colour,padding:'10px 12px',width:'min(620px,92vw)',maxHeight:'45vh',overflow:'auto',boxShadow:'0 -3px 10px #0008',fontSize:'12px'});
+  const checked=new Date(scenario.formatCheckedAt).toLocaleTimeString();
+  $('scenario-format-file').textContent=`${scenario.formatFile||'CSV'} · ${checked}`+(errors.length?` · NOT loaded, not selectable for Play until fixed${scenario.scenarioId?' (still loaded: '+scenario.scenarioId+')':''}`+(warnings.length?` · +${warnings.length} warning${warnings.length===1?'':'s'}`:''):' · Loaded');
   const list=$('scenario-format-list');list.replaceChildren();Object.assign(list.style,{margin:'6px 0 0 16px',padding:'0',listStyle:'disc'});
-  for(const issue of rows.slice(0,20)){const item=document.createElement('li');item.textContent=`${issue.row?'row '+issue.row:'file'}${issue.column?' ['+issue.column+']':''}: ${issue.message}`;list.append(item);}
-  if(rows.length>20){const more=document.createElement('li');more.textContent=`… ${rows.length-20} more`;list.append(more);}
+  for(const issue of rows.slice(0,200)){
+    const item=document.createElement('li');
+    item.textContent=`${issue.severity==='warning'?'warning · ':''}${issue.row?'row '+issue.row:'file'}${issue.column?' ['+issue.column+']':''} · ${issue.message}`+(issue.text?` · ${issue.text}`:'');
+    if(issue.severity==='warning')item.style.opacity='.8';
+    list.append(item);
+  }
+  if(rows.length>200){const more=document.createElement('li');more.textContent=`… ${rows.length-200} more`;list.append(more);}
+  let close=$('scenario-format-dismiss');
+  // 2026-10-21: one click copies every listed issue (plus the file name and time) as plain text, for pasting into a chat or an AI.
+  let copy=$('scenario-format-copy');
+  if(!copy){copy=document.createElement('button');copy.id='scenario-format-copy';copy.type='button';copy.style.cssText='margin:8px 8px 0 0';panel.append(copy);}
+  copy.textContent=`Copy ${rows.length} issue${rows.length===1?'':'s'}`;
+  copy.onclick=async()=>{
+    const text=[`${scenario.formatFile||'CSV'} · ${checked} · ${title.textContent}`,...rows.map(issue=>`${issue.severity==='warning'?'warning: ':'error: '}${issue.row?'row '+issue.row:'file'}${issue.column?' ['+issue.column+']':''} · ${issue.message}`+(issue.text?` · ${issue.text}`:''))].join('\n');
+    try{await navigator.clipboard.writeText(text);copy.textContent='Copied';}catch{copy.textContent='Copy failed';}
+    setTimeout(()=>{copy.textContent=`Copy ${rows.length} issue${rows.length===1?'':'s'}`;},1500);
+  };
+  if(!close){close=document.createElement('button');close.id='scenario-format-dismiss';close.type='button';close.textContent='Dismiss';close.style.cssText='margin-top:8px';close.onclick=()=>{formatDismissed=formatShown;formatShown='';box.hidden=true;};panel.append(close);}
 }
 function render(state){
   latest=state;
@@ -294,6 +322,10 @@ function render(state){
   const isGenerating=['generating','requested'].includes(state.capture.phase);
   $('generation-state').textContent=isGenerating?'Generating':state.scenario.ownsLayout?'Scenario · '+state.scenario.state:state.settings.mode==='manual'?'Manual · Ready':state.submissionHold?'Auto paused':'Auto enabled';
   $('generation-state').classList.toggle('busy',isGenerating);
+  // Remote device selected but the phone sends no frames: automatic generation is skipped, so say it prominently (status slot).
+  const remoteStale=!!(state.remoteCamera&&state.remoteCamera.selected&&state.remoteCamera.state!=='fresh');
+  $('generation-state').classList.toggle('remote-stale',remoteStale);
+  if(remoteStale){const r=state.remoteCamera,mins=r.state==='none'?null:Math.max(1,Math.round((r.ageSec||0)/60));$('generation-state').textContent=mins===null?'Remote device: no frames yet — generation paused':`Remote device: no frames for ${mins} min — generation paused`;}
   $('generation-detail').textContent=isGenerating?`${mmss(state.capture.busyFor)} elapsed · ${state.settings.imageCount} images`:
     state.scenario.ownsLayout?'Stop the scenario to return to manual controls.':state.settings.mode==='manual'?'Generate runs once.':state.submissionHold?'Auto paused · Generate runs once.':state.settings.mode==='timer'?`Next generation in ${mmss(state.capture.nextTimerTickIn)}`:
     'Generates again after each result.';
@@ -367,6 +399,7 @@ function render(state){
   renderScenarioFormat(scenario);
   const pauseLabel=scenario.state==='paused'?'Resume':'Pause';
   if($('pause-scenario').textContent!==pauseLabel)$('pause-scenario').textContent=pauseLabel;
+  for(const scene of scenes)$('direction-note-'+scene).textContent=scenario.ownsLayout?'Editable during the scenario; applies at the next generation.':'';
   for(const scene of scenes)$('scenario-prompt-'+scene).textContent=scenario.prompts?.['gen_'+scene]?'Scenario: '+scenario.prompts['gen_'+scene]:'';
   $('history').textContent=state.history||'No observations yet.';
   const money=x=>typeof x==='number'&&Number.isFinite(x)?'¥'+x.toLocaleString('en-US',{maximumFractionDigits:1}):'—';
@@ -454,16 +487,17 @@ function renderExternal(library){
     $('scenario-upload').after(box);
   }
   const rows=library.filter(item=>item.external).sort((a,b)=>String(b.external.submittedAt).localeCompare(String(a.external.submittedAt)));
-  const key=JSON.stringify(rows.map(r=>[r.file,r.external.approved]));
+  const key=JSON.stringify(rows.map(r=>[r.file,r.external.approved,(r.external.formatWarnings||[]).length]));
   box.hidden=!rows.length;if(box.dataset.key===key)return;box.dataset.key=key;
   const pending=rows.filter(r=>!r.external.approved).length;
   $('scenario-external-title').textContent=pending?`External · ${pending} new`:`External · ${rows.length}`;
   box.classList.toggle('has-pending',pending>0);
   $('scenario-external-list').replaceChildren(...rows.slice(0,30).map(item=>{
     const x=item.external,li=document.createElement('li');li.className=x.approved?'approved':'pending';
-    const label=document.createElement('span');label.textContent=externalLabel(x)+' · '+(x.scenarioId||item.name)+(x.approved?' · approved':'');label.title=x.note||'';
+    const label=document.createElement('span');label.textContent=externalLabel(x)+' · '+(x.scenarioId||item.name)+(x.approved?' · approved':'');const warnText=(x.formatWarnings||[]).map(w=>`row ${w.row} · ${w.message}`).join('\n');label.title=[x.note||'',warnText?'Format warnings:\n'+warnText:''].filter(Boolean).join('\n\n');
     li.append(label);
     if(x.note){const note=document.createElement('small');note.textContent=x.note;li.append(note);}
+    if(x.formatWarnings?.length){const fw=document.createElement('small');fw.textContent=`Format warnings (${x.formatWarnings.length}): `+x.formatWarnings.slice(0,3).map(w=>`row ${w.row} · ${w.message}`).join(' | ')+(x.formatWarnings.length>3?' …':'');li.append(fw);}
     const actions=document.createElement('span');actions.className='external-actions';
     if(!x.approved){const ok=document.createElement('button');ok.type='button';ok.textContent='Approve';ok.onclick=()=>manageExternal('approve',x);actions.append(ok);}
     const del=document.createElement('button');del.type='button';del.textContent='Delete';del.onclick=()=>manageExternal('delete',x);actions.append(del);
@@ -493,7 +527,9 @@ $('scenario-upload').onchange=async event=>{
     }
     if(csv[0].size>2*1024*1024)throw Error('CSV exceeds 2 MB.');
     const result=await json(API+'/scenario-upload',{method:'POST',headers:{'Content-Type':'application/json','X-Control-Request':'1'},body:JSON.stringify({csv:{name:csv[0].name,text:await csv[0].text()},assets})});
-    const loaded=await command('scenario.load',{file:result.file});render(loaded.state);$('scenario-file').value=result.file;notice('Scenario imported and loaded.');
+    const summary=`Format check: OK (${result.rows??0} rows, ${(result.formatWarnings||[]).length} warnings)`;
+    try{const loaded=await command('scenario.load',{file:result.file});render(loaded.state);$('scenario-file').value=result.file;notice('Scenario imported and loaded. '+summary);}
+    catch(loadError){$('scenario-file').value=result.file;notice(`Scenario imported. ${summary}. Not loaded: ${loadError.message}`,true);}
   }catch(error){markUncertain(error);notice(error.message,true);}
   finally{event.target.value='';busy=false;updateButtons();refresh();}
 };
@@ -633,6 +669,8 @@ function renderErrors(state){
   $('error-panel').classList.toggle('has-recent',latestAge<10*60*1000);
 }
 function renderCone(){
+  // 2026-10-21: the status names the current stage so the blink (only the scene image being generated) reads in sync.
+  const coneStageLabel=stage=>{const m=/^scene([A-C])$/.exec(stage||'');return m?'scene '+m[1]+' image (blinking)':stage==='detect'?'reading the photo':stage==='plan'?'planning the scenes':'preparing';};
   const svg=$('cone');if(!svg||!latest)return;
   coneScenes=coneCompleted?.scenes||null;
   const generating=['requested','generating'].includes(latest.capture.phase);
@@ -657,10 +695,12 @@ function renderCone(){
     stale[scene]=!content&&coneMode==='result'?'empty':content&&reference&&content.captureId!==reference?(generating?'pending':'previous'):null;
   }
   const geometry=coneGeometry(offsets);
+  const coneGenerating=generatingScene(latest?.capture,captureProgress?.active);
   $('cone-result').setAttribute('aria-pressed',coneMode==='result');
   $('cone-settings').setAttribute('aria-pressed',coneMode==='settings');
-  $('cone-status').textContent=coneMode==='settings'?'Next capture · configured offsets':generating?'Generating · blinking frames = previous capture':Object.values(stale).some(Boolean)?'Displayed results · marked scenes kept the previous image':coneScenes?'Displayed results · relative to source':'Available results · completion unconfirmed';
-  const renderKey=JSON.stringify([coneMode,source?.captureId,source?.imageUrl,offsets,stale,
+  $('cone-status').textContent=coneMode==='settings'?'Next capture · configured offsets':generating?'Generating · '+(coneStageLabel(captureProgress?.active?.stage)):Object.values(stale).some(Boolean)?'Displayed results · marked scenes kept the previous image':coneScenes?'Displayed results · relative to source':'Available results · completion unconfirmed';
+  // 2026-10-21: the generating scene is part of the key, so the blink moves from A to B to C as the stage changes.
+  const renderKey=JSON.stringify([coneMode,source?.captureId,source?.imageUrl,offsets,stale,coneGenerating,
     scenes.map(scene=>[visibleCone?.[scene]?.content?.captureId,visibleCone?.[scene]?.content?.imageUrl,stale[scene]==='previous'?sceneSkips[scene]:null])]);
   if(renderKey===coneRenderKey)return;
   coneRenderKey=renderKey;
@@ -678,7 +718,8 @@ function renderCone(){
     svg.append(svgNode('line',{x1:500,y1:82,x2:x,y2:y,stroke:color,'stroke-width':2,'stroke-dasharray':coneMode==='settings'||state?'4 4':'none',opacity:state?'.45':'.8'}));
     svg.append(svgNode('line',{x1:point.axisX,y1:184,x2:x,y2:y+26,stroke:color,'stroke-width':'.7','stroke-dasharray':'2 4',opacity:'.28'}));
     const frame=svgNode('rect',{x:x-40,y:y-22,width:80,height:44,rx:2,fill:'#0d1113',stroke:color,'stroke-width':1.3});
-    if(state==='pending')frame.append(svgNode('animate',{attributeName:'stroke-width',values:'1.3;5;1.3',dur:'0.95s',repeatCount:'indefinite'}));
+    // 2026-10-21: only the scene being generated right now blinks (same source as the panel frame); other pending scenes stay dashed.
+    if(point.scene===coneGenerating)frame.append(svgNode('animate',{attributeName:'stroke-width',values:'1.3;5;1.3',dur:'0.95s',repeatCount:'indefinite'}));
     svg.append(frame);
     if(coneMode==='result'&&row){
       try{svg.append(svgNode('image',{href:localImagePath(row.imageUrl),x:x-39,y:y-21,width:78,height:42,preserveAspectRatio:'xMidYMid meet',opacity:state==='previous'?'.6':'1'}));}catch{}
@@ -691,3 +732,5 @@ function renderCone(){
   else svg.append(svgNode('text',{x:500,y:88,fill:'#b9c4c7','text-anchor':'middle','font-size':13},'INPUT'));
   svg.append(svgNode('text',{x:500,y:121,fill:'#d7dfe0','text-anchor':'middle','font-size':11},coneMode==='settings'?'SOURCE TIME':'SOURCE'));
 }
+// Manual / Guide versions (docs/versions.json via /control/versions.json).
+if(typeof fetch==='function')fetch('/control/versions.json',{cache:'no-store'}).then(r=>r.ok?r.json():null).then(v=>{if(!v)return;for(const [key,id,label] of [['manual','manual-link','Manual'],['guide','guide-link','Scenario Guide']]){const e=v[key],a=$(id);if(!e||!a)continue;a.textContent=label+' v'+e.version+' ↗';a.title=label+' version '+e.version+' · '+e.date;if(key==='manual'&&e.url)a.href=e.url;}}).catch(()=>{});

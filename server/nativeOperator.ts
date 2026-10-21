@@ -28,6 +28,8 @@ interface Options {
  preflightPersonReferences?:OperatorGenerationOptions['preflightPersonReferences'];
  recordFrame?:(body:Record<string,unknown>)=>Promise<unknown>;
  readCost?:()=>unknown;
+ /** History text for the remote-device input (the laptop bridge's history is the other camera's scope): from the server's own observation records. */
+ readHistoryText?:()=>string;
  /** Real action / exact image prompt / reference note of a displayed scene image (MAIN only; from the saved generation record). */
  readSceneDetails?:(identity:{captureId:string;sceneKey:string;imageUrl:string})=>{predictionPrompt?:string;imagePromptFull?:string;referenceNote?:string}|undefined;
  /** Recent browser-side display problems (one short line per screen+kind with a count) for the Errors panel. */
@@ -92,7 +94,8 @@ export async function createNativeOperator(options:Options){
  let storedSelection:string|undefined,storedCameraIndex:number|undefined;
  const camIdx=(v:unknown)=>Number.isInteger(v)&&(v as number)>=0&&(v as number)<=3?v as number:undefined;
  const SELECTIONS=['TSC-001','TSC-002','TSC-003','cycle','camera','remote-device'];
- const storeSelection=(setId:string,cameraIndex?:number)=>{storedSelection=setId;if(setId==='camera'&&cameraIndex!==undefined)storedCameraIndex=cameraIndex;mismatchError='';void fs.writeFile(selectionFile,JSON.stringify({schema:1,setId,...(storedCameraIndex!==undefined?{cameraIndex:storedCameraIndex}:{}),savedAt:new Date().toISOString()})).catch(()=>{});};
+ // Every input selection change is logged with ISO time, origin and before -> after (2026-10-21: a restart silently dropped a remote-device selection).
+ const storeSelection=(setId:string,cameraIndex?:number,origin:'ui'|'scenario'|'queued'|'resync'='ui')=>{console.log(`[input] ${new Date().toISOString()} select origin=${origin} ${storedSelection??'none'} -> ${setId}${cameraIndex!==undefined?' camera#'+cameraIndex:''}`);storedSelection=setId;if(setId==='camera'&&cameraIndex!==undefined)storedCameraIndex=cameraIndex;mismatchError='';void fs.writeFile(selectionFile,JSON.stringify({schema:1,setId,...(storedCameraIndex!==undefined?{cameraIndex:storedCameraIndex}:{}),savedAt:new Date().toISOString()})).catch(()=>{});};
  const selectionMatches=(setId:string,bridge:any)=>{
   if(!bridge)return false;
   if(setId==='camera')return bridge.inputKind==='live-camera';
@@ -114,7 +117,13 @@ export async function createNativeOperator(options:Options){
    const setId=raw&&typeof raw.setId==='string'&&SELECTIONS.includes(raw.setId)?raw.setId:undefined;
    if(!setId)return;
    storedSelection=setId;storedCameraIndex=camIdx(raw.cameraIndex);
-   if(setId==='remote-device')return;
+   if(setId==='remote-device'){
+    // The phone selection survives a restart: remote-device is selected again at once (it lives in Node only). Until the first frame
+    // arrives MAIN shows the stale-remote error ("waiting for frames"); the bridge camera is NOT switched to meanwhile.
+    try{await input.select({setId:'remote-device' as any,requestId:randomUUID()});console.log(`[input] ${new Date().toISOString()} resync: remote-device re-selected after restart (waiting for phone frames)`);}
+    catch(error){console.warn('[input] resync remote-device failed: '+String((error as Error)?.message??error));}
+    return;
+   }
    // 2026-10-21: re-selecting restarted the bridge's cycle from TSC-001 at every server restart. When the bridge already
    // shows the stored selection (cycle: replay.cycle, or the same set) nothing is sent.
    const current=await input.readState().catch(()=>null);
@@ -152,10 +161,12 @@ export async function createNativeOperator(options:Options){
  /** The live run the next/current native capture belongs to (tag for capture-events rows). */
  const scenarioRunTag=():ScenarioRunTag|undefined=>{const s=scenario.status();return s.ownsLayout&&!s.previewOnly&&s.runId&&playingCsv?{runId:s.runId,scenarioId:s.scenarioId,csvSha:playingCsv.sha}:undefined;};
  const csvPath=(file:string)=>path.join(options.directory,'scenarios',...file.split('/'));
+ /** Keep the failed check visible in the Scenario panel and push one line to Errors · Skips so it is not missed. */
+ const recordFormatFailure=(checkedFile:string,error:ScenarioFormatError)=>{scenario.recordFormat(checkedFile,error);operatorWarnings.push('format',`Scenario ${path.basename(checkedFile).replace(/\.csv$/i,'')}: ${error.formatErrors.length} format error${error.formatErrors.length===1?'':'s'}`);};
  async function loadFile(file:string){
   // Read the exact text before the check so the archived copy is the text this plan was parsed from.
   const text=await fs.readFile(csvPath(file),'utf8').catch(()=>undefined);
-  const checked=await library.check(file).catch(error=>{if(error instanceof ScenarioFormatError)scenario.recordFormat(file,error);throw error;});
+  const checked=await library.check(file).catch(error=>{if(error instanceof ScenarioFormatError)recordFormatFailure(file,error);throw error;});
   scenario.load(checked.plan,file,checked.formatWarnings);loadedCsv=text===undefined?undefined:{file,text,sha:csvSha256(text)};
   return checked;
  }
@@ -197,7 +208,7 @@ export async function createNativeOperator(options:Options){
   return {mode:'manual',interval:70,phase:active?'generating':request?'requested':'idle',captureId:active?.captureId??request?.captureId??'',source:'native',busyFor:active?(Date.now()-Date.parse(active.startedAt))/1000:0,nextTimerTickIn:null,chainDueIn:null};
  };
  state=createOperatorState({file:path.join(options.directory,'state.json'),initial,
-  runtime:async()=>{const source=await readInput(),settings=await state.readSettings(),selected=await options.readScenes(settings.displayTiming);const currentScenario=scenario.status(),outcome=options.latestOutcome?.(),generationError=lastError||(outcome?.result==='failed'?outcome.errorMessage||'Generation failed':'');return {project:'Speculative Memory',capture:{...capture(),mode:settings.mode,interval:settings.intervalSec,nextTimerTickIn:Math.max(0,settings.intervalSec-(Date.now()-lastAttempt)/1000)},scenario:{...currentScenario,...(!currentScenario.ownsLayout?{previewOnly:settings.scenarioPreview}:{})},scenarioLibrary:submissions.decorate(await library.list()),remoteCamera:input.remote(),cameraIndex:storedCameraIndex??null,replay:source?.inputKind==='live-camera'?{active:false}:source?.replay??initial.replay??{active:false},history:source?.history??initial.history,cost:options.readCost?.()??initial.cost,sceneText:{now:selected.now?.content?.caption??'',a:selected.a?.content?.caption??'',b:selected.b?.content?.caption??'',past:selected.c?.content?.caption??''},captureScenes:Object.fromEntries(['a','b','c'].map(key=>{const content=selected[key]?.content;const details=content?.captureId&&content.sceneKey&&content.imageUrl?options.readSceneDetails?.({captureId:content.captureId,sceneKey:content.sceneKey,imageUrl:content.imageUrl}):undefined;return ['gen_'+key,{captureId:content?.captureId,sceneKey:content?.sceneKey,imageUrl:content?.imageUrl,distanceSecSigned:content?.distanceSecSigned,...(details?{action:details.predictionPrompt,fullPrompt:details.imagePromptFull,references:details.referenceNote}:{})}];})),pendingInput:pendingInput?{...pendingInput}:null,warnings:operatorWarnings.list(),sceneNotes:sceneNotes.snapshot(),errors:[{operator:'input',message:inputError},{operator:'input',message:mismatchError},{operator:'input',message:pendingInputError},{operator:'native',message:generationError},{operator:'native-recording',message:recordingError},{operator:'native-log',message:logError},...(options.readDisplayErrors?.()??[]).map(message=>({operator:'screen',message}))].filter(error=>error.message)};},
+  runtime:async()=>{const source=await readInput(),settings=await state.readSettings(),selected=await options.readScenes(settings.displayTiming);const currentScenario=scenario.status(),outcome=options.latestOutcome?.(),generationError=lastError||(outcome?.result==='failed'?outcome.errorMessage||'Generation failed':'');return {project:'Speculative Memory',capture:{...capture(),mode:settings.mode,interval:settings.intervalSec,nextTimerTickIn:Math.max(0,settings.intervalSec-(Date.now()-lastAttempt)/1000)},scenario:{...currentScenario,...(!currentScenario.ownsLayout?{previewOnly:settings.scenarioPreview}:{})},scenarioLibrary:submissions.decorate(await library.list()),remoteCamera:input.remote(),cameraIndex:storedCameraIndex??null,replay:source?.inputKind==='live-camera'?{active:false}:source?.replay??initial.replay??{active:false},history:(remoteStore.selected?options.readHistoryText?.():'')||(source?.history??initial.history),cost:options.readCost?.()??initial.cost,sceneText:{now:selected.now?.content?.caption??'',a:selected.a?.content?.caption??'',b:selected.b?.content?.caption??'',past:selected.c?.content?.caption??''},captureScenes:Object.fromEntries(['a','b','c'].map(key=>{const content=selected[key]?.content;const details=content?.captureId&&content.sceneKey&&content.imageUrl?options.readSceneDetails?.({captureId:content.captureId,sceneKey:content.sceneKey,imageUrl:content.imageUrl}):undefined;return ['gen_'+key,{captureId:content?.captureId,sceneKey:content?.sceneKey,imageUrl:content?.imageUrl,distanceSecSigned:content?.distanceSecSigned,...(details?{action:details.predictionPrompt,fullPrompt:details.imagePromptFull,references:details.referenceNote}:{})}];})),pendingInput:pendingInput?{...pendingInput}:null,warnings:operatorWarnings.list(),sceneNotes:sceneNotes.snapshot(),errors:[{operator:'input',message:inputError},{operator:'input',message:mismatchError},{operator:'input',message:pendingInputError},{operator:'native',message:generationError},{operator:'native-recording',message:recordingError},{operator:'native-log',message:logError},...(options.readDisplayErrors?.()??[]).map(message=>({operator:'screen',message}))].filter(error=>error.message)};},
   delegate:async(action,data,context)=>{
    if(action==='generation.generate'){const accepted=await submit({requestId:context.requestId,source:'manual'});return {message:'Manual generation accepted · '+accepted.captureId};}
    if(action==='generation.cancel'){const active=generation.status().active;if(active){cancelledRequests.add(active.requestId);while(cancelledRequests.size>128)cancelledRequests.delete(cancelledRequests.values().next().value!);}options.cancel();return {message:'Cancellation requested'};}
@@ -210,7 +221,7 @@ export async function createNativeOperator(options:Options){
     if(data.cameraIndex!==undefined&&(setId!=='camera'||camIdx(data.cameraIndex)===undefined))throw new OperatorStateError(400,'Invalid camera index');
     const cameraIndex=setId==='camera'?camIdx(data.cameraIndex)??storedCameraIndex:undefined;
     // Busy: queue (a newer request replaces an older one); applied right after the current capture, before the next one.
-    if(options.isBusy()||generation.status().active){pendingInput={setId,requestId:context.requestId,requestedAt:new Date().toISOString(),...(cameraIndex!==undefined?{cameraIndex}:{})};return {message:`Input change queued: ${setId} (applied after the current generation)`};}
+    if(options.isBusy()||generation.status().active){console.log(`[input] ${new Date().toISOString()} select queued origin=${context.origin??'ui'} ${setId}`);pendingInput={setId,requestId:context.requestId,requestedAt:new Date().toISOString(),...(cameraIndex!==undefined?{cameraIndex}:{})};return {message:`Input change queued: ${setId} (applied after the current generation)`};}
     pendingInput=null;
     const result=await input.select({setId:setId as any,requestId:context.requestId,...(cameraIndex!==undefined?{cameraIndex}:{})});inputSnapshot=result.state;inputChecked=Date.now();pendingInputError='';storeSelection(setId,cameraIndex);return {message:'Input selected'};
    }
@@ -224,25 +235,14 @@ export async function createNativeOperator(options:Options){
     return {message:checked.formatWarnings.length?`Scenario loaded · WARNING: ${checked.formatWarnings.length} format note${checked.formatWarnings.length===1?'':'s'}`:'Scenario loaded'};
    }
    if(action==='scenario.play'){
-    if(options.isBusy()||generation.status().active)throw new OperatorStateError(409,'A generation is running; pause generation first, then start the scenario');
-    // Paused by the operator's generation.pause: Play resumes the same run and clears the hold (as generation.resume would); it is not a restart from 0.
-    if(pausedByHold&&scenario.ownsLayout()&&scenario.status().state==='paused'){pausedByHold=false;scenario.pause();lastAttempt=Date.now();return {message:'Scenario resumed · generation enabled',submissionHold:false};}
-    await submissions.assertPlayable(scenario.status().file);
-    pausedByHold=false;
-    // 2026-10-21: Play while a run owns the outputs is "Restart": stop that run first (restores outputs/settings, closes its archive).
-    // Before this, a second Play collided with the still-owned output mapping and came back as an unconfirmed 504.
-    if(scenario.ownsLayout()){try{await scenario.stop();}catch(error){throw new OperatorStateError(409,'Could not stop the running scenario before restarting: '+String((error as Error).message??error));}}
-    const preview=!!context.settings.scenarioPreview,startedAt=new Date().toISOString();
-    if(!preview){
-     // CSV text captured at load; if it was unreadable then, read it now (still the library file this plan came from).
-     const file=scenario.status().file;
-     if(!loadedCsv||loadedCsv.file!==file){const text=await fs.readFile(csvPath(file),'utf8').catch(()=>'');loadedCsv={file,text,sha:csvSha256(text)};}
-     playingCsv=loadedCsv;
+    // 2026-10-21: Play while a generation is running is queued (like a queued input select) and starts at the next idle point.
+    if(options.isBusy()||generation.status().active){
+     pendingPlay={requestId:context.requestId,requestedAt:new Date().toISOString()};
+     console.log(`[scenario] ${pendingPlay.requestedAt} play queued (a generation is running)`);
+     operatorWarnings.push('scenario','Scenario starts after the current generation');
+     return {message:'Scenario starts after the current generation'};
     }
-    runOutputs=[];
-    try{await scenario.play(preview,(await state.readDisplay()).layout);}catch(error){playingCsv=undefined;throw error;}
-    if(!preview&&playingCsv){const s=scenario.status();runs.begin({runId:s.runId,scenarioId:s.scenarioId,file:playingCsv.file,csvText:playingCsv.text,startedAt,outputsChanged:runOutputs});log({event:'run.archive.started',runId:s.runId,scenarioId:s.scenarioId,file:playingCsv.file,sha256:playingCsv.sha});}
-    return {message:context.settings.scenarioPreview?'Scenario preview started · no generation':'Scenario live playback started'};
+    return playNow(context);
    }
    if(action==='scenario.pause'){pausedByHold=false;scenario.pause();return {message:'Scenario playback updated'};}
    if(action==='scenario.stop'){pausedByHold=false;await scenario.stop();return {message:'Scenario stopped; manual controls restored'};}
@@ -261,13 +261,36 @@ export async function createNativeOperator(options:Options){
   fetchFrame:async()=>{const frame=await input.readFrame();if(frame.sourceParams.source==='live-camera')lastFrameKey=frame.sha256+':'+frame.sourceParams.capturedAt;return frame;},invokeGenerate:options.invokeGenerate,
   consumeOneShot:async(value:any)=>{await state.consumeOneShot(value);if(value.scenarioReceipt)scenario.acknowledge(value.scenarioReceipt);}
  });
+
+ async function playNow(context:any){
+    // Paused by the operator's generation.pause: Play resumes the same run and clears the hold (as generation.resume would); it is not a restart from 0.
+  if(pausedByHold&&scenario.ownsLayout()&&scenario.status().state==='paused'){pausedByHold=false;scenario.pause();lastAttempt=Date.now();return {message:'Scenario resumed · generation enabled',submissionHold:false};}
+  await submissions.assertPlayable(scenario.status().file);
+  pausedByHold=false;
+  // 2026-10-21: Play while a run owns the outputs is "Restart": stop that run first (restores outputs/settings, closes its archive).
+  // Before this, a second Play collided with the still-owned output mapping and came back as an unconfirmed 504.
+  if(scenario.ownsLayout()){try{await scenario.stop();}catch(error){throw new OperatorStateError(409,'Could not stop the running scenario before restarting: '+String((error as Error).message??error));}}
+  const preview=!!context.settings.scenarioPreview,startedAt=new Date().toISOString();
+  if(!preview){
+   // CSV text captured at load; if it was unreadable then, read it now (still the library file this plan came from).
+   const file=scenario.status().file;
+   if(!loadedCsv||loadedCsv.file!==file){const text=await fs.readFile(csvPath(file),'utf8').catch(()=>'');loadedCsv={file,text,sha:csvSha256(text)};}
+   playingCsv=loadedCsv;
+  }
+  runOutputs=[];
+  try{await scenario.play(preview,(await state.readDisplay()).layout);}catch(error){playingCsv=undefined;throw error;}
+  if(!preview&&playingCsv){const s=scenario.status();runs.begin({runId:s.runId,scenarioId:s.scenarioId,file:playingCsv.file,csvText:playingCsv.text,startedAt,outputsChanged:runOutputs});log({event:'run.archive.started',runId:s.runId,scenarioId:s.scenarioId,file:playingCsv.file,sha256:playingCsv.sha});}
+  return {message:context.settings.scenarioPreview?'Scenario preview started · no generation':'Scenario live playback started'};
+   
+ }
+ let pendingPlay:{requestId:string;requestedAt:string}|null=null;
  /** Applies the queued input.select once idle; the selection is persisted only when the bridge accepts it. */
  async function applyPendingInput(){
   const pending=pendingInput;if(!pending)return;
   try{
    const result=await input.select({setId:pending.setId as any,requestId:pending.requestId,...(pending.cameraIndex!==undefined?{cameraIndex:pending.cameraIndex}:{})});
-   inputSnapshot=result.state;inputChecked=Date.now();pendingInputError='';storeSelection(pending.setId,pending.cameraIndex);
-   console.log(`[input] queued select applied: ${pending.setId} → ${remoteStore.selected?'remote-device':result.state?.inputKind}`);
+   inputSnapshot=result.state;inputChecked=Date.now();pendingInputError='';storeSelection(pending.setId,pending.cameraIndex,'queued');
+   console.log(`[input] ${new Date().toISOString()} queued select applied (requested ${pending.requestedAt}): ${pending.setId} → ${remoteStore.selected?'remote-device':result.state?.inputKind}`);
   }catch(error){pendingInputError=`Queued input change to ${pending.setId} failed: ${String((error as Error)?.message??error)}`;console.warn('[input] '+pendingInputError);}
   finally{if(pendingInput===pending)pendingInput=null;}
  }
@@ -315,7 +338,7 @@ export async function createNativeOperator(options:Options){
    if(method==='GET'&&route.endsWith('/state'))return {body:await state.snapshot()};
    if(method==='GET'&&route.endsWith('/input-preview'))return {body:await input.readPreview()};
    if(method==='GET'&&route.includes('/outputs')){const all=await outputs(),slot=/\/outputs\/([1-4])$/.exec(route);return {body:slot?all.outputs[Number(slot[1])-1]:all};}
-   if(method==='POST'&&route.endsWith('/scenario-upload'))return {body:await library.upload(payload).catch(error=>{if(error instanceof ScenarioFormatError)scenario.recordFormat(String(payload?.csv?.name??''),error);throw error;})};
+   if(method==='POST'&&route.endsWith('/scenario-upload'))return {body:await library.upload(payload).catch(error=>{if(error instanceof ScenarioFormatError)recordFormatFailure(String(payload?.csv?.name??''),error);throw error;})};
    if(method==='POST'&&route.endsWith('/action'))return {body:await state.action(payload)};
    if(method==='POST'&&route.endsWith('/scenario-submission')){
     const inUse=(file:string)=>file===scenario.status().file||file===playingCsv?.file;
@@ -329,6 +352,13 @@ export async function createNativeOperator(options:Options){
  const timer=setInterval(()=>{if(schedulerBusy)return;schedulerBusy=true;void(async()=>{
   // Idle point after a capture: apply a queued input change before chain/timer/scenario can start the next capture.
   if(pendingInput&&!options.isBusy()&&!generation.status().active){await applyPendingInput();return;}
+  // A queued scenario.play starts at the same idle point (before the next automatic capture can begin).
+  if(pendingPlay&&!options.isBusy()&&!generation.status().active){
+   const queued=pendingPlay;pendingPlay=null;
+   try{await playNow({settings:await state.readSettings()});console.log(`[scenario] ${new Date().toISOString()} queued play started (requested ${queued.requestedAt})`);}
+   catch(error){const m='Queued scenario play failed: '+String((error as Error)?.message??error);console.warn('[scenario] '+m);operatorWarnings.push('scenario',m);}
+   return;
+  }
   await scenario.tick();
   // "CSVで全部制御": a live run whose own mode cue set timer/chain keeps auto capture running at its interval.
   const scenarioAuto=scenario.autoCaptureMode();

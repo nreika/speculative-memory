@@ -27,7 +27,7 @@ const here=path.dirname(fileURLToPath(import.meta.url));
 const PAGE=[/^\/display\/[A-Za-z0-9][A-Za-z0-9_-]{0,63}\/?$/,/^\/control\/screen\/screen-[1-9][0-9]{0,2}\/?$/];
 const ASSETS=new Set(['/display/face-blur.mjs',...['screen.css','screen.mjs','timeline.mjs','face-blur.mjs'].map(f=>'/display-assets/'+f),...['player.css','output.mjs','timeline.mjs','face-blur.mjs'].map(f=>'/control/'+f)]);
 const API=[/^\/api\/displays\/[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/,/^\/api\/browser-outputs\/screen-[1-9][0-9]{0,2}$/];
-const IMAGE=[/^\/captures\/(?:display\/)?[A-Za-z0-9][A-Za-z0-9_.-]{0,239}\.(?:png|jpe?g|webp)$/i,/^\/captures\/browser-output-assets\/[A-Za-z0-9][A-Za-z0-9/_.-]{0,400}\.(?:png|jpe?g|webp)$/i];
+const IMAGE=[/^\/captures\/(?:display\/)?[A-Za-z0-9][A-Za-z0-9_.-]{0,239}\.(?:png|jpe?g|webp)$/i,/^\/captures\/browser-output-assets\/[A-Za-z0-9][A-Za-z0-9/_.-]{0,400}\.(?:png|jpe?g|webp)$/i,/^\/captures\/sequences\/[A-Za-z0-9][A-Za-z0-9_-]{0,63}\/[0-9]{4}\.(?:png|jpe?g)$/i];
 export const isGatePage=(p:string)=>PAGE.some(r=>r.test(p));
 export const isGateImage=(p:string)=>IMAGE.some(r=>r.test(p))&&!p.includes('/browser-output-thumbnails/')&&!p.split('/').some(s=>s==='.'||s==='..');
 const escapeHtml=(s:string)=>s.replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]!));

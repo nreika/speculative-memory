@@ -67,7 +67,7 @@ CAPTION_CHANNELS = ('current-now','current-a','current-b','current-c','control-o
 
 def output_patches(rows):
     import re
-    allowed = {'source','contentId','delaySec','scene','visible','labels','subtitles','fadeMode','fadeDurationMs','blackHoldMs','faceBlur'}
+    allowed = {'source','contentId','delaySec','scene','visible','labels','subtitles','fadeMode','fadeDurationMs','blackHoldMs','faceBlur','sequenceFolder','frameSec','startFrame','endFrame','loop'}
     if not isinstance(rows,list) or not 0<len(rows)<=64:raise ValueError('Invalid output patches')
     ids=set()
     for row in rows:
@@ -77,7 +77,14 @@ def output_patches(rows):
             if not isinstance(p,dict) or not p or set(p)-{'labels','subtitles'} or any(not isinstance(v,bool) for v in p.values()):raise ValueError('Invalid output target: '+row['id']+' accepts only output_labels / output_subtitles (true or false)')
             continue
         if not isinstance(p,dict) or not p or set(p)-allowed:raise ValueError('Invalid output patch')
-        if 'source' in p and p['source'] not in ('now','a','b','c','actual-past','generated-history','fixed','td-1','td-2','td-3','td-4'):raise ValueError('Invalid output source')
+        if 'source' in p and p['source'] not in ('now','a','b','c','actual-past','generated-history','fixed','fixed-sequence','td-1','td-2','td-3','td-4'):raise ValueError('Invalid output source')
+        seq={'sequenceFolder','frameSec','startFrame','endFrame','loop'}&set(p)
+        if seq:
+            if p.get('source')!='fixed-sequence' or not isinstance(p.get('sequenceFolder'),str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,63}',p['sequenceFolder']):raise ValueError('Invalid output sequence')
+            if 'frameSec' in p:number(p['frameSec'],'frameSec',1,86400)
+            for k in ('startFrame','endFrame'):
+                if k in p and not (p[k] is None and k=='endFrame') and (isinstance(p[k],bool) or not isinstance(p[k],int) or not 1<=p[k]<=2000):raise ValueError('Invalid output sequence frame')
+            if 'loop' in p and not isinstance(p['loop'],bool):raise ValueError('Invalid output sequence loop')
         if 'contentId' in p and (not isinstance(p['contentId'],str) or not p['contentId'] or len(p['contentId'])>256 or any(ord(x)<32 for x in p['contentId'])):raise ValueError('Invalid output image ID')
         if 'scene' in p and p['scene'] not in ('a','b','c','any'):raise ValueError('Invalid output scene')
         if any(k in p and not isinstance(p[k],bool) for k in ('visible','labels','subtitles')):raise ValueError('Invalid output boolean')

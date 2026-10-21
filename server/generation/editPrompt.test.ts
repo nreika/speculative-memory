@@ -262,3 +262,14 @@ test('empty room where nothing changes: no model call, the NOW frame is returned
  t.mock.restoreAll();
  assert.equal(out,IMG);assert.equal(calls,0);assert.match(String(trace.editInstruction),/no edit/);
 });
+
+test('recent person from behind: concrete description + same-person reference; no reference photo -> empty room, no model call',async t=>{
+ const p=composeEditInstruction({predictionPrompt:'The person stretches the neck.',presence:.5,referencePerson:true,behindView:{clothes:'dark shirt',hair:'bald',position:'left'}});
+ assert.match(p,/Add exactly one person, the person shown in image2, wearing dark shirt, bald, on the left side, seen from behind/);
+ assert.match(p,/image2 shows this same person from behind; same hair and clothes as in image2, never a different person\./);
+ let calls=0;t.mock.method(globalThis,'fetch',async()=>{calls++;throw new Error('no model call expected');});
+ const trace:ImageTrace={};
+ const out=await generateImage({originalImageDataUrl:IMG,predictionPrompt:'The person stretches the neck.',presence:.5,referencePerson:true,behindView:{clothes:'dark shirt',hair:'bald'},imageBackend:'local',localImageEngine:'qwen2511',trace});
+ t.mock.restoreAll();
+ assert.equal(out,IMG);assert.equal(calls,0);assert.match(String(trace.editInstruction),/no edit: empty room/);
+});
