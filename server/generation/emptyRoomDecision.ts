@@ -14,7 +14,7 @@ export const DEFAULT_EMPTY_ROOM_PERSON_CHANCE = 0.3;
 export const DEFAULT_EMPTY_ROOM_ACTIVITY_MIN = 3;
 export const DEFAULT_EMPTY_ROOM_OBJECT_CHANCE = 0.3;
 
-export type EmptyRoomSkipReason = "no_recent_activity" | "no_movable_object" | "chance";
+export type EmptyRoomSkipReason = "no_recent_activity" | "no_movable_object" | "chance" | "duplicate_plan" | "translation_failed";
 
 export interface EmptyRoomSceneDecision {
   sceneKey: string;
@@ -50,6 +50,9 @@ const unit = (value: unknown): number | undefined => {
   return Number.isFinite(n) ? Math.min(1, Math.max(0, n)) : undefined;
 };
 
+/** The empty room simply stays empty (English plan text; the caption is translated to natural Japanese). */
+export const EMPTY_ROOM_STAYS = "The room stays empty and nothing in it has been moved; only the light changes slightly.";
+
 export function emptyRoomActivityMin(env: NodeJS.ProcessEnv = process.env): number {
   const n = Number(env.EMPTY_ROOM_ACTIVITY_MIN);
   return env.EMPTY_ROOM_ACTIVITY_MIN?.trim() && Number.isFinite(n) && n >= 0 ? n : DEFAULT_EMPTY_ROOM_ACTIVITY_MIN;
@@ -73,6 +76,8 @@ export function decideEmptyRoomScenes(args: {
   objectChance?: number;
   /** Scenes an operator image element / scene mode forces to be generated. */
   forceKeep?: ReadonlySet<string>;
+  /** Per-scene Presence (0..1): the chance that the recently seen person appears in that scene (overrides emptyRoomPersonChance). */
+  scenePresence?: Partial<Record<string, number>>;
 }): EmptyRoomSceneDecision[] {
   const chance = unit(args.emptyRoomPersonChance) ?? DEFAULT_EMPTY_ROOM_PERSON_CHANCE;
   const windowMin = args.activityWindowMin ?? emptyRoomActivityMin();
@@ -83,13 +88,14 @@ export function decideEmptyRoomScenes(args: {
     const objectRoll = emptyRoomRoll(`${args.captureId}:${sceneKey}:object`);
     const extra = args.extras?.[sceneKey];
     const mention = !!extra && mentionsPerson(extra);
-    const personDrawn = args.recentPerson && (mention || roll < chance);
+    const sceneChance = unit(args.scenePresence?.[sceneKey]) ?? chance;
+    const personDrawn = args.recentPerson && (mention || roll < sceneChance);
     const reason = !args.recentPerson ? "no_recent_person" : mention ? "operator_mention" : "chance";
     const forceKeep = args.forceKeep?.has(sceneKey) === true;
     const objectWins = active && objectRoll < objectChance;
     return {
       sceneKey,
-      emptyRoomPersonChance: chance,
+      emptyRoomPersonChance: unit(args.scenePresence?.[sceneKey]) ?? chance,
       roll,
       personDrawn,
       reason,
@@ -133,13 +139,17 @@ export function resolveEmptyScene(args: {
   objectChange: () => string | null;
 }): { text: string; skipped?: undefined } | { skipped: EmptyRoomSkipReason; text?: undefined } {
   const d = args.decision;
-  if (!d.objectAllowed) return { skipped: d.objectBlockedReason === "chance" ? "chance" : "no_recent_activity" };
+  // 2026-10-21 (user policy): an empty room is the natural state and is never skipped ("no recent activity" / "chance" /
+  // "no movable object" used to leave the screens on a minutes-old image). Without an allowed object change the scene is
+  // the room staying empty; the caption says so naturally.
+  const stays = EMPTY_ROOM_STAYS;
+  if (!d.objectAllowed) return { text: stays };
   const usable = args.kept && !args.isNoChange(args.kept) && !mentionsPerson(args.kept) ? args.kept : "";
   if (usable) return { text: usable };
   const change = args.objectChange();
   if (change) return { text: change };
   if (d.forceKeep) return { text: args.kept && !mentionsPerson(args.kept) ? args.kept : "Keep the scene exactly as in the input." };
-  return { skipped: "no_movable_object" };
+  return { text: stays };
 }
 
 /**

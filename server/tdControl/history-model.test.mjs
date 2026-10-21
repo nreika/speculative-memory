@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {normalizeEvent,buildSections,buildSharedSections,connectionLayout,mixedConnectionLayout,verticalConnectionLayout,sourceConnectionPath,thumbnailGapPercent,elapsedLabel,secondsLabel,jstDay,pendingRefreshIds,RecentHistoryGaps,thumbFor,pageCounter} from './history-model.mjs';
+import {normalizeEvent,buildSections,buildSharedSections,connectionLayout,mixedConnectionLayout,verticalConnectionLayout,sourceConnectionPath,spreadOverlaps,TONE_BASE,TONE_RANGE,thumbnailGapPercent,elapsedLabel,secondsLabel,jstDay,pendingRefreshIds,RecentHistoryGaps,thumbFor,pageCounter} from './history-model.mjs';
 
 function fixture(overrides={}){
  const startedAt='2026-10-18T15:36:45.000Z',id='test-batch',scope='test:run';
@@ -189,42 +189,54 @@ test('vertical timeline separates same-time generated images without altering ti
  assert.equal(new Set(layout.nodes.map(p=>p.id)).size,8);
 });
 
-test('B connects directly to its SOURCE and bends away from halfway A',()=>{
- const from={x:400,y:100},a={x:600,y:160},b={x:800,y:220};
- const numbers=sourceConnectionPath(from,b,'b').match(/-?\d+(?:\.\d+)?/g).map(Number);
- assert.deepEqual(numbers.slice(0,2),[from.x,from.y]);
- assert.deepEqual(numbers.slice(-2),[b.x,b.y]);
- for(let i=1;i<100;i++){
-  const t=i/100,u=1-t,x=u**3*numbers[0]+3*u*u*t*numbers[2]+3*u*t*t*numbers[4]+t**3*numbers[6],y=u**3*numbers[1]+3*u*u*t*numbers[3]+3*u*t*t*numbers[5]+t**3*numbers[7];
-  assert.ok(!(Math.abs(x-a.x)<=58&&Math.abs(y-a.y)<=42),'B route must avoid the A card rectangle');
- }
- const zero=sourceConnectionPath(from,{x:800,y:100},'b').match(/-?\d+(?:\.\d+)?/g).map(Number);
- assert.ok(zero[3]<from.y);assert.equal(zero.at(-1),from.y);
- for(const sourceY of [48,100,1248]){
-  const coords=sourceConnectionPath({x:400,y:sourceY},{x:800,y:sourceY},'b').match(/-?\d+(?:\.\d+)?/g).map(Number);
-  assert.ok(coords[3]>=0,'top gutter must stay inside the plot');
-  for(let segment=0;segment<3;segment++)for(let step=0;step<=100;step++){
-   const t=step/100,x=coords[segment*2]*(1-t)+coords[segment*2+2]*t,y=coords[segment*2+1]*(1-t)+coords[segment*2+3]*t;
-   assert.ok(!(Math.abs(x-600)<=58&&Math.abs(y-sourceY)<=42),'zero-offset B must avoid A card');
-  }
- }
-});
-
-test('B crossing time windows avoids A even when the folded columns align',()=>{
- const a={left:742,right:858,top:208,bottom:292},d=sourceConnectionPath({x:400,y:100},{x:800,y:350},'b',a);
- assert.ok(d.includes(' L '));const v=d.match(/-?\d+(?:\.\d+)?/g).map(Number);
- for(let s=0;s<3;s++)for(let i=0;i<=100;i++){
+test('SOURCE connectors are straight segments, with one elbow only around a box',()=>{
+ assert.equal(sourceConnectionPath({x:400,y:100},{x:800,y:220},'b'),'M 400 100 L 800 220');
+ assert.equal(sourceConnectionPath({x:400,y:100},{x:800,y:100},'b'),'M 400 100 L 800 100');
+ const a={left:580,right:620,top:200,bottom:250},d=sourceConnectionPath({x:400,y:100},{x:800,y:350},'b',a);
+ assert.equal(d.match(/ L /g).length,2);const v=d.match(/-?\d+(?:\.\d+)?/g).map(Number);
+ for(let s=0;s<2;s++)for(let i=0;i<=100;i++){
   const t=i/100,x=v[s*2]*(1-t)+v[s*2+2]*t,y=v[s*2+1]*(1-t)+v[s*2+3]*t;
   assert.ok(!(x>a.left&&x<a.right&&y>a.top&&y<a.bottom));
  }
 });
+test('offset moves a connector perpendicular to itself',()=>{
+ assert.equal(sourceConnectionPath({x:0,y:0},{x:100,y:0},'a',null,3),'M 0 3 L 100 3');
+ assert.equal(sourceConnectionPath({x:0,y:0},{x:0,y:100},'a',null,3),'M -3 0 L -3 100');
+});
+test('fully overlapping connectors are spread; unrelated ones stay put',()=>{
+ const src={x:10,y:100},mk=(key,x,y)=>({key,from:src,to:{x,y},offset:0});
+ const lines=[mk('a',20,100),mk('b',30,100),mk('c',20,200)];
+ spreadOverlaps(lines);
+ assert.notEqual(lines[0].offset,lines[1].offset);assert.equal(Math.abs(lines[0].offset),3);assert.equal(lines[2].offset,0);
+ const same=[mk('a',50,150),mk('b',50,150)];spreadOverlaps(same);assert.notEqual(same[0].offset,same[1].offset);
+});
+test('vertical x distance from SOURCE follows Tone; A/B right, C left; unknown tone is 0.5',()=>{
+ const base={key:'now',time:0,offset:0};
+ const ev=(id,t,ta,tc)=>({id,points:[{key:'now',time:t,offset:0},{key:'a',time:t+15000,offset:15,tone:ta},{key:'c',time:t-15000,offset:-15,tone:tc}]});
+ const px=(layout,id,key)=>{const p=layout.nodes.find(n=>n.id===id+':'+key);return p.x*layout.width/100;};
+ const lo=verticalConnectionLayout([ev('lo',100000,0,0)],0,{min:0,max:300000},900),hi=verticalConnectionLayout([ev('hi',100000,1,1)],0,{min:0,max:300000},900);
+ const dLo=px(lo,'lo','a')-px(lo,'lo','now'),dHi=px(hi,'hi','a')-px(hi,'hi','now');
+ assert.ok(Math.abs(dLo-TONE_BASE)<1e-6);assert.ok(Math.abs(dHi-(TONE_BASE+TONE_RANGE))<1e-6);
+ assert.ok(px(hi,'hi','c')<px(hi,'hi','now'));assert.ok(Math.abs(px(hi,'hi','now')-px(hi,'hi','c')-(TONE_BASE+TONE_RANGE))<1e-6);
+ const unk=verticalConnectionLayout([ev('u',100000,undefined,undefined)],0,{min:0,max:300000},900);
+ const point=unk.nodes.find(n=>n.key==='a');assert.equal(point.toneKnown,false);
+ assert.ok(Math.abs(px(unk,'u','a')-px(unk,'u','now')-(TONE_BASE+.5*TONE_RANGE))<1e-6);
+});
+test('normalizeEvent reads Tone from the browser batch, per-scene or global value',()=>{
+ const e=normalizeEvent(fixture({tone:.4,sceneTone:[.9,.1,.2]}));
+ const by=Object.fromEntries(e.points.map(p=>[p.key,p]));
+ assert.equal(by.a.tone,.9);assert.equal(by.b.tone,.1);assert.equal(by.c.tone,.2);assert.equal(by.now.tone,null);
+ const g=normalizeEvent(fixture({tone:.4}));assert.equal(g.points.find(p=>p.key==='b').tone,.4);
+ assert.equal(normalizeEvent(fixture()).points.find(p=>p.key==='a').tone,null);
+});
+
 test('SOURCE always uses a single straight column/row even when sources are close in time',async()=>{
  const {verticalConnectionLayout,mixedConnectionLayout}=await import('./history-model.mjs');
  const ev=(id,t)=>({id,points:[{key:'now',time:t,offset:0},{key:'a',time:t+15000,offset:15},{key:'b',time:t+30000,offset:30}]});
  const events=[ev('e1',0),ev('e2',5000),ev('e3',9000)],section={min:0,max:60000};
  const v=verticalConnectionLayout(events,0,section);
- assert.equal(new Set(v.nodes.filter(p=>p.key==='now').map(p=>p.column)).size,1);
- assert.ok(new Set(v.nodes.filter(p=>p.key==='a').map(p=>p.column)).size>1);
+ assert.equal(new Set(v.nodes.filter(p=>p.key==='now').map(p=>p.x)).size,1);
+ assert.ok(new Set(v.nodes.filter(p=>p.key==='a').map(p=>p.x)).size>1);
  const h=mixedConnectionLayout(events,0,section);
  assert.equal(new Set(h.nodes.filter(p=>p.key==='now').map(p=>p.y)).size,1);
 });
@@ -255,7 +267,7 @@ test('G-27 scenario runs: labels in JST, revised marker for a different sha of t
   {runId:'../bad',scenarioId:'x',startedAt:'2026-10-20T07:00:00Z'},{runId:'r3',scenarioId:'x',startedAt:'nonsense'}],Date.parse('2026-10-20T08:01:00.000Z'));
  assert.deepEqual(runs.map(r=>r.runId),['r1','r2']);
  assert.equal(runs[0].label,'SCN-SIMPLE-001 16:36:26–16:40:26');assert.equal(runs[0].revised,false);
- assert.equal(runs[1].label,'SCN-SIMPLE-001 17:00:00–running (修正版)');assert.equal(runs[1].end,Date.parse('2026-10-20T08:01:00.000Z'));
+ assert.equal(runs[1].label,'SCN-SIMPLE-001 17:00:00–running (revised)');assert.equal(runs[1].end,Date.parse('2026-10-20T08:01:00.000Z'));
 });
 test('G-27 run bands share the plot scale in horizontal and vertical views, clip at section edges and stack overlaps in lanes',async()=>{
  const {normalizeScenarioRuns,runsForSession,runBandLayout,verticalRunBandLayout,plotPosition}=await import('./history-model.mjs');

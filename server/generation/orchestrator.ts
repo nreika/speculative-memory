@@ -5,9 +5,9 @@ import {tryAssetOnlyCpuResult} from '../assetOnlyFastPath';
 import {generateTurboCandidate,generateTurboProduction,type TurboCandidateParams} from './turboCandidate';
 import {defaultLocalImageEngine,selectedLocalImageUrl,type LocalImageEngine} from './imageEngine';
 import type { PeopleEditRegion } from './peopleEditRegion';
-import { compactPeopleInstruction } from './compactPeople';
-import { mainChangeLine } from './mainChange';
-import { isPastDistance, pastMainChangeLine, pastMomentLead, type PastContinuityVerdict } from './pastScene';
+import { isPastDistance, type PastContinuityVerdict } from './pastScene';
+import { behindViewPlacementByPresence, composeBehindViewEdit, composeCoherentEdit, keepReferenceIndexes, referenceOwners, ROOM_ANCHOR, temporalSentence, TURBO_NEGATIVE } from './editPrompt';
+import { parseHeadBox } from './referenceCrop';
 /**
  * Server-side generation orchestrator.
  *
@@ -107,6 +107,18 @@ export const readSceneParams = (body: unknown): SceneParams => normalizeScenePar
  * come from the capture time (+/- SCENE_TIME_DELTA_SEC), never from the VLM.
  */
 export type ClockEditMode = "auto" | "on" | "off";
+
+/** 2026-10-21: people seen from behind came out with a face on the back of the head ("drinking from the back of the head").
+ *  For a back view the amount of change is capped at QUIET and the body orientation is stated explicitly. */
+export function backViewTone(tone: number, people?: PersonInfo[]): number {
+  // 2026-10-21: no cap any more (a Tone 1 back view came out as "sits quietly"); the body-orientation sentence below stays.
+  void people;
+  return tone;
+}
+export function backViewSentence(people?: PersonInfo[]): string {
+  if (!people?.some((p) => p.facing === 'away')) return '';
+  return "\n\nA person seen from behind stays seen from behind: the back of the head, the back and the shoulders stay toward the camera, no face or front of the body appears on that side, and the arms bend the way they can from a back view. Never draw a face, mouth or eyes on the back of a head.";
+}
 
 export function parseClockEditMode(raw: string | undefined): ClockEditMode {
   const v = (raw ?? "").trim().toLowerCase();
@@ -341,6 +353,8 @@ export function composeEditInstruction(args: {
   obstructedBy?: string;
   /** G-26 past scene: the history verdict (ongoing = step the same activity back instead of undoing it). */
   pastContinuity?: PastContinuityVerdict;
+  /** Owner (index into people) of each attached reference image2, image3...; null = a whole frame of the same people. */
+  references?: Array<number | null>;
 }): string {
   const clockEdit = !!args.clock && shouldEditClock(args.clock.visible, args.mode);
   const clockInstruction =
@@ -363,21 +377,13 @@ export function composeEditInstruction(args: {
   // G-26: a scene BEFORE the frame is framed as the EARLIER moment (lead line + "Main difference ... EARLIER moment").
   const past = isPastDistance(spanSec);
   const emptyTemplate = presence <= 0 && !args.referencePerson;
-  const pastLead = past ? pastMomentLead(spanSec, emptyTemplate, args.pastContinuity) : "";
-  const changeLine = (prediction: string) => (past ? pastMainChangeLine(prediction) : mainChangeLine(prediction));
-  if (args.compactPeople && args.people?.length && (args.personCount ?? 0) > 0 && !args.behindView && presence > 0) {
-    return obstructedLead(rb,args.obstructed,args.obstructedBy) + framingAnchor(rb) + pastLead +
-      compactPeopleInstruction(args.people,args.personCount!,args.predictionPrompt,!!args.behindView) + clockInstruction +
-      "\n\n" + ip.noNewFaceRule + "\n\n" + ip.holdingsRule +
-      "\n\n" + ip.extraConstraints.join(' ') +
-      (args.tone !== undefined ? "\n\n"+toneImageRule(args.tone,false,rb) : '') +
-      (args.obstructed ? "\n\n"+foregroundScaleRule(args.foregroundObject)+"\n\n"+physicsBlock(rb)+screenAndFrameText(rb,true) : '') +
-      changeLine(args.predictionPrompt);
-  }
+  // 2026-10-21 rebuild: one coherent prompt per scene (editPrompt.ts); the old one repeated the action 2-3 times among 20+ rules.
+  const lead = obstructedLead(rb, args.obstructed, args.obstructedBy);
   if (emptyTemplate) {
     const er = ip.emptyRoom;
+    const when = past ? temporalSentence(spanSec, args.pastContinuity, true) : "";
     return (
-      obstructedLead(rb, args.obstructed, args.obstructedBy) + framingAnchor(rb) + pastLead +
+      lead + framingAnchor(rb) + (when ? when + "\n\n" : "") +
       `${er.head}${sanitizeEmptyRoomPrediction(args.predictionPrompt)}. ` +
       `${er.scope} ` +
       `${er.keep} ` +
@@ -393,30 +399,26 @@ export function composeEditInstruction(args: {
       `\n\n${er.tail} ${FIXED_LIGHTING}`
     );
   }
-  return (
-    obstructedLead(rb, args.obstructed, args.obstructedBy) + framingAnchor(rb) + pastLead +
-    (args.behindView ? behindViewSentence(args.behindView, args.predictionPrompt) + "\n\n" : "") +
-    buildFutureImagePrompt(actionWithBelongings(args.predictionPrompt, args.people ?? []), args.options, clockEdit, presence, spanSec) +
-    "\n\n" + FIXED_LIGHTING + "\n\n" + identityConstraints(args.people ?? [], args.personCount, args.predictionPrompt) +
-    clockInstruction +
-    (presence <= 0
-      ? "\n\n" + ip.emptyRoomNoPersonRule
-      : "") +
-    (args.referencePerson
-      ? "\n\n" + ip.referencePersonRule
-      : "") +
-    (args.referenceFrames ? "\n\n" + REFERENCE_FRAMES_SENTENCE : "") +
-    "\n\n" + foregroundScaleRule(args.foregroundObject) +
-    "\n\n" + physicsBlock(rb) +
-    (args.tone !== undefined ? "\n\n" + toneImageRule(args.tone, false, rb) : "") +
-    "\n\n" + ip.hairRule +
-    personFidelityText(rb) +
-    screenAndFrameText(rb, args.obstructed) +
-    "\n\n" + ip.disembodiedRule +
-    "\n\n" +
-    buildQualitySuffix(clockEdit, presenceAllowsNewPerson(presence), Math.abs(spanSec) >= LONG_SPAN_IMAGE_SEC) +
-    changeLine(args.predictionPrompt)
-  );
+  const tail = (clockInstruction ? " " + clockInstruction.trim() : "");
+  const fa = framingAnchor(rb).trim();
+  const anchor = fa ? `${fa} ${ROOM_ANCHOR}` : undefined;
+  if (args.behindView) {
+    // QA 13:39: at Presence 0.28 the behind-view figure filled the frame; Presence now sets depth and size explicitly.
+    const placement = behindViewPlacementByPresence(presence) + (isStandingAction(args.predictionPrompt) && presence > 0.35 ? " " + behindViewFreeSpotSentence(args.behindView) : "");
+    return composeBehindViewEdit({
+      action: args.predictionPrompt, look: { clothes: args.behindView.clothes, hair: behindViewHairPhrase(args.behindView.hair), position: args.behindView.position },
+      placement, tone: args.tone, presence, spanSec, pastContinuity: args.pastContinuity, referencePerson: !!args.referencePerson, lead, anchor, tail,
+    });
+  }
+  // References are optional: never a generic face reference next to a person seen from behind.
+  const references = args.references ?? (args.referenceFrames ? [null] : []);
+  const people = args.people ?? [];
+  const keep = keepReferenceIndexes(people, references);
+  return composeCoherentEdit({
+    action: args.predictionPrompt, people, personCount: args.personCount, tone: args.tone, presence, spanSec,
+    pastContinuity: args.pastContinuity, references: keep.map((i) => references[i]), lead, anchor,
+    tail: (args.referencePerson ? " " + ip.referencePersonRule : "") + tail,
+  });
 }
 
 /** Gemini has no negative prompt: the avoid-list becomes one positive sentence appended to the edit instruction. */
@@ -506,7 +508,13 @@ export async function generateImage(args: {
   const localImageEngine=args.localImageEngine??defaultLocalImageEngine();
   const clockEdit = !!args.clock && shouldEditClock(args.clock.visible);
   // Reference frames are a ComfyUI-only feature (Gemini takes at most the single recent-person photo).
-  const refFrames = (args.imageBackend ?? DEFAULT_STEP_BACKENDS.image) === "gemini" ? [] : isTurboEngineForReferences(localImageEngine) ? (args.referenceImages ?? []) : (args.referenceImages ?? []).slice(0, 2);
+  const refFramesAll = (args.imageBackend ?? DEFAULT_STEP_BACKENDS.image) === "gemini" ? [] : isTurboEngineForReferences(localImageEngine) ? (args.referenceImages ?? []) : (args.referenceImages ?? []).slice(0, 2);
+  // 2026-10-21: references are optional. The reference cast keeps its own bindings; otherwise only people whose face is
+  // visible get one (all facing away -> none), and the prompt names whose face each image shows.
+  const refOwnersAll = args.referenceCast ? [] : referenceOwners({ people: args.people ?? [], refFrames: refFramesAll, crops: args.referenceCrops, sceneImage: args.originalImageDataUrl, hasHeadBox: (p) => !!parseHeadBox(p.headBox) });
+  const keptRefs = args.referenceCast ? refFramesAll.map((_, i) => i) : keepReferenceIndexes(args.people ?? [], refOwnersAll);
+  const refFrames = keptRefs.map((i) => refFramesAll[i]);
+  const referenceCrops = args.referenceCrops && !args.referenceCast ? keptRefs.map((i) => args.referenceCrops![i]).filter(Boolean) : args.referenceCrops;
 
   if(args.referenceCast){
     if(localImageEngine!=='qwen21-turbo'||(args.imageBackend??DEFAULT_STEP_BACKENDS.image)!=='local'||args.assetOnlyInstruction||args.assetOnlyFrame||args.behindView||args.referencePerson||args.faceImageDataUrl)throw Error('Reference cast requires the dedicated production Turbo input roles');
@@ -524,6 +532,7 @@ export async function generateImage(args: {
       distanceSec: args.distanceSec,
       referencePerson: args.referencePerson === true && !!args.faceImageDataUrl,
       referenceFrames: refFrames.length > 0 || (!!args.faceImageDataUrl && !args.referencePerson),
+      references: refFrames.length ? keptRefs.map((i) => refOwnersAll[i] ?? null) : undefined,
       people: args.people,
       personCount: args.personCount,
       compactPeople: args.compactPeople,
@@ -534,13 +543,15 @@ export async function generateImage(args: {
       pastContinuity: args.pastContinuity,
     });
   // G-26: the reference-cast template gets the same EARLIER-moment lead for a past scene.
-  if (args.referenceCast && isPastDistance(args.distanceSec)) editInstruction = pastMomentLead(args.distanceSec!, false, args.pastContinuity) + editInstruction;
+  if (args.referenceCast && isPastDistance(args.distanceSec)) editInstruction = temporalSentence(args.distanceSec!, args.pastContinuity) + "\n\n" + editInstruction;
   // Framing anchor (rulebook v20+) leads the reference-cast template too (composeEditInstruction adds it to the others).
   if (args.referenceCast) editInstruction = framingAnchor() + editInstruction;
   if(args.scenarioElementInstruction)editInstruction+='\n\n'+withoutLightingChanges(args.scenarioElementInstruction);
 
   // Empty room (presence 0): also push person words into the negative prompt (inert at cfg 1, active above).
-  const negativePrompt = buildNegativePrompt(clockEdit, !args.referenceCast&&(args.presence ?? SERVER_SCENE_DEFAULTS.presence) <= 0, args.behindView ? { hair: args.behindView.hair } : false, args.obstructed === true);
+  // Turbo runs at cfg 1.0, where the negative prompt has no effect at all: send a few words instead of a misleading list.
+  const turboCfg1 = (args.imageBackend ?? DEFAULT_STEP_BACKENDS.image) !== "gemini" && isTurboEngineForReferences(localImageEngine);
+  const negativePrompt = turboCfg1 ? TURBO_NEGATIVE : buildNegativePrompt(clockEdit, !args.referenceCast&&(args.presence ?? SERVER_SCENE_DEFAULTS.presence) <= 0, args.behindView ? { hair: args.behindView.hair } : false, args.obstructed === true);
   const seed = args.seed ?? Math.floor(Math.random() * 2 ** 31);
   const denoise = args.obstructed === true ? obstructedDenoise() : null;
   if (args.trace) Object.assign(args.trace, { referenceImage: args.faceImageDataUrl || refFrames.length ? "attached" : "none", editInstruction, negativePrompt, seed, denoise: (args.imageBackend ?? DEFAULT_STEP_BACKENDS.image) === "gemini" ? null : denoise });
@@ -570,7 +581,7 @@ export async function generateImage(args: {
   if(localImageEngine==='qwen21-turbo-candidate'||localImageEngine==='qwen21-turbo'){
     const candidate=localImageEngine==='qwen21-turbo-candidate';
     if(candidate&&(!args.turboContext||args.assetOnlyFrame||args.scenarioElementInstruction))throw Error('Turbo test context missing or unsupported image-element mode');
-    const params={...args.turboContext,compositionMode:args.turboContext?'protected' as const:'full-frame' as const,sceneImage:args.originalImageDataUrl,prompt:editInstruction,negativePrompt,faceImage:args.faceImageDataUrl,faceCrop:args.faceCrop,referenceImages:refFrames,referenceCrops:args.referenceCrops,seed,steps:8,cfg:1,denoise:1,filenamePrefix:args.filenamePrefix,signal:args.signal};
+    const params={...args.turboContext,compositionMode:args.turboContext?'protected' as const:'full-frame' as const,sceneImage:args.originalImageDataUrl,prompt:editInstruction,negativePrompt,faceImage:args.faceImageDataUrl,faceCrop:args.faceCrop,referenceImages:refFrames,referenceCrops,seed,steps:8,cfg:1,denoise:1,filenamePrefix:args.filenamePrefix,signal:args.signal};
     const result=localImageEngine==='qwen21-turbo'?await generateTurboProduction(params):await generateTurboCandidate({...params,...args.turboContext!,test:true});
     if(args.trace){args.trace.turboCandidate=result.trace;args.trace.denoise=1;}
     if(args.assetOnlyFrame){const restored=await restoreAssetOnlySourceFrame(args.assetOnlyFrame.rawImageDataUrl,result.dataUrl,args.assetOnlyFrame.rectangles,{signal:args.signal,composedImageDataUrl:args.originalImageDataUrl,protectedCoreMaskDataUrl:args.assetOnlyFrame.protectedCoreMaskDataUrl});if(args.trace)args.trace.sourceFrameRestoration=restored.transform;return restored.imageDataUrl;}
@@ -583,7 +594,7 @@ export async function generateImage(args: {
     faceImage: args.faceImageDataUrl,
     faceCrop: args.faceCrop,
     referenceImages: refFrames,
-    referenceCrops: args.referenceCrops,
+    referenceCrops,
     editRegion: args.editRegion,
     seed,
     denoise: denoise ?? undefined,

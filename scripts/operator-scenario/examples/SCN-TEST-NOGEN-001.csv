@@ -1,0 +1,18 @@
+seconds,action,target,value
+0,scenario,,SCN-TEST-NOGEN-001
+0,instructions,,"No-generation check on screen-9/10: source, fade, visibility, captions, face blur, per-scene settings, restore at end"
+0,output_source,screen-9,a
+0,output_source,screen-10,now
+5,output_fade,screen-9,crossfade
+5,output_fade_sec,screen-9,1.0
+6,output_source,screen-9,b
+10,output_visible,screen-10,false
+15,output_visible,screen-10,true
+18,output_face_blur,screen-10,true
+20,distance,A,90
+20,presence,,0.2
+20,tone,B,0.9
+25,output_labels,screen-9,false
+25,output_subtitles,screen-9,false
+30,output_source,screen-9,c
+40,end,,

@@ -64,7 +64,8 @@ import { buildNegativePrompt } from './comfyClient';
 test('physics rule is in both templates; negative prompt names floating / hanging objects', () => {
   const rule = /Objects rest on surfaces in physically plausible positions .*gravity and support stay realistic\./;
   assert.match(composeEditInstruction({ predictionPrompt: 'A chair rotates.', presence: 0 }), rule);
-  assert.match(composeEditInstruction({ predictionPrompt: 'The man stands.', presence: 0.5 }), rule);
+  // 2026-10-21 rebuild: occupied scenes carry the single world rule instead of the physics paragraph.
+  assert.match(composeEditInstruction({ predictionPrompt: 'The man stands.', presence: 0.5 }), /nothing that was never in this room, and no duplicate copy of any person or object/);
   assert.doesNotMatch(composeEditInstruction({ predictionPrompt: 'x', presence: 0 }), /person|people|figure|silhouette|hand|arm|nobody|no one/i);
   assert.match(buildNegativePrompt(false), /floating object, object hanging on chair back, levitating laptop/);
 });

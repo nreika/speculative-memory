@@ -843,11 +843,29 @@ Scenario: "${scenario.prediction_prompt} ${scenario.scenario_description}"
 export const PAST_TRANSLATION_RULE =
   'An item whose time span says "before" describes an EARLIER moment: translate it in the Japanese past tense (…ていた／…していた) and never use 今では, 今は or 現在 in it. ';
 
+let requireJapaneseCaptions=false;
+export const setRequireJapaneseCaptions=(value:boolean)=>{requireJapaneseCaptions=value;};
+/** Glossary for the caption translation (2026-10-21: "カメラの背中を向いて", 前傾 -> "前を向いて", untranslated "blink"). */
+export const CAPTION_GLOSSARY =
+  'Glossary: "with their back to the camera" -> 背を向けて (never カメラの背中); "leans forward" -> 前かがみになる; "stretches" -> 伸びをする; "blinks" -> まばたきをする; "rolls the shoulders" -> 肩を回す; "reaches to the side" -> 横へ手を伸ばす. Write ONE short natural sentence; translate every English word, never leave Latin words in the sentence. ';
+const CAPTION_FIXES: Array<[RegExp, string]> = [
+  [/カメラの背中を向いて/g, '背を向けて'], [/カメラに背中を向けて/g, '背を向けて'], [/カメラの背中/g, '背中'],
+  [/\bblinks?\b/gi, 'まばたき'], [/\bblinking\b/gi, 'まばたき'],
+];
+/** Mechanical clean-up of a translated caption (glossary leftovers); never changes a clean Japanese sentence. */
+export function fixJapaneseCaption(text: string): string {
+  let out = String(text ?? '');
+  for (const [re, to] of CAPTION_FIXES) out = out.replace(re, to);
+  // A caption cut off mid-sentence ("…姿勢はややリラックスしており、頭は。"): the dangling clause is dropped.
+  out = out.replace(/、[^、。]{0,12}(は|が|を|に|で|と|も|の)。$/, '。');
+  return out;
+}
 export async function translateDisplayTextToJapanese(
   scenarios: ScenarioResult[],
   signal?: AbortSignal,
   llm?: PlannerLlm,
-  displayOverrides:ReadonlyMap<number,string>=new Map()
+  displayOverrides:ReadonlyMap<number,string>=new Map(),
+  retried=false
 ): Promise<ScenarioResult[]> {
   const sceneNow = scenarios[0]?.scene_now ?? "";
   const subset=displayTranslationSubset(scenarios.map(s=>s.scenario_description),displayOverrides);
@@ -858,7 +876,7 @@ export async function translateDisplayTextToJapanese(
       outRaw = await llm.text(
         "Translate every string in this JSON from English into natural Japanese. Keep the JSON structure and the same number of items. " +
           'Write a leading time span as Japanese, e.g. "30 seconds later," -> "30秒後、", "2 minutes 30 seconds before," -> "2分30秒前、". ' +
-          PAST_TRANSLATION_RULE +
+          PAST_TRANSLATION_RULE + CAPTION_GLOSSARY +
           'Return ONLY JSON of the form {"scene":"...","items":["..."]}.\n' +
           JSON.stringify(payload),
         signal
@@ -872,7 +890,7 @@ export async function translateDisplayTextToJapanese(
         prompt:
           "Translate every string in this JSON from English into natural Japanese. Keep the JSON structure and the same number of items. " +
           'Write a leading time span as Japanese, e.g. "30 seconds later," -> "30秒後、", "2 minutes 30 seconds before," -> "2分30秒前、". ' +
-          PAST_TRANSLATION_RULE +
+          PAST_TRANSLATION_RULE + CAPTION_GLOSSARY +
           'Return ONLY JSON of the form {"scene":"...","items":["..."]}.\n' +
           JSON.stringify(payload),
         stream: false,
@@ -891,7 +909,12 @@ export async function translateDisplayTextToJapanese(
     const out = JSON.parse(outRaw || "{}");
     const items: unknown = out?.items;
     if (!Array.isArray(items) || items.length !== subset.items.length) throw new Error("item count mismatch");
-    const descriptions=subset.restore(items);
+    const descriptions=subset.restore(items).map((d)=>typeof d==='string'?(retried&&requireJapaneseCaptions?fixJapaneseCaption(d).replace(/[A-Za-z]{4,}/g,'').replace(/\s{2,}/g,' '):fixJapaneseCaption(d)):d);
+    // 2026-10-21: captions are always Japanese. A translation that came back with no Japanese at all (or failed, below) is retried once.
+    if(!retried&&requireJapaneseCaptions&&(descriptions.some((d,i)=>typeof d==='string'&&d.trim()&&(/[A-Za-z]{5,}/.test(d)||!/[\u3040-\u30ff\u4e00-\u9fff]/.test(d))&&!displayOverrides.has(i))||(typeof out?.scene==='string'&&out.scene.trim()&&!/[぀-ヿ一-鿿]/.test(out.scene)))){
+      console.warn('vlmClient: translation returned non-Japanese text; retrying once');
+      return translateDisplayTextToJapanese(scenarios,signal,llm,displayOverrides,true);
+    }
     const scene = typeof out?.scene === "string" && out.scene.trim() ? out.scene.trim() : sceneNow;
     return scenarios.map((s, i) => ({
       ...s,
@@ -899,8 +922,15 @@ export async function translateDisplayTextToJapanese(
       scene_now: scene,
     }));
   } catch (err) {
-    console.error(`vlmClient: Japanese translation failed, keeping English text — ${(err as Error).message}`);
-    return scenarios;
+    if(!retried&&requireJapaneseCaptions&&!signal?.aborted){
+      console.warn(`vlmClient: Japanese translation failed (${(err as Error).message}); retrying once`);
+      return translateDisplayTextToJapanese(scenarios,signal,llm,displayOverrides,true);
+    }
+    // Captions are always Japanese: a scene whose description is still English is not published (the screen keeps its previous image).
+    // Enabled by the server at start-up (setRequireJapaneseCaptions); unit tests with mocked translation keep the English fallback.
+    if(!requireJapaneseCaptions){console.error(`vlmClient: Japanese translation failed, keeping English text — ${(err as Error).message}`);return scenarios;}
+    console.error(`vlmClient: Japanese translation failed twice, skipping scenes without a Japanese caption — ${(err as Error).message}`);
+    return scenarios.map((s) => (!s.skipped && typeof s.scenario_description === 'string' && s.scenario_description.trim() && !/[\u3040-\u30ff\u4e00-\u9fff]/.test(s.scenario_description) ? { ...s, skipped: 'translation_failed' as const } : s));
   }
 }
 

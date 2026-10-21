@@ -72,9 +72,9 @@ export class ComfyWatchdog {
   private setAlert(level: ComfyAlert['level']) {
     const since = this.alert?.since ?? this.now().toISOString();
     const text = {
-      warn: `ComfyUI が応答しません(連続 ${this.consecutive} 回タイムアウト)`,
-      restarting: `ComfyUI が応答しません(連続 ${this.consecutive} 回)。自動再起動中`,
-      'restart-failed': `ComfyUI の自動再起動に失敗しました(連続 ${this.consecutive} 回タイムアウト)。手動で scripts/restart-comfyui.ps1`,
+      warn: `ComfyUI not responding (${this.consecutive} timeouts in a row)`,
+      restarting: `ComfyUI not responding (${this.consecutive} in a row). Restarting automatically`,
+      'restart-failed': `ComfyUI automatic restart failed (${this.consecutive} timeouts in a row). Run scripts/restart-comfyui.ps1 manually`,
     }[level];
     this.alert = { level, consecutiveTimeouts: this.consecutive, since, message: text };
   }

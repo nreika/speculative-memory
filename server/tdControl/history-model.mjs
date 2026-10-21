@@ -70,13 +70,15 @@ export function normalizeEvent(row){
     const thumbUrl=url?thumbFor(row.thumbUrls?.[key]):null;
     const offset=key==='now'?0:finite(content?.distanceSecSigned)?content.distanceSecSigned:null;
     const time=offset===null?null:start+offset*1000;
-    points.push({key,url,thumbUrl,offset,time:Number.isSafeInteger(time)?time:null,
+    const unitOf=v=>finite(v)&&v>=0&&v<=1?v:null,idx=['a','b','c'].indexOf(key);
+    const tone=key==='now'?null:unitOf(content?.tone)??unitOf(Array.isArray(row.sceneTone)?row.sceneTone[idx]:row.sceneTone?.[key])??unitOf(row.tone);
+    points.push({key,url,thumbUrl,offset,tone,time:Number.isSafeInteger(time)?time:null,
       caption:typeof content?.caption==='string'?content.caption:'',
       recordedAtMs:finite(content?.sourceRecordedAtMs)?content.sourceRecordedAtMs:null,
       generatedAtMs:finite(content?.generatedAtMs)?content.generatedAtMs:null,
       targetAtMs:finite(content?.targetAtMs)?content.targetAtMs:null});
   }
-  if(!points.some(point=>point.key==='now'))points.unshift({key:'now',url:null,thumbUrl:null,offset:0,time:start,caption:'',recordedAtMs:null,generatedAtMs:null,targetAtMs:null});
+  if(!points.some(point=>point.key==='now'))points.unshift({key:'now',url:null,thumbUrl:null,offset:0,tone:null,time:start,caption:'',recordedAtMs:null,generatedAtMs:null,targetAtMs:null});
   return {id:row.captureId,start,end:Number.isFinite(end)&&end>=start?end:null,status,session,label,
     totalMs:finite(row.totalMs)&&row.totalMs>=0?row.totalMs:null,
     requested:count(row.requestedCount),saved:count(row.savedCount),published:count(row.publishedCount),
@@ -144,43 +146,73 @@ export function mixedConnectionLayout(events,origin,section,gap=13,lanes={}){
     if(used)base+=used*96+16;
   }
   const sourceById=new Map(pools.source.map(point=>[point.event.id,point]));
-  return {nodes:points,lines:points.filter(point=>point.key!=='now'&&sourceById.has(point.event.id)).map(point=>({key:point.key,captureId:point.event.id,from:sourceById.get(point.event.id),to:point})),height:Math.max(120,base-16),laneCounts};
+  const lines=points.filter(point=>point.key!=='now'&&sourceById.has(point.event.id)).map(point=>({key:point.key,captureId:point.event.id,from:sourceById.get(point.event.id),to:point,offset:0}));
+  spreadOverlaps(lines,10);
+  return {nodes:points,lines,height:Math.max(120,base-16),laneCounts};
 }
-// lanes: minimum column count per key, shared by every section so SOURCE keeps the same x everywhere.
+// Vertical view: a generated image sits at x = SOURCE x +/- (TONE_BASE + tone * TONE_RANGE) px.
+// A and B go right, C goes left. Cards that would collide step outward by LANE_STEP px.
+export const TONE_BASE=130,TONE_RANGE=300,LANE_STEP=128,TONE_UNKNOWN=.5;
+const CARD_W=122,CARD_H=96;
+// lanes: minimum lane count per side ({c:left,a:right}), shared by every section so SOURCE keeps the same x everywhere.
 export function verticalConnectionLayout(events,origin,section,plotWidth=900,lanes={}){
   const scale=.004,top=48,points=events.flatMap(event=>event.points.filter(point=>finite(point.time)).map(point=>({...point,event,id:event.id+':'+point.key,y:top+(point.time-origin-section.min)*scale})));
-  let columns=0;const laneCounts={};
-  for(const key of ['c','now','a','b']){
-    const lastY=[];
-    for(const point of points.filter(point=>point.key===key).sort((a,b)=>a.time-b.time||a.id.localeCompare(b.id))){
-      // SOURCE stays in one straight column; only generated images get extra lanes when they collide.
-      let lane=key==='now'?0:lastY.findIndex(y=>point.y-y>=96);if(lane<0)lane=lastY.length;
-      lastY[lane]=point.y;point.column=columns+lane;
+  const leftSpace=TONE_BASE+TONE_RANGE+Math.max(0,(lanes.c??0)-1)*LANE_STEP,rightSpace=TONE_BASE+TONE_RANGE+Math.max(0,Math.max(lanes.a??0,lanes.b??0)-1)*LANE_STEP;
+  const sourceX=90+leftSpace,width=Math.max(640,plotWidth,sourceX+rightSpace+70),height=Math.max(160,(section.max-section.min)*scale+top*2);
+  const placed=[];let leftLanes=0,rightLanes=0;
+  for(const point of points.filter(point=>point.key==='now'))point.px=sourceX,point.lane=0,placed.push(point);
+  const generated=points.filter(point=>point.key!=='now').sort((a,b)=>a.time-b.time||a.id.localeCompare(b.id));
+  for(const point of generated){
+    const sign=point.key==='c'?-1:1,known=finite(point.tone),tone=known?point.tone:TONE_UNKNOWN;point.toneKnown=known;point.tone=tone;
+    const base=TONE_BASE+tone*TONE_RANGE;let lane=0;
+    for(;;lane++){
+      const px=sourceX+sign*(base+lane*LANE_STEP);
+      if(!placed.some(other=>Math.abs(other.px-px)<CARD_W&&Math.abs(other.y-point.y)<CARD_H)){point.px=px;break;}
     }
-    laneCounts[key]=lastY.length;columns+=Math.max(lastY.length,lanes[key]??0);
+    point.lane=lane;placed.push(point);
+    if(sign<0)leftLanes=Math.max(leftLanes,lane+1);else rightLanes=Math.max(rightLanes,lane+1);
   }
-  const width=Math.max(640,plotWidth,90+columns*128),height=Math.max(160,(section.max-section.min)*scale+top*2);
-  for(const point of points)point.x=(80+(point.column+.5)*(width-90)/Math.max(1,columns))/width*100;
+  const laneCounts={c:leftLanes,now:1,a:rightLanes,b:0};
+  for(const point of points)point.x=point.px/width*100;
   const sourceById=new Map(points.filter(point=>point.key==='now').map(point=>[point.event.id,point]));
-  return {width,height,scale,top,laneCounts,nodes:points,lines:points.filter(point=>point.key!=='now'&&sourceById.has(point.event.id)).map(point=>({key:point.key,captureId:point.event.id,from:sourceById.get(point.event.id),to:point}))};
+  const lines=points.filter(point=>point.key!=='now'&&sourceById.has(point.event.id)).map(point=>({key:point.key,captureId:point.event.id,from:sourceById.get(point.event.id),to:point,offset:0}));
+  spreadOverlaps(lines,width/100);
+  return {width,height,scale,top,laneCounts,nodes:points,lines};
 }
-export function sourceConnectionPath(from,to,key,avoid=null){
-  // Bend across the source's time row first, then approach the target vertically.
-  // A symmetric curve would still pass through A when A is halfway to B.
-  if(Math.abs(to.y-from.y)<1){
-    const clearance=key==='b'?84:64,gutter=from.y>=100?from.y-clearance:Math.max(from.y,to.y)+clearance;
-    return `M ${from.x} ${from.y} L ${from.x} ${gutter} L ${to.x} ${gutter} L ${to.x} ${to.y}`;
+/** Give lines that lie on top of each other (collinear, overlapping extents) a perpendicular offset in px, alternating around the original. xScale converts line x units to px. */
+export function spreadOverlaps(lines,xScale=1,step=6,tolerance=1.5){
+  const pts=lines.map(line=>({ax:line.from.x*xScale,ay:line.from.y,bx:line.to.x*xScale,by:line.to.y}));
+  const parent=lines.map((_,i)=>i),find=i=>parent[i]===i?i:(parent[i]=find(parent[i]));
+  const dist=(l,x,y)=>{const dx=l.bx-l.ax,dy=l.by-l.ay,len=Math.hypot(dx,dy)||1;return Math.abs(dx*(y-l.ay)-dy*(x-l.ax))/len;};
+  const extent=(l,x,y)=>{const dx=l.bx-l.ax,dy=l.by-l.ay,len2=dx*dx+dy*dy||1;return ((x-l.ax)*dx+(y-l.ay)*dy)/len2;};
+  for(let i=0;i<lines.length;i++)for(let j=i+1;j<lines.length;j++){
+    const p=pts[i],q=pts[j];
+    if(dist(p,q.ax,q.ay)>tolerance||dist(p,q.bx,q.by)>tolerance)continue;
+    const t1=extent(p,q.ax,q.ay),t2=extent(p,q.bx,q.by),lo=Math.max(0,Math.min(t1,t2)),hi=Math.min(1,Math.max(t1,t2));
+    if(hi-lo>1e-6)parent[find(j)]=find(i);
   }
-  if(avoid){
-    let intersects=false;
-    for(let i=1;i<100;i++){
-      const t=i/100,u=1-t,x=u**3*from.x+(1-u**3)*to.x,y=(1-t**3)*from.y+t**3*to.y;
-      if(x>avoid.left&&x<avoid.right&&y>avoid.top&&y<avoid.bottom){intersects=true;break;}
-    }
-    if(intersects){const gutter=avoid.left-24;return `M ${from.x} ${from.y} L ${gutter} ${from.y} L ${gutter} ${to.y} L ${to.x} ${to.y}`;}
+  const groups=new Map();
+  lines.forEach((line,i)=>{const root=find(i);if(!groups.has(root))groups.set(root,[]);groups.get(root).push(line);});
+  for(const group of groups.values()){
+    if(group.length<2)continue;
+    group.forEach((line,i)=>{line.offset=(i-(group.length-1)/2)*step;});
   }
-  const bendY=from.y;
-  return `M ${from.x} ${from.y} C ${to.x} ${bendY} ${to.x} ${bendY} ${to.x} ${to.y}`;
+  return lines;
+}
+function segmentHitsBox(a,b,box){
+  for(let i=1;i<100;i++){const t=i/100,x=a.x+(b.x-a.x)*t,y=a.y+(b.y-a.y)*t;if(x>box.left&&x<box.right&&y>box.top&&y<box.bottom)return true;}
+  return false;
+}
+/** Straight SOURCE -> generated connector. `offset` shifts the whole segment perpendicular to itself (px). If `avoid` (a box) is crossed, one elbow beside the box keeps two straight segments. */
+export function sourceConnectionPath(from,to,key,avoid=null,offset=0){
+  const dx=to.x-from.x,dy=to.y-from.y,len=Math.hypot(dx,dy)||1,ox=-dy/len*offset,oy=dx/len*offset;
+  const a={x:from.x+ox,y:from.y+oy},b={x:to.x+ox,y:to.y+oy},f=n=>Math.round(n*100)/100;
+  if(avoid&&segmentHitsBox(a,b,avoid)){
+    const candidates=[{x:avoid.right+24,y:avoid.top-24},{x:avoid.left-24,y:avoid.bottom+24},{x:avoid.left-24,y:avoid.top-24},{x:avoid.right+24,y:avoid.bottom+24}];
+    const elbow=candidates.find(c=>!segmentHitsBox(a,c,avoid)&&!segmentHitsBox(c,b,avoid))||candidates[0];
+    return `M ${f(a.x)} ${f(a.y)} L ${f(elbow.x)} ${f(elbow.y)} L ${f(b.x)} ${f(b.y)}`;
+  }
+  return `M ${f(a.x)} ${f(a.y)} L ${f(b.x)} ${f(b.y)}`;
 }
 // G-27 scenario CSV runs: which CSV drove which stretch of the timeline.
 const RUN_ID=/^[A-Za-z0-9_-]{1,64}$/;
@@ -201,7 +233,7 @@ export function normalizeScenarioRuns(rows,nowMs=Date.now()){
   runs.sort((a,b)=>a.start-b.start||a.runId.localeCompare(b.runId));
   const firstSha=new Map();
   for(const run of runs){if(!firstSha.has(run.scenarioId))firstSha.set(run.scenarioId,run.sha);run.revised=!!run.sha&&firstSha.get(run.scenarioId)!==run.sha;}
-  for(const run of runs)run.label=run.scenarioId+' '+clockLabel(run.start)+'–'+(run.running?'running':clockLabel(run.end))+(run.revised?' (修正版)':'');
+  for(const run of runs)run.label=run.scenarioId+' '+clockLabel(run.start)+'–'+(run.running?'running':clockLabel(run.end))+(run.revised?' (revised)':'');
   return runs;
 }
 /** Runs shown for one history session: tagged by one of its captures, or overlapping its time span. */

@@ -5,6 +5,7 @@ import net from 'node:net';
 import {createHash,randomUUID} from 'node:crypto';
 import type {Express} from 'express';
 import {buildBrowserDisplaySnapshot,validateBrowserDisplayContents,isBrowserDisplayImageUrl,type BrowserDisplayContent,type BrowserDisplaySnapshot} from './browserDisplay';
+import {renameRetry} from './renameRetry';
 
 export const BROWSER_OUTPUT_MAX=64;
 const SOURCES=['now','a','b','c','actual-past','generated-history','fixed','td-1','td-2','td-3','td-4'] as const;
@@ -55,6 +56,7 @@ export interface BrowserOutputTdRouting {
 export interface BrowserOutputsCatalog {
  tdRouting?:BrowserOutputTdRouting;
  fadeBatches?:Record<string,BrowserOutputFadeBatch>;
+ currentStatus?:Partial<Record<'now'|'a'|'b'|'c',NonNullable<BrowserDisplaySnapshot['displayStatus']>>>;
  contents:BrowserDisplayContent[];
  current:Partial<Record<'now'|'a'|'b'|'c',string>>;
  sourceScopes:Partial<Record<'actual-past'|'generated-history',string>>;
@@ -70,6 +72,8 @@ export interface BrowserOutputsOptions {
  presentSnapshot?:(snapshot:BrowserDisplaySnapshot)=>Promise<BrowserDisplaySnapshot>;
  thumbnails?:{thumbnailUrl:(imageUrl:string)=>string|null;resolveThumbnail:(urlPath:string)=>Promise<string|null>};
  allowedHosts?:string[];catalogTtlMs?:number;now?:()=>number;
+ /** Serve the previous catalog while a refresh runs in the background (screens never wait for a rebuild). */
+ staleWhileRevalidate?:boolean;
 }
 const idPattern=/^screen-[1-9][0-9]{0,2}$/;
 const hash=(value:unknown)=>createHash('sha256').update(JSON.stringify(value)).digest('hex').slice(0,20);
@@ -114,7 +118,7 @@ type Pool={value:BrowserOutputsCatalog;contents:BrowserDisplayContent[];revision
 type Config={schema:1;revision:string;outputs:BrowserOutputConfig[];channelFadeModes:Record<BrowserOutputFadeChannel,BrowserOutputFadeMode>;channelFadeTimings:Record<BrowserOutputFadeChannel,BrowserOutputFadeTiming>;channelFaceBlurs:Record<BrowserOutputFadeChannel,BrowserOutputFaceBlur>;channelCaptions:BrowserOutputChannelCaptions};
 export class BrowserOutputsStore {
  private config?:{value:Config;expires:number};private configFlight?:Promise<Config>;private configEpoch=0;
- private pool?:{value:Pool;expires:number};private poolFlight?:Promise<Pool>;private poolEpoch=0;
+ private derived?:{src:unknown;base:BrowserDisplayContent[];byId:Map<string,BrowserDisplayContent>;idsHash:string};private pool?:{value:Pool;expires:number};private poolFlight?:Promise<Pool>;private poolEpoch=0;
  private writes:Promise<void>=Promise.resolve();
  private scenarioPreview?:{owner:string;baseRevision:string;outputs:BrowserOutputConfig[];channelCaptions?:BrowserOutputChannelCaptions};
  readonly now:()=>number;readonly ttl:number;
@@ -140,12 +144,29 @@ export class BrowserOutputsStore {
  }
  async catalog():Promise<Pool>{
   if(this.pool&&this.pool.expires>this.now())return this.pool.value;
+  if(this.options.staleWhileRevalidate&&this.pool){
+   // 2026-10-21: a screen request never waits for the catalog rebuild: the previous catalog (at most one TTL + one rebuild old) is served.
+   if(!this.poolFlight){const refresh=this.rebuildPool();this.poolFlight=refresh;void refresh.catch(()=>undefined).finally(()=>{if(this.poolFlight===refresh)this.poolFlight=undefined;});}
+   return this.pool.value;
+  }
   if(this.poolFlight)return this.poolFlight;
+  const flight=this.rebuildPool();
+  this.poolFlight=flight;
+  try{return await flight;}finally{if(this.poolFlight===flight)this.poolFlight=undefined;}
+ }
+ private rebuildPool():Promise<Pool>{
   const epoch=this.poolEpoch;
-  const flight=(async()=>{
+  return (async()=>{
    const raw=await this.options.loadCatalog();
    if(!plain(raw)||!plain(raw.current)||!plain(raw.sourceScopes)||!plain(raw.clocks))throw Error('Catalog unavailable');
-   const contents=validateBrowserDisplayContents(raw.contents),byId=new Map(contents.map(c=>[c.id,c]));
+   // The catalog source keeps the same array while nothing changed: validate / index / sort / hash it once.
+   let derived=this.derived;
+   if(!derived||derived.src!==raw.contents){
+    const validated=validateBrowserDisplayContents(raw.contents),time0=(c:BrowserDisplayContent)=>c.provenance==='actual'?c.recordedAtMs:c.provenance==='generated'?c.generatedAtMs:null;
+    const base=validated.slice().sort((a,b)=>(time0(b)??-Infinity)-(time0(a)??-Infinity)||a.id.localeCompare(b.id));
+    derived={src:raw.contents,base,byId:new Map(validated.map(c=>[c.id,c])),idsHash:hash(validated.map(c=>c.id+'|'+c.imageUrl+'|'+(c.thumbnailUrl??'')))};this.derived=derived;
+   }
+   const byId=derived.byId;let contents=derived.base;
    const current:BrowserOutputsCatalog['current']={};
    for(const key of ['now','a','b','c'] as const){const id=raw.current[key];if(id!==undefined){const c=byId.get(id);if(!c||c.sceneKey!==(key==='now'?'now':'gen_'+key)||c.provenance!==(key==='now'?'actual':'generated'))throw Error('Invalid current content');current[key]=id;}}
    const sourceScopes:BrowserOutputsCatalog['sourceScopes']={};
@@ -163,14 +184,14 @@ export class BrowserOutputsStore {
    }
    const currentIds=new Set(Object.values(current));
    const time=(c:BrowserDisplayContent)=>c.provenance==='actual'?c.recordedAtMs:c.provenance==='generated'?c.generatedAtMs:null;
-   contents.sort((a,b)=>Number(currentIds.has(b.id))-Number(currentIds.has(a.id))||(time(b)??-Infinity)-(time(a)??-Infinity)||a.id.localeCompare(b.id));
+   if(currentIds.size){const head=contents.filter(c=>currentIds.has(c.id)),tail=contents.filter(c=>!currentIds.has(c.id));contents=[...head,...tail];}
    const fadeBatches:Record<string,BrowserOutputFadeBatch>=Object.create(null);
    if(raw.fadeBatches!==undefined){if(!plain(raw.fadeBatches))throw Error('Invalid fade batches');for(const [key,batch] of Object.entries(raw.fadeBatches)){if(!text(key)||!plain(batch)||batch.captureId!==key||!Number.isSafeInteger(batch.completedAtMs)||batch.completedAtMs<0)throw Error('Invalid fade batch');fadeBatches[key]={captureId:key,completedAtMs:batch.completedAtMs};}}
-   const value={contents,current,sourceScopes,clocks,fadeBatches,...(tdRouting?{tdRouting}:{})},result:Pool={value,contents,revision:hash({contents,current}),byId,timelines:new Map()};
+   const currentStatus:NonNullable<BrowserOutputsCatalog['currentStatus']>={};
+   if(plain(raw.currentStatus))for(const key of ['now','a','b','c'] as const){const st=(raw.currentStatus as any)[key];if(plain(st)&&['idle','generating','completed','failed'].includes(st.state as string)){const s=(v:unknown)=>typeof v==='string'?v.slice(0,512):null;currentStatus[key]={state:st.state as any,requestedCaptureId:s(st.requestedCaptureId),displayedCaptureId:s(st.displayedCaptureId),error:s(st.error),userMessage:s(st.userMessage),lastSuccessAtMs:Number.isSafeInteger(st.lastSuccessAtMs)?st.lastSuccessAtMs as number:null};}}
+   const value={contents,current,sourceScopes,clocks,fadeBatches,currentStatus,...(tdRouting?{tdRouting}:{})},result:Pool={value,contents,revision:hash({contents:derived.idsHash,current}),byId,timelines:new Map()};
    if(epoch===this.poolEpoch)this.pool={value:result,expires:this.now()+this.ttl};return result;
   })();
-  this.poolFlight=flight;
-  try{return await flight;}finally{if(this.poolFlight===flight)this.poolFlight=undefined;}
  }
  invalidateCatalog(){this.pool=undefined;this.poolEpoch++;this.poolFlight=undefined;}
  private selectAt(pool:Pool,scope:string|undefined,provenance:string,scene:string|undefined,field:TimelineField,upper:number|null){
@@ -200,7 +221,7 @@ export class BrowserOutputsStore {
     const directory=path.dirname(this.options.configFile),temporary=path.join(directory,'.browser-outputs-'+randomUUID()+'.tmp');
     await fs.mkdir(directory,{recursive:true});
     let handle:Awaited<ReturnType<typeof fs.open>>|undefined;
-    try{handle=await fs.open(temporary,'wx',0o600);await handle.writeFile(JSON.stringify({schema:1,outputs,channelFadeModes,channelFadeTimings,channelFaceBlurs,channelCaptions},null,2));await handle.sync();await handle.close();handle=undefined;await fs.rename(temporary,this.options.configFile);}
+    try{handle=await fs.open(temporary,'wx',0o600);await handle.writeFile(JSON.stringify({schema:1,outputs,channelFadeModes,channelFadeTimings,channelFaceBlurs,channelCaptions},null,2));await handle.sync();await handle.close();handle=undefined;await renameRetry(temporary,this.options.configFile);}
     catch(error){await handle?.close().catch(()=>undefined);await fs.unlink(temporary).catch(()=>undefined);throw error;}
     const next:Config={schema:1,revision:hash({schema:1,outputs,channelFadeModes,channelFadeTimings,channelFaceBlurs,channelCaptions}),outputs,channelFadeModes,channelFadeTimings,channelFaceBlurs,channelCaptions};this.scenarioPreview=undefined;this.configEpoch++;this.config={value:next,expires:this.now()+this.ttl};resolve(next);
    }catch(error){reject(error);}
@@ -257,7 +278,7 @@ export class BrowserOutputsStore {
   if(!clock){if(source!=='fixed')content=undefined;if(!reason)reason='clock-unavailable';}
   if(!content&&!reason)reason='source-unavailable';
   if(content?.provenance==='generated'){
-   let caption='生成指示を確認できません。';
+   let caption='Generation instruction unavailable.';
    try{
     const projected=await this.options.resolveContent?.({...content});
     if(projected&&['id','scope','imageUrl','captureId','sceneKey','provenance'].every(key=>(projected as any)[key]===(content as any)[key])&&typeof projected.caption==='string'&&projected.caption.trim()&&projected.caption.length<=8000)caption=projected.caption;
@@ -272,8 +293,10 @@ export class BrowserOutputsStore {
   const outputStatus={state:!output.visible?'hidden':!source?'not-ready':!desiredView.visible?'hidden':content?'ready':'not-ready',reason:!output.visible?'hidden':reason??(!desiredView.visible?'hidden':null)} as const;
   const view={...desiredView,visible,fadeMode:desiredView.fade?(output.fadeMode??'original'):'none' as BrowserOutputFadeMode,fadeDurationMs:output.fadeDurationMs??800,blackHoldMs:output.blackHoldMs??120,fadeOnImageChange:output.source==='fixed',faceBlur:faceBlur(output.faceBlur)};
   const fadeBatch=content?.captureId?catalog.fadeBatches?.[content.captureId]:undefined;
+  // Generating / failed notice for screens that follow the live NOW/A/B/C sources.
+  const displayStatus=['now','a','b','c'].includes(source as string)&&!(output.delaySec>0)?catalog.currentStatus?.[source as 'now'|'a'|'b'|'c']:undefined;
   const scenarioOverride=this.scenarioPreview?.baseRevision===config.revision?{runId:this.scenarioPreview.owner,source:output.source}:undefined;
-  const result={...snapshot,...(scenarioOverride?{scenarioOverride}:{}),clock:{...snapshot.clock,known:clockKnown},output,view,...(fadeBatch?{fadeBatch}:{}),outputStatus,revision:hash({snapshotRevision:snapshot.revision,clockKnown,output,view,outputStatus,fadeBatch,scenarioOverride})};
+  const result={...snapshot,...(scenarioOverride?{scenarioOverride}:{}),clock:{...snapshot.clock,known:clockKnown},output,view,...(fadeBatch?{fadeBatch}:{}),...(displayStatus?{displayStatus}:{}),outputStatus,revision:hash({snapshotRevision:snapshot.revision,clockKnown,output,view,outputStatus,fadeBatch,displayStatus,scenarioOverride})};
   if(!this.options.presentSnapshot)return result;
   const presented=await this.options.presentSnapshot(result);
   return {...result,...presented,output:result.output,view:result.view,outputStatus:result.outputStatus};
@@ -281,8 +304,8 @@ export class BrowserOutputsStore {
  catalogItem(c:BrowserDisplayContent){
   const candidate=this.options.thumbnails?this.options.thumbnails.thumbnailUrl(c.imageUrl):c.thumbnailUrl??c.imageUrl;
   const scene=c.sceneKey==='now'?'now':/^gen_[abc]$/.test(c.sceneKey??'')?c.sceneKey!.slice(-1):null;
-  const label=c.provenance==='uploaded'?(c.caption.trim()||'読み込み画像'):c.provenance==='actual'?(c.caption.trim()||`実写 NOW · ${c.captureId??c.id}`):`生成 ${scene?.toUpperCase()??'画像'} · ${c.captureId??c.id}`;
-  return {id:c.id,contentId:c.id,label:label.slice(0,128),scene,scope:c.scope,provenance:c.provenance,imageUrl:c.imageUrl,thumbnailUrl:isBrowserDisplayImageUrl(candidate)?candidate:null,recordedAtMs:c.recordedAtMs,sourceRecordedAtMs:c.sourceRecordedAtMs,targetAtMs:c.targetAtMs,generatedAtMs:c.generatedAtMs,distanceSecSigned:c.distanceSecSigned??null,caption:c.provenance==='generated'?'生成指示を確認できません。':c.caption,captureId:c.captureId??null,sceneKey:c.sceneKey??null};
+  const label=c.provenance==='uploaded'?(c.caption.trim()||'Uploaded image'):c.provenance==='actual'?(c.caption.trim()||`NOW · ${c.captureId??c.id}`):`Generated ${scene?.toUpperCase()??'image'} · ${c.captureId??c.id}`;
+  return {id:c.id,contentId:c.id,label:label.slice(0,128),scene,scope:c.scope,provenance:c.provenance,imageUrl:c.imageUrl,thumbnailUrl:isBrowserDisplayImageUrl(candidate)?candidate:null,recordedAtMs:c.recordedAtMs,sourceRecordedAtMs:c.sourceRecordedAtMs,targetAtMs:c.targetAtMs,generatedAtMs:c.generatedAtMs,distanceSecSigned:c.distanceSecSigned??null,caption:c.provenance==='generated'?'Generation instruction unavailable.':c.caption,captureId:c.captureId??null,sceneKey:c.sceneKey??null};
  }
  async page(query:{cursor?:string;limit?:string;kind?:string}){
   const limit=query.limit===undefined?30:Number(query.limit),kind=query.kind??'all';

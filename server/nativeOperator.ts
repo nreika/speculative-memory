@@ -27,6 +27,10 @@ interface Options {
  preflightPersonReferences?:OperatorGenerationOptions['preflightPersonReferences'];
  recordFrame?:(body:Record<string,unknown>)=>Promise<unknown>;
  readCost?:()=>unknown;
+ /** Real action / exact image prompt / reference note of a displayed scene image (MAIN only; from the saved generation record). */
+ readSceneDetails?:(identity:{captureId:string;sceneKey:string;imageUrl:string})=>{predictionPrompt?:string;imagePromptFull?:string;referenceNote?:string}|undefined;
+ /** Recent browser-side display problems (one short line per screen+kind with a count) for the Errors panel. */
+ readDisplayErrors?:()=>string[];
  latestOutcome?:()=>{result:string;errorMessage?:string|null;captureId:string}|undefined;
  readFadeMode?:(id:string)=>Promise<NonNullable<BrowserDisplaySnapshot['view']>['fadeMode']>;
  readFadeTiming?:(id:string)=>Promise<{fadeDurationMs:number;blackHoldMs:number}|undefined>;
@@ -59,12 +63,23 @@ export function autoCaptureDue(o:{mode:string;intervalSec:number;nowMs:number;la
  if(o.mode!=='chain')return false;
  return elapsed>=1000&&(o.zeroScenesAtMs===null||o.nowMs-o.zeroScenesAtMs>=o.intervalSec*1000);
 }
+/**
+ * MAIN settings edits start the next capture 3 s later. Edits made by a scenario (while it owns the layout) and the settings
+ * restore when it stops are absorbed (no trigger), so the CSV's timer interval is kept exactly.
+ */
+export function watchSettingsChange(w:{lastKey:string|null;changedAt:number|null},o:{key:string;nowMs:number;absorb:boolean;autoMode:boolean}):{lastKey:string;changedAt:number|null;fire:boolean}{
+ let changedAt=w.changedAt;
+ if(o.absorb)changedAt=null;else if(w.lastKey!==null&&o.key!==w.lastKey)changedAt=o.nowMs;
+ let fire=false;
+ if(changedAt!==null&&o.nowMs-changedAt>=3000&&o.autoMode){changedAt=null;fire=true;}
+ return {lastKey:o.key,changedAt,fire};
+}
 export async function createNativeOperator(options:Options){
  const initial=JSON.parse(await fs.readFile(path.join(options.directory,'bootstrap-state.json'),'utf8'));
  const remoteStore=options.remoteCamera??remoteCamera,input=withRemoteCamera(options.input??createOperatorInputClient(),remoteStore),library=createOperatorLibrary(path.join(options.directory,'scenarios'),options.python,options.readOutputIds);
  let state:ReturnType<typeof createOperatorState>,generation:ReturnType<typeof createOperatorGeneration>;
  let zeroScenesAt:number|null=null;
- let lastSettingsKey:string|null=null,settingsChangedAt:number|null=null;
+ let lastSettingsKey:string|null=null,settingsChangedAt:number|null=null,resyncSettingsKey=false,settingsStopping=false;
  let pausedByHold=false,lastAttempt=Date.now(),inputChecked=0,inputSnapshot:any, inputError='',lastError='';
  let schedulerBusy=false,recordingError='',logError='',mismatchError='';
  // input.select received while a capture runs (chain leaves ~1 s idle): applied at the next idle scheduler tick, before the next auto capture.
@@ -96,6 +111,10 @@ export async function createNativeOperator(options:Options){
    if(!setId)return;
    storedSelection=setId;
    if(setId==='remote-device')return;
+   // 2026-10-21: re-selecting restarted the bridge's cycle from TSC-001 at every server restart. When the bridge already
+   // shows the stored selection (cycle: replay.cycle, or the same set) nothing is sent.
+   const current=await input.readState().catch(()=>null);
+   if(selectionMatches(setId,current)){inputSnapshot=current;inputChecked=Date.now();mismatchError='';console.log(`[input] resync skipped: bridge already on ${setId}`);return;}
    const result=await input.select({setId:setId as any,requestId:randomUUID()});
    inputSnapshot=result.state;inputChecked=Date.now();
    console.log(`[input] resync: ${setId} → ${result.state?.inputKind}`);
@@ -112,7 +131,8 @@ export async function createNativeOperator(options:Options){
  let restoredSettings:string[]=[],runOutputs:unknown[]=[];
  const flatSettings=(settings:any)=>{const out:Record<string,string>={};for(const [k,v]of Object.entries(settings??{})){if(k==='scenes'&&v&&typeof v==='object'){for(const [scene,row]of Object.entries(v as Record<string,any>))for(const [field,value]of Object.entries(row??{}))out[`scenes.${scene}.${field}`]=JSON.stringify(value??null);}else out[k]=JSON.stringify(v??null);}return out;};
  /** Wraps the settings port so every item the restore actually changed (and the hold) is logged one by one. */
- const loggedSettings:typeof scenarioSettings={...scenarioSettings,stop:async()=>{
+ const loggedSettings:typeof scenarioSettings={...scenarioSettings,stop:async()=>{settingsStopping=true;try{return await stopLogged();}finally{settingsStopping=false;resyncSettingsKey=true;}}};
+ const stopLogged=async()=>{
   const runId=scenario.status().runId;let before:Record<string,string>={},holdBefore:boolean|undefined;
   try{before=flatSettings((await state.readSettingsSnapshot()).settings);holdBefore=await state.readSubmissionHold();}catch{/* restore still runs */}
   const errors=await scenarioSettings.stop();restoredSettings=[];
@@ -122,7 +142,7 @@ export async function createNativeOperator(options:Options){
    if(holdBefore!==undefined&&holdBefore!==holdAfter){restoredSettings.push('submissionHold='+holdAfter);log({event:'restore.hold',runId,from:holdBefore,to:holdAfter});}
   }catch{/* logging only */}
   return errors;
- }};
+ };
  const outputMapping:OperatorScenarioOptions['outputMapping']=options.outputMapping&&{...options.outputMapping,apply:async patches=>{await options.outputMapping!.apply(patches);const s=scenario.status();if(!s.previewOnly)runOutputs.push(...patches.map(p=>({atSec:Math.round(s.elapsedSec*10)/10,...structuredClone(p)})));}};
  const scenario=createOperatorScenario({setLayout:layout=>state.setDisplay({layout}).then(()=>{}),generate:command=>submit(command),event:log,outputMapping,settings:loggedSettings,finished:info=>onScenarioFinished(info)});
  /** The live run the next/current native capture belongs to (tag for capture-events rows). */
@@ -173,7 +193,7 @@ export async function createNativeOperator(options:Options){
   return {mode:'manual',interval:70,phase:active?'generating':request?'requested':'idle',captureId:active?.captureId??request?.captureId??'',source:'native',busyFor:active?(Date.now()-Date.parse(active.startedAt))/1000:0,nextTimerTickIn:null,chainDueIn:null};
  };
  state=createOperatorState({file:path.join(options.directory,'state.json'),initial,
-  runtime:async()=>{const source=await readInput(),settings=await state.readSettings(),selected=await options.readScenes(settings.displayTiming);const currentScenario=scenario.status(),outcome=options.latestOutcome?.(),generationError=lastError||(outcome?.result==='failed'?outcome.errorMessage||'Generation failed':'');return {project:'Speculative Memory',capture:{...capture(),mode:settings.mode,interval:settings.intervalSec,nextTimerTickIn:Math.max(0,settings.intervalSec-(Date.now()-lastAttempt)/1000)},scenario:{...currentScenario,...(!currentScenario.ownsLayout?{previewOnly:settings.scenarioPreview}:{})},scenarioLibrary:await library.list(),remoteCamera:input.remote(),replay:source?.inputKind==='live-camera'?{active:false}:source?.replay??initial.replay??{active:false},history:source?.history??initial.history,cost:options.readCost?.()??initial.cost,sceneText:{now:selected.now?.content?.caption??'',a:selected.a?.content?.caption??'',b:selected.b?.content?.caption??'',past:selected.c?.content?.caption??''},captureScenes:Object.fromEntries(['a','b','c'].map(key=>{const content=selected[key]?.content;return ['gen_'+key,{captureId:content?.captureId,sceneKey:content?.sceneKey,imageUrl:content?.imageUrl,distanceSecSigned:content?.distanceSecSigned}];})),pendingInput:pendingInput?{...pendingInput}:null,warnings:operatorWarnings.list(),sceneNotes:sceneNotes.snapshot(),errors:[{operator:'input',message:inputError},{operator:'input',message:mismatchError},{operator:'input',message:pendingInputError},{operator:'native',message:generationError},{operator:'native-recording',message:recordingError},{operator:'native-log',message:logError}].filter(error=>error.message)};},
+  runtime:async()=>{const source=await readInput(),settings=await state.readSettings(),selected=await options.readScenes(settings.displayTiming);const currentScenario=scenario.status(),outcome=options.latestOutcome?.(),generationError=lastError||(outcome?.result==='failed'?outcome.errorMessage||'Generation failed':'');return {project:'Speculative Memory',capture:{...capture(),mode:settings.mode,interval:settings.intervalSec,nextTimerTickIn:Math.max(0,settings.intervalSec-(Date.now()-lastAttempt)/1000)},scenario:{...currentScenario,...(!currentScenario.ownsLayout?{previewOnly:settings.scenarioPreview}:{})},scenarioLibrary:await library.list(),remoteCamera:input.remote(),replay:source?.inputKind==='live-camera'?{active:false}:source?.replay??initial.replay??{active:false},history:source?.history??initial.history,cost:options.readCost?.()??initial.cost,sceneText:{now:selected.now?.content?.caption??'',a:selected.a?.content?.caption??'',b:selected.b?.content?.caption??'',past:selected.c?.content?.caption??''},captureScenes:Object.fromEntries(['a','b','c'].map(key=>{const content=selected[key]?.content;const details=content?.captureId&&content.sceneKey&&content.imageUrl?options.readSceneDetails?.({captureId:content.captureId,sceneKey:content.sceneKey,imageUrl:content.imageUrl}):undefined;return ['gen_'+key,{captureId:content?.captureId,sceneKey:content?.sceneKey,imageUrl:content?.imageUrl,distanceSecSigned:content?.distanceSecSigned,...(details?{action:details.predictionPrompt,fullPrompt:details.imagePromptFull,references:details.referenceNote}:{})}];})),pendingInput:pendingInput?{...pendingInput}:null,warnings:operatorWarnings.list(),sceneNotes:sceneNotes.snapshot(),errors:[{operator:'input',message:inputError},{operator:'input',message:mismatchError},{operator:'input',message:pendingInputError},{operator:'native',message:generationError},{operator:'native-recording',message:recordingError},{operator:'native-log',message:logError},...(options.readDisplayErrors?.()??[]).map(message=>({operator:'screen',message}))].filter(error=>error.message)};},
   delegate:async(action,data,context)=>{
    if(action==='generation.generate'){const accepted=await submit({requestId:context.requestId,source:'manual'});return {message:'Manual generation accepted · '+accepted.captureId};}
    if(action==='generation.cancel'){const active=generation.status().active;if(active){cancelledRequests.add(active.requestId);while(cancelledRequests.size>128)cancelledRequests.delete(cancelledRequests.values().next().value!);}options.cancel();return {message:'Cancellation requested'};}
@@ -200,6 +220,9 @@ export async function createNativeOperator(options:Options){
     // Paused by the operator's generation.pause: Play resumes the same run and clears the hold (as generation.resume would); it is not a restart from 0.
     if(pausedByHold&&scenario.ownsLayout()&&scenario.status().state==='paused'){pausedByHold=false;scenario.pause();lastAttempt=Date.now();return {message:'Scenario resumed · generation enabled',submissionHold:false};}
     pausedByHold=false;
+    // 2026-10-21: Play while a run owns the outputs is "Restart": stop that run first (restores outputs/settings, closes its archive).
+    // Before this, a second Play collided with the still-owned output mapping and came back as an unconfirmed 504.
+    if(scenario.ownsLayout()){try{await scenario.stop();}catch(error){throw new OperatorStateError(409,'Could not stop the running scenario before restarting: '+String((error as Error).message??error));}}
     const preview=!!context.settings.scenarioPreview,startedAt=new Date().toISOString();
     if(!preview){
      // CSV text captured at load; if it was unreadable then, read it now (still the library file this plan came from).
@@ -242,9 +265,9 @@ export async function createNativeOperator(options:Options){
  const noteCapture=(captureId:unknown)=>{const tag=scenarioRunTag();if(tag&&typeof captureId==='string'&&captureId)runs.note(tag.runId,{captureId});};
  async function submit(command:OperatorGenerateCommand){
   let outcome:{result?:any;error?:any}|undefined;
-  void generation.generate(command).then(result=>{outcome={result};if(result.status>=400){lastError=String((result.body as any)?.error??'Generation failed');zeroScenesAt=Date.now();operatorWarnings.push('generation','生成失敗: '+lastError);}
+  void generation.generate(command).then(result=>{outcome={result};if(result.status>=400){lastError=String((result.body as any)?.error??'Generation failed');zeroScenesAt=Date.now();operatorWarnings.push('generation','Generation failed: '+lastError);}
    else if(zeroScenesGenerated(result)){zeroScenesAt=Date.now();void state.readSettings().then(s=>{if(s.mode==='chain')console.log(`[chain] all scenes skipped; waiting ${s.intervalSec}s`);}).catch(()=>{});}
-   else zeroScenesAt=null;},error=>{outcome={error};lastError=String(error.message??error);zeroScenesAt=Date.now();operatorWarnings.push('generation','生成失敗: '+lastError);});
+   else zeroScenesAt=null;},error=>{outcome={error};lastError=String(error.message??error);zeroScenesAt=Date.now();operatorWarnings.push('generation','Generation failed: '+lastError);});
   const start=Date.now();
   while(Date.now()-start<20000){
    const active=generation.status().active;
@@ -300,9 +323,9 @@ export async function createNativeOperator(options:Options){
   // 2026-10-20: a MAIN settings change (prompt, distance, presence, tone…) starts the next capture 3 s after the last edit
   // instead of waiting out the interval / the empty-result pause, so the change shows within one generation.
   const settingsKey=JSON.stringify(settings);
-  if(lastSettingsKey!==null&&settingsKey!==lastSettingsKey)settingsChangedAt=Date.now();
-  lastSettingsKey=settingsKey;
-  if(settingsChangedAt!==null&&Date.now()-settingsChangedAt>=3000&&(settings.mode==='timer'||settings.mode==='chain')){settingsChangedAt=null;zeroScenesAt=null;lastAttempt=0;console.log('[settings] changed on MAIN; starting the next capture now');}
+  const watched=watchSettingsChange({lastKey:lastSettingsKey,changedAt:settingsChangedAt},{key:settingsKey,nowMs:Date.now(),absorb:scenario.ownsLayout()||settingsStopping||resyncSettingsKey,autoMode:settings.mode==='timer'||settings.mode==='chain'});
+  lastSettingsKey=watched.lastKey;settingsChangedAt=watched.changedAt;if(!scenario.ownsLayout()&&!settingsStopping)resyncSettingsKey=false;
+  if(watched.fire){zeroScenesAt=null;lastAttempt=0;console.log('[settings] changed on MAIN; starting the next capture now');}
   // Remote phone frame older than REMOTE_STALE_SEC: skip timer/chain; Control shows "remote camera stale".
   if(remoteStore.selected&&remoteStore.state()!=='fresh')return;
   if(autoCaptureDue({mode:settings.mode,intervalSec:settings.intervalSec,nowMs:Date.now(),lastAttemptMs:lastAttempt,zeroScenesAtMs:zeroScenesAt})){lastAttempt=Date.now();await submit({requestId:randomUUID(),source:settings.mode as 'timer'|'chain'});}

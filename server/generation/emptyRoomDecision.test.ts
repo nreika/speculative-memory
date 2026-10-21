@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { decideEmptyRoomScenes, sceneSkipPlan, emptyRoomActivityMin, emptyRoomObjectChance, emptyRoomRoll, minutesSince, resolveEmptyScene, type EmptyRoomSceneDecision } from './emptyRoomDecision';
+import { decideEmptyRoomScenes, sceneSkipPlan, emptyRoomActivityMin, emptyRoomObjectChance, emptyRoomRoll, minutesSince, resolveEmptyScene, EMPTY_ROOM_STAYS, type EmptyRoomSceneDecision } from './emptyRoomDecision';
 import { planScenariosLocal } from './vlmClient';
 import { isNoChangeSentence } from './scenarioGuard';
 
@@ -68,11 +68,11 @@ test('env constants default to 3 min / 0.3 and accept overrides', () => {
 
 const decision = (over: Partial<EmptyRoomSceneDecision>): EmptyRoomSceneDecision => ({ sceneKey: 'gen_a', emptyRoomPersonChance: 0.3, roll: 0.9, personDrawn: false, reason: 'chance', objectChance: 0.3, objectRoll: 0.1, activityMinutesAgo: 1, activityWindowMin: 3, objectAllowed: true, objectBlockedReason: null, ...over });
 
-test('resolveEmptyScene: skip reasons and never a "remains the same" sentence', () => {
+test('resolveEmptyScene (2026-10-21 policy): an empty room is never skipped; without an object change the room stays empty', () => {
   const obj = () => 'The chair is turned a few degrees to the right.';
-  assert.deepEqual(resolveEmptyScene({ decision: decision({ objectAllowed: false, objectBlockedReason: 'no_recent_activity' }), kept: 'The chair turns.', isNoChange: isNoChangeSentence, objectChange: obj }), { skipped: 'no_recent_activity' });
-  assert.deepEqual(resolveEmptyScene({ decision: decision({ objectAllowed: false, objectBlockedReason: 'chance' }), kept: 'x', isNoChange: isNoChangeSentence, objectChange: obj }), { skipped: 'chance' });
-  assert.deepEqual(resolveEmptyScene({ decision: decision({}), kept: 'The pipes remain exactly as in the input', isNoChange: isNoChangeSentence, objectChange: () => null }), { skipped: 'no_movable_object' });
+  assert.deepEqual(resolveEmptyScene({ decision: decision({ objectAllowed: false, objectBlockedReason: 'no_recent_activity' }), kept: 'The chair turns.', isNoChange: isNoChangeSentence, objectChange: obj }), { text: EMPTY_ROOM_STAYS });
+  assert.deepEqual(resolveEmptyScene({ decision: decision({ objectAllowed: false, objectBlockedReason: 'chance' }), kept: 'x', isNoChange: isNoChangeSentence, objectChange: obj }), { text: EMPTY_ROOM_STAYS });
+  assert.deepEqual(resolveEmptyScene({ decision: decision({}), kept: 'The pipes remain exactly as in the input', isNoChange: isNoChangeSentence, objectChange: () => null }), { text: EMPTY_ROOM_STAYS });
   assert.deepEqual(resolveEmptyScene({ decision: decision({}), kept: 'The pipes remain exactly as in the input', isNoChange: isNoChangeSentence, objectChange: obj }), { text: obj() });
   assert.deepEqual(resolveEmptyScene({ decision: decision({}), kept: 'The person sits down', isNoChange: isNoChangeSentence, objectChange: obj }), { text: obj() });
   assert.deepEqual(resolveEmptyScene({ decision: decision({}), kept: 'The box slides a little', isNoChange: isNoChangeSentence, objectChange: obj }), { text: 'The box slides a little' });
@@ -103,17 +103,17 @@ test('planner: per-scene person (behind view only where chosen), object change w
   assert.equal(out[0].skipped, undefined);
   assert.doesNotMatch(out[1].prediction_prompt, /person|remain/i);
   assert.match(out[1].prediction_prompt, /chair|bin/);
-  assert.equal(out[2].skipped, 'no_recent_activity');
-  assert.equal(out[2].prediction_prompt, '');
-  assert.equal(out[2].scenario_description, '');
-  assert.deepEqual(trace.guard.emptyRoom.map((d: any) => [d.sceneKey, d.personDrawn, d.skipped ?? null, d.skipReason ?? null]), [['gen_a', true, null, null], ['gen_b', false, false, null], ['gen_c', false, true, 'no_recent_activity']]);
+  assert.equal(out[2].skipped, undefined);
+  assert.match(out[2].prediction_prompt, /room stays empty/i);
+  assert.deepEqual(trace.guard.emptyRoom.map((d: any) => [d.sceneKey, d.personDrawn, d.skipped ?? null, d.skipReason ?? null]), [['gen_a', true, null, null], ['gen_b', false, false, null], ['gen_c', false, false, null]]);
 });
 
-test('planner: no recent person and no recent activity -> every empty scene is skipped (no "remains the same")', async (t) => {
+test('planner: no recent person and no recent activity -> every empty scene still generates (the room stays empty)', async (t) => {
   mockPlanner(t, FRAME, ['The chair turns slightly.', 'The pipes remain exactly as in the input.', 'The bin shifts.']);
   const decisions = decideEmptyRoomScenes({ ...base, captureId: 'cap-x', emptyRoomPersonChance: 1, recentPerson: false, activityMinutesAgo: null });
   const out = await planScenariosLocal({ imageDataUrl: IMG, prompt: 'p', scenarioCount: 3, allowPerson: false, emptyRoomScenes: decisions, detector: { person: false, count: 0, elapsedMs: 0 } });
-  assert.deepEqual(out.map((s) => s.skipped), ['no_recent_activity', 'no_recent_activity', 'no_recent_activity']);
+  assert.deepEqual(out.map((s) => s.skipped), [undefined, undefined, undefined]);
+  assert.ok(out.every((s) => /room stays empty/i.test(s.prediction_prompt)));
 });
 
 test('planner: an occupied frame ignores the empty-room decisions (nothing skipped)', async (t) => {
@@ -180,11 +180,11 @@ test('06:22 reconstructed: objectAllowed=false -> person-only motion in operator
   });
 });
 
-test('06:22 reconstructed without the operator mention: roll-only person (rolls >= 0.3) + objectAllowed=false -> every scene skipped', async (t) => {
+test('06:22 reconstructed without the operator mention: roll-only person (rolls >= 0.3) + objectAllowed=false -> every scene is an empty room (not skipped)', async (t) => {
   mockPlanner(t, ARCHIVE_0622.frame, ARCHIVE_0622.scenes);
   const decisions = decideEmptyRoomScenes({ ...base, captureId: ARCHIVE_0622.captureId, emptyRoomPersonChance: 0.3, recentPerson: true, activityMinutesAgo: activityMinutesFromRecent(recent0622, now0622) });
   assert.ok(decisions.every((d) => !d.personDrawn && !d.objectAllowed));
   const out = await planScenariosLocal({ imageDataUrl: IMG, prompt: 'p', scenarioCount: 3, allowPerson: true, emptyRoomScenes: decisions,
     detector: { person: false, count: 0, elapsedMs: 0 }, people: [], sceneDistances: [15, 30, -30] });
-  assert.deepEqual(out.map((s) => [s.skipped, s.prediction_prompt]), [0, 1, 2].map(() => ['no_recent_activity', '']));
+  assert.ok(out.every((s) => s.skipped === undefined && /room stays empty/i.test(s.prediction_prompt)));
 });

@@ -26,7 +26,7 @@ const here=path.dirname(fileURLToPath(import.meta.url));
 const PAGE=[/^\/display\/[A-Za-z0-9][A-Za-z0-9_-]{0,63}\/?$/,/^\/control\/screen\/screen-[1-9][0-9]{0,2}\/?$/];
 const ASSETS=new Set(['/display/face-blur.mjs',...['screen.css','screen.mjs','timeline.mjs','face-blur.mjs'].map(f=>'/display-assets/'+f),...['player.css','output.mjs','timeline.mjs','face-blur.mjs'].map(f=>'/control/'+f)]);
 const API=[/^\/api\/displays\/[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/,/^\/api\/browser-outputs\/screen-[1-9][0-9]{0,2}$/];
-const IMAGE=[/^\/captures\/[A-Za-z0-9][A-Za-z0-9_.-]{0,239}\.(?:png|jpe?g|webp)$/i,/^\/captures\/browser-output-assets\/[A-Za-z0-9][A-Za-z0-9/_.-]{0,400}\.(?:png|jpe?g|webp)$/i];
+const IMAGE=[/^\/captures\/(?:display\/)?[A-Za-z0-9][A-Za-z0-9_.-]{0,239}\.(?:png|jpe?g|webp)$/i,/^\/captures\/browser-output-assets\/[A-Za-z0-9][A-Za-z0-9/_.-]{0,400}\.(?:png|jpe?g|webp)$/i];
 export const isGatePage=(p:string)=>PAGE.some(r=>r.test(p));
 export const isGateImage=(p:string)=>IMAGE.some(r=>r.test(p))&&!p.includes('/browser-output-thumbnails/')&&!p.split('/').some(s=>s==='.'||s==='..');
 const escapeHtml=(s:string)=>s.replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]!));
@@ -61,6 +61,7 @@ export function createPublicGateApp(options:PublicGateOptions){
  /** Image URLs that appeared in a snapshot this gate served in the last 30 minutes (+ face-blur spec of that output). */
  const recent=new Map<string,{until:number;blur:BlurSpec|null}>();
  const blurCache=new Map<string,Buffer>();
+ const lastErrorReportAt=new Map<string,number>();
  const lastFrameAt=new Map<string,number>();
  const loginHtml=fs.readFileSync(path.join(here,'login.html'),'utf8');
 
@@ -189,6 +190,24 @@ export function createPublicGateApp(options:PublicGateOptions){
    return res.type('html').sendFile(path.join(here,'capture.html'));
   }
 
+  // The only other POST: viewers report browser-side display problems (timeouts, slow images, ...) to the local log.
+  if(route==='/api/display-errors'){
+   if(method!=='POST')return deny(res,405);if(query)return deny(res,400);
+   if(!viewer(req))return deny(res,401);
+   if(req.headers['x-control-request']!=='1')return deny(res,403,'Missing header');
+   if(String(req.headers['content-type']??'').split(';')[0].trim().toLowerCase()!=='application/json')return deny(res,415,'JSON required');
+   const key=readCookie(req.headers.cookie,VIEW_COOKIE)??clientIp(req),last=lastErrorReportAt.get(key)??0;
+   if(now()-last<1500)return res.status(429).json({ok:false});
+   const body=await readBody(req,8192);if(!body)return res.status(413).json({ok:false});
+   lastErrorReportAt.set(key,now());while(lastErrorReportAt.size>1000)lastErrorReportAt.delete(lastErrorReportAt.keys().next().value!);
+   try{
+    const status=await new Promise<number>((resolve,reject)=>{
+     const r=http.request({host:'127.0.0.1',port:upstreamPort,method:'POST',path:'/api/display-errors',headers:{host:'localhost:'+upstreamPort,'content-type':'application/json','content-length':String(body.length),'x-control-request':'1','user-agent':'speculative-memory-public-gate'}},up=>{up.resume();resolve(up.statusCode??502);});
+     r.on('error',reject);r.setTimeout(5000,()=>r.destroy(Error('upstream timeout')));r.end(body);
+    });
+    return res.status(status<300?200:status).json({ok:status<300});
+   }catch{return deny(res,502,'Upstream unavailable');}
+  }
   if(method!=='GET'&&method!=='HEAD')return deny(res,405);
   if(query)return deny(res,400);
   const page=isGatePage(route),asset=ASSETS.has(route),api=API.some(r=>r.test(route)),image=isGateImage(route);

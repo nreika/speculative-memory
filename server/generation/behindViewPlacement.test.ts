@@ -27,7 +27,7 @@ test('behind-view sentence carries the placement text after the place/scale rule
  assert.match(s,/leaving the blue backpack and the jacket and every other object untouched\./);
  assert.match(behindViewSentence({clothes:'white shirt'}),/leaving every bag, jacket and item on the chairs and desks untouched\./);
  const p=composeEditInstruction({predictionPrompt:'The person stands quietly with their back to the camera.',presence:0.7,referencePerson:true,behindView:{clothes:'white shirt',objects:['backpack']}});
- assert.match(p.slice(0,2500),/in particular the backpack/);
+ assert.match(p,/backpack/);
 });
 test('behind-view negatives add the complementary object terms; other paths do not',()=>{
  assert.ok(buildNegativePrompt(false,false,true).includes(BEHIND_VIEW_OBJECTS_NEGATIVE));

@@ -33,3 +33,11 @@ test('live actual-past binds camera records only through exact current capture e
  for(const altered of [{...row,captureId:'other-capture'},{...row,test:true},{...row,source:'test'},{...row,browserFollow:{...row.browserFollow!,cameraScope:undefined}}])assert.equal((await make([altered])).sourceScopes['actual-past'],'live');
  const noCurrent=await createBrowserOutputSources({readCurrent:()=>({}),readEvents:()=>[],readRecords:()=>[{...content('camera-record','actual','camera:main'),recordingAutoScope:'camera:main'}]}).loadCatalog();assert.equal(noCurrent.sourceScopes['actual-past'],undefined);
 });
+test('each-mode captures get a per-capture fade trigger from their first image; current status is carried to the catalog',async()=>{
+ const a=content('a'),e=event(a);e.result='running';(e.browserFollow as any).updateMode='each';
+ const status={state:'generating' as const,requestedCaptureId:'a',displayedCaptureId:null,error:null,userMessage:'生成中です。前回の画像を表示中。',lastSuccessAtMs:null};
+ const c=await createBrowserOutputSources({readCurrent:()=>({a:{...snapshot(a),displayStatus:status}}),readEvents:()=>[e]}).loadCatalog();
+ assert.equal(c.fadeBatches?.a?.captureId,'a');assert.equal(c.currentStatus?.a?.state,'generating');
+ const all=event(content('b'));(all.browserFollow as any).updateMode='all';all.result='running';
+ assert.equal((await createBrowserOutputSources({readCurrent:()=>({}),readEvents:()=>[all]}).loadCatalog()).fadeBatches?.b,undefined);
+});

@@ -21,7 +21,7 @@ export function createBrowserOutputRecordings(options:BrowserOutputRecordingsOpt
   if(imageUrl!=='/captures/'+row.filename||!isBrowserDisplayImageUrl(imageUrl))return null;
   const capturedAt=explicitRecordingTime(row.capturedAt),known=row.source==='live-camera'&&capturedAt!==null&&validRecordingScope(row.sourceScope);
   const scope=known?row.sourceScope as string:'recordings:unknown';
-  return {id:'recording:'+createHash('sha256').update(imageUrl).digest('hex').slice(0,32),scope,provenance:'actual',imageUrl,recordedAtMs:known?capturedAt:null,sourceRecordedAtMs:known?capturedAt:null,targetAtMs:null,generatedAtMs:null,distanceSecSigned:null,caption:known?'カメラの記録フレーム':'記録フレーム（撮影時刻・入力元不明）',...(known?{recordingAutoScope:scope}:{})};
+  return {id:'recording:'+createHash('sha256').update(imageUrl).digest('hex').slice(0,32),scope,provenance:'actual',imageUrl,recordedAtMs:known?capturedAt:null,sourceRecordedAtMs:known?capturedAt:null,targetAtMs:null,generatedAtMs:null,distanceSecSigned:null,caption:known?'Camera frame':'Recorded frame (time and source unknown)',...(known?{recordingAutoScope:scope}:{})};
  };
  const read=async()=>{
   let stat;try{stat=await fs.stat(options.recordingsFile);}catch(error){if((error as NodeJS.ErrnoException).code==='ENOENT')return [...contents.values()].map(c=>({...c}));throw error;}

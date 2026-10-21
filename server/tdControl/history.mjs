@@ -1,4 +1,4 @@
-import {normalizeEvent,buildSections,buildSharedSections,connectionLayout,mixedConnectionLayout,verticalConnectionLayout,sourceConnectionPath,thumbnailGapPercent,elapsedLabel,secondsLabel,pendingRefreshIds,RecentHistoryGaps,SCENE_COLORS,pageCounter,normalizeScenarioRuns,runsForSession,runBandLayout,verticalRunBandLayout,clockLabel} from './history-model.mjs';
+import {normalizeEvent,buildSections,buildSharedSections,connectionLayout,mixedConnectionLayout,verticalConnectionLayout,sourceConnectionPath,spreadOverlaps,thumbnailGapPercent,elapsedLabel,secondsLabel,pendingRefreshIds,RecentHistoryGaps,SCENE_COLORS,pageCounter,normalizeScenarioRuns,runsForSession,runBandLayout,verticalRunBandLayout,clockLabel} from './history-model.mjs';
 const $=id=>document.getElementById(id);
 const records=new Map(),sectionNodes=new Map(),runOrigins=new Map();
 let recentGaps=new RecentHistoryGaps();
@@ -32,7 +32,7 @@ function updateRuns(){
 }
 function makeImage(event,point,position){
   const button=node('button',undefined,'image-node');button.style.setProperty('--scene',SCENE_COLORS[point.key]);
-  button.dataset.captureId=event.id;button.dataset.scene=point.key;button.dataset.status=event.status;
+  button.dataset.captureId=event.id;button.dataset.scene=point.key;button.dataset.status=event.status;if(point.key!=='now'&&position.toneKnown===false)button.classList.add('tone-unknown');
   button.style.left=position.x+'%';button.style.top=position.y+'px';
   const label=node('span',undefined,'node-label');
   const elapsed=point.time-origin;
@@ -43,7 +43,7 @@ function makeImage(event,point,position){
     // 320px server thumbnail when it exists; the full image stays the click-through (details dialog).
     if(point.thumbUrl){image.onerror=()=>{image.onerror=null;image.src=point.url;};image.src=point.thumbUrl;}else image.src=point.url;image.alt=(point.key==='now'?'Source':point.key.toUpperCase())+' · '+event.id;button.append(image);}
   else button.append(node('span','No saved source image','placeholder'));
-  button.title=(point.key==='now'?'Source input':point.key.toUpperCase()+' '+(point.offset>=0?'+':'')+point.offset+' sec')+' · '+event.status+' · '+secondsLabel(event.totalMs)+' · '+event.id;
+  button.title=(point.key==='now'?'Source input':point.key.toUpperCase()+' '+(point.offset>=0?'+':'')+point.offset+' sec · Tone '+(Number.isFinite(point.tone)&&position.toneKnown!==false?point.tone.toFixed(2):'unknown'))+' · '+event.status+' · '+secondsLabel(event.totalMs)+' · '+event.id;
   button.onclick=()=>showDetails(event,point);return button;
 }
 function highlight(id){focusedCaptureId=id;const root=$('sections');root.classList.toggle('has-focus',!!id);for(const item of root.querySelectorAll('[data-capture-id]'))item.classList.toggle('related',item.dataset.captureId===id);}
@@ -51,14 +51,15 @@ function timelinePlot(section,lanes={}){
   const vertical=$('view-mode').value==='vertical';
   const geometry=vertical?verticalConnectionLayout(section.events,origin,section,$('sections').clientWidth-30,lanes):mixedConnectionLayout(section.events,origin,section,thumbnailGapPercent($('sections').clientWidth-30,window.innerWidth),lanes);
   const scroll=node('div',undefined,'plot-scroll'),plot=node('div',undefined,vertical?'plot vertical-plot':'plot');plot.style.height=geometry.height+'px';if(vertical)plot.style.minWidth=geometry.width+'px';
-  const lines=svg('svg',{viewBox:'0 0 1000 '+geometry.height,preserveAspectRatio:'none','aria-label':'Lines from source timestamp to generated image timestamps',role:'img'});
+  const lines=svg('svg',{viewBox:'0 0 '+(vertical?geometry.width:1000)+' '+geometry.height,preserveAspectRatio:'none','aria-label':'Lines from source timestamp to generated image timestamps',role:'img'});
   for(let i=0;i<=6;i++){
-    if(vertical){const y=geometry.top+(section.max-section.min)*geometry.scale*i/6;lines.append(svg('line',{x1:70/geometry.width*1000,y1:y,x2:1000,y2:y,stroke:'#233441','stroke-width':1}));const tick=node('span',elapsedLabel(section.min+(section.max-section.min)*i/6),'vertical-tick');tick.style.top=y+'px';plot.append(tick);}
+    if(vertical){const y=geometry.top+(section.max-section.min)*geometry.scale*i/6;lines.append(svg('line',{x1:70,y1:y,x2:geometry.width,y2:y,stroke:'#233441','stroke-width':1}));const tick=node('span',elapsedLabel(section.min+(section.max-section.min)*i/6),'vertical-tick');tick.style.top=y+'px';plot.append(tick);}
     else lines.append(svg('line',{x1:80+140*i,y1:0,x2:80+140*i,y2:geometry.height,stroke:'#233441','stroke-width':1}));
   }
   for(const line of geometry.lines){
     const attributes={stroke:SCENE_COLORS[line.key],'stroke-width':2,'data-scene':line.key,'data-capture-id':line.captureId,'data-source-scene':'now'};
-    lines.append(vertical?svg('path',{d:sourceConnectionPath({x:line.from.x*10,y:line.from.y},{x:line.to.x*10,y:line.to.y},line.key),fill:'none',...attributes}):svg('line',{x1:line.from.x*10,y1:line.from.y,x2:line.to.x*10,y2:line.to.y,...attributes}));
+    const k=vertical?geometry.width/100:10;
+    lines.append(svg('path',{d:sourceConnectionPath({x:line.from.x*k,y:line.from.y},{x:line.to.x*k,y:line.to.y},line.key,null,line.offset),fill:'none',...attributes}));
   }
   plot.append(lines);
   if(vertical){const layout=verticalRunBandLayout(sessionRuns,origin,section,geometry);for(const band of layout.bands)plot.append(verticalBand(band));}
@@ -83,7 +84,7 @@ function generationNode(event,section){
   article.append(stages);
   if(event.error)article.append(node('p',(event.errorStage?event.errorStage+' · ':'')+event.error,'error'));
   const scroll=node('div',undefined,'plot-scroll'),plot=node('div',undefined,'plot');plot.style.height=geometry.height+'px';
-  const lines=svg('svg',{viewBox:'0 0 1000 '+geometry.height,preserveAspectRatio:'none','aria-label':'Lines from source timestamp to generated image timestamps',role:'img'});
+  const lines=svg('svg',{viewBox:'0 0 '+(vertical?geometry.width:1000)+' '+geometry.height,preserveAspectRatio:'none','aria-label':'Lines from source timestamp to generated image timestamps',role:'img'});
   for(let i=0;i<=6;i++)lines.append(svg('line',{x1:80+140*i,y1:0,x2:80+140*i,y2:geometry.height,stroke:'#233441','stroke-width':1}));
   lines.append(svg('line',{x1:geometry.source.x*10,y1:0,x2:geometry.source.x*10,y2:geometry.source.y,stroke:'#a0b2be','stroke-width':1,'stroke-dasharray':'3 5',opacity:.4}));
   for(const line of geometry.lines)lines.append(svg('line',{x1:line.from.x*10,y1:line.from.y,x2:line.to.x*10,y2:line.to.y,stroke:SCENE_COLORS[line.key],'stroke-width':2,'data-scene':line.key}));
@@ -116,7 +117,7 @@ function renderRunLegend(){
   const legend=$('run-legend');legend.replaceChildren();legend.hidden=!sessionRuns.length;if(!sessionRuns.length)return;
   legend.append(node('span','CSV runs:','run-legend-title'));
   for(const run of sessionRuns){const chip=node('button',undefined,'run-chip');chip.style.setProperty('--run',runColor(run));chip.append(node('i'),node('span',run.label));chip.title=runTitle(run);chip.onclick=()=>openRun(run);legend.append(chip);}
-  legend.append(node('span','band = time this CSV owned playback · (修正版) = same scenario id, edited CSV (different sha256)','run-legend-note'));
+  legend.append(node('span','band = time this CSV owned playback · (revised) = same scenario id, edited CSV (different sha256)','run-legend-note'));
 }
 async function openRun(run){
   $('run-title').textContent=run.label;$('run-csv').textContent='Loading the archived CSV copy…';$('run-facts').replaceChildren();
@@ -125,7 +126,7 @@ async function openRun(run){
   try{
     const [sidecar,csv]=await Promise.all([readJson('/api/scenario-runs/'+encodeURIComponent(run.runId)),fetch('/api/scenario-runs/'+encodeURIComponent(run.runId)+'/csv',{cache:'no-store'}).then(r=>{if(!r.ok)throw Error('CSV copy returned '+r.status);return r.text();})]);
     const list=value=>Array.isArray(value)&&value.length?value.map(item=>typeof item==='string'?item:JSON.stringify(item)).join('\n'):'–';
-    const facts=[['Scenario',sidecar.scenarioId+(run.revised?' (修正版)':'')],['Library file',sidecar.file],['sha256',sidecar.sha256],['Run ID',sidecar.runId],['Started',stamp(Date.parse(sidecar.startedAt))+' JST'],['Ended',sidecar.endedAt?stamp(Date.parse(sidecar.endedAt))+' JST':'running'],['End reason',sidecar.endReason??'running'],['Cues applied',String(sidecar.cuesApplied??'–')],['Captures',list(sidecar.captureIds)],['Settings cues',list((sidecar.settingsCues??[]).map(row=>row&&typeof row==='object'?'T+'+row.atSec+'s '+row.change+' · '+row.status+(row.error?' · '+row.error:''):row))],['Outputs changed',list(sidecar.outputsChanged)],['Restored at end',list(sidecar.restored)],['Restore problems',list(sidecar.restoreErrors)],['Archived copy','logs/scenario-runs/'+sidecar.csvFile]];
+    const facts=[['Scenario',sidecar.scenarioId+(run.revised?' (revised)':'')],['Library file',sidecar.file],['sha256',sidecar.sha256],['Run ID',sidecar.runId],['Started',stamp(Date.parse(sidecar.startedAt))+' JST'],['Ended',sidecar.endedAt?stamp(Date.parse(sidecar.endedAt))+' JST':'running'],['End reason',sidecar.endReason??'running'],['Cues applied',String(sidecar.cuesApplied??'–')],['Captures',list(sidecar.captureIds)],['Settings cues',list((sidecar.settingsCues??[]).map(row=>row&&typeof row==='object'?'T+'+row.atSec+'s '+row.change+' · '+row.status+(row.error?' · '+row.error:''):row))],['Outputs changed',list(sidecar.outputsChanged)],['Restored at end',list(sidecar.restored)],['Restore problems',list(sidecar.restoreErrors)],['Archived copy','logs/scenario-runs/'+sidecar.csvFile]];
     $('run-facts').replaceChildren(...facts.flatMap(([key,value])=>[node('dt',key),node('dd',value)]));
     $('run-csv').textContent=csv;
   }catch(error){$('run-csv').textContent=error.message;}
@@ -142,6 +143,7 @@ function drawCrossConnections(){
   const rootRect=root.getBoundingClientRect(),byId=new Map(buttons.map(button=>[button.dataset.captureId+':'+button.dataset.scene,button]));
   const layer=svg('svg',{'class':'cross-section-lines',viewBox:'0 0 '+root.clientWidth+' '+root.scrollHeight,'aria-label':'Source connections across time windows',role:'img'});
   const center=element=>{const r=element.getBoundingClientRect();return {x:r.left-rootRect.left+r.width/2,y:r.top-rootRect.top+r.height/2};};
+  const crossLines=[];
   for(const event of shownEvents){
     const source=byId.get(event.id+':now');if(!source)continue;
     for(const point of event.points){
@@ -151,9 +153,11 @@ function drawCrossConnections(){
       const a=point.key==='b'?byId.get(event.id+':a'):null,ar=a?.getBoundingClientRect();
       const avoid=ar?{left:ar.left-rootRect.left,right:ar.right-rootRect.left,top:ar.top-rootRect.top,bottom:ar.bottom-rootRect.top}:null;
       const attributes={stroke:SCENE_COLORS[point.key],'stroke-width':2,'data-scene':point.key,'data-capture-id':event.id,'data-source-scene':'now','data-cross-window':'true'};
-      layer.append($('view-mode').value==='vertical'?svg('path',{d:sourceConnectionPath(from,to,point.key,avoid),fill:'none',...attributes}):svg('line',{x1:from.x,y1:from.y,x2:to.x,y2:to.y,...attributes}));
+      crossLines.push({key:point.key,from,to,avoid,attributes,offset:0});
     }
   }
+  spreadOverlaps(crossLines);
+  for(const line of crossLines)layer.append(svg('path',{d:sourceConnectionPath(line.from,line.to,line.key,line.avoid,line.offset),fill:'none',...line.attributes}));
   layer.style.height=root.scrollHeight+'px';root.append(layer);crossLayer=layer;highlight(focusedCaptureId);
 }
 function render(){

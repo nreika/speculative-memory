@@ -10,7 +10,7 @@ test('imported images have no fabricated recorded or generated time',()=>{
 });
 test('unknown clock never invents an archive image age',()=>{
  assert.equal(temporalLabel({provenance:'generated',targetAtMs:1000},5000,false).text,'GENERATED · time reference unknown');
- assert.equal(temporalLabel({provenance:'actual',recordedAtMs:1000},5000,false).text,'RECORDED · time reference unknown');
+ assert.equal(temporalLabel({provenance:'actual',recordedAtMs:1000},5000,false).text,'NOW · RECORDED · time reference unknown');
 });
 test('acknowledged commands unlock controls while image refresh is pending',async()=>{
  const source=fs.readFileSync(new URL('./control.mjs',import.meta.url),'utf8');
@@ -37,4 +37,18 @@ test('output preserves registry provenance/scope/time schema',()=>{
  const content={id:'new',provenance:'generated',imageUrl:'/captures/new.png',targetAtMs:2000,recordedAtMs:null,generatedAtMs:1500,sourceRecordedAtMs:1000,scope:'test:run'};
  const snapshot={schema:1,revision:'r1',screen:{id:'control-output-1'},clock:{serverNowMs:1500,worldNowMs:1500,rate:1,scope:'test:run'},content};
  assert.equal(validateSnapshot(snapshot),snapshot);assert.equal(snapshot.content.sourceRecordedAtMs,1000);
+});
+
+test('temporalLabel prefixes the scene letter (A/B/C) and NOW',()=>{
+ const gen={provenance:'generated',sceneKey:'gen_b',distanceSecSigned:30,generatedAtMs:0,targetAtMs:30000};
+ assert.equal(temporalLabel(gen,80000).text,'B · FUTURE +30s · 1 min 20 sec ago');
+ assert.equal(temporalLabel({...gen,sceneKey:'gen_a',distanceSecSigned:-30},3000).text,'A · PAST −30s · 3 sec ago');
+ assert.equal(temporalLabel({provenance:'actual',recordedAtMs:1000},1200).text,'NOW · RECORDED NOW');
+ assert.equal(temporalLabel({provenance:'generated',distanceSecSigned:30,generatedAtMs:0,targetAtMs:30000},500).text,'FUTURE +30s · just now');
+});
+
+test('label shows the Tone / Presence the scene was generated with',()=>{
+ const gen={provenance:'generated',sceneKey:'gen_a',distanceSecSigned:30,generatedAtMs:0,targetAtMs:30000,tone:1,presence:0.734};
+ assert.equal(temporalLabel(gen,80000).text,'A · FUTURE +30s · T1.0 P0.7 · 1 min 20 sec ago');
+ assert.equal(temporalLabel({...gen,sceneKey:'gen_c',distanceSecSigned:-30,tone:0},3000).text,'C · PAST −30s · T0.0 P0.7 · 3 sec ago');
 });

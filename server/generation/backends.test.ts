@@ -107,7 +107,7 @@ test('imageBackend=gemini: empty-room template + negatives folded in; reference 
     });
     assert.equal(img, 'data:image/png;base64,BBBB');
     assert.equal(seen[0].ref, undefined);
-    assert.match(seen[0].instruction, /pixel-identical/);
+    assert.match(seen[0].instruction, /exactly as in the input/);
     assert.match(seen[0].instruction, /real-world scale/);
     assert.match(seen[0].instruction, /must be free of:/);
     assert.equal(t1.referenceImage, 'none');

@@ -5,7 +5,7 @@
  */
 import type { CaptureEvent } from './captureEvents';
 
-export const OBSTRUCTION_NOTE = '(カメラが遮られている可能性)';
+export const OBSTRUCTION_NOTE = '(camera may be blocked)';
 
 /**
  * Start time of the current run of obstructed captures (newest -> older, test captures and captures

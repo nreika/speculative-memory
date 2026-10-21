@@ -1,5 +1,6 @@
 /** Current sources for configurable outputs only. The TD test display namespace is unchanged. */
 import{createHash}from'node:crypto';
+import{displayImageUrl}from'./displayDerivatives';
 import{buildBrowserDisplaySnapshot,validateBrowserDisplayContents,type BrowserDisplayContent,type BrowserDisplaySnapshot}from'./browserDisplay';
 import{tdBrowserSnapshot,type TdBrowserSnapshotOptions}from'./tdBrowserFollow';
 import type{CaptureEvent}from'./events/captureEvents';
@@ -22,7 +23,22 @@ function instruction(content:BrowserDisplayContent,options:TdBrowserSnapshotOpti
  if(content.provenance!=='generated')return content;
  const identity={captureId:content.captureId??'',sceneKey:content.sceneKey??'',imageUrl:content.imageUrl};let match;try{match=options.instructionLookup?.(identity);}catch{}
  const valid=match&&match.captureId===identity.captureId&&match.sceneKey===identity.sceneKey&&match.imageUrl===identity.imageUrl&&typeof match.plannedDescription==='string'&&match.plannedDescription.trim();
- return {...content,caption:valid?match!.plannedDescription:'生成指示を確認できません。'};
+ return {...content,caption:valid?match!.plannedDescription:'Generation instruction unavailable.'};
+}
+/**
+ * Per-scene notice (English). Only the scene being drawn says "Generating…", later scenes of the same capture say "Next",
+ * a scene whose image of this capture is already there / not requested / skipped, and the NOW screen, say nothing.
+ */
+function sceneNotice(args:{key:Key;row:CaptureEvent;failed:boolean;available:boolean;skippedHere:boolean;active?:TdBrowserSnapshotOptions['activeCapture']}):string|null{
+ const {key,row,failed,available,skippedHere}=args;
+ if(available)return null;
+ if(failed)return 'Generation failed. Showing the previous image.';
+ if(key==='now')return null;
+ const active=args.active&&args.active.captureId===row.captureId?args.active:null;
+ const order=['a','b','c'],idx=order.indexOf(key),current=active&&/^scene[A-C]$/.test(active.stage??'')?order.indexOf(String(active.stage).slice(-1).toLowerCase()):-1;
+ if(idx>=(active?.imageCount??3)||skippedHere)return null;
+ if(current>=0)return idx===current?'Generating…':idx>current?'Next':null;
+ return 'Preparing…';
 }
 export function browserOutputCurrent(rows:CaptureEvent[],nowMs:number,options:TdBrowserSnapshotOptions={}):Partial<Record<Key,BrowserDisplaySnapshot>>{
  const live=rows.filter(eligibleLive).sort((a,b)=>Date.parse(b.startedAt)-Date.parse(a.startedAt)||b.captureId.localeCompare(a.captureId)),latestLive=live[0];
@@ -32,26 +48,36 @@ export function browserOutputCurrent(rows:CaptureEvent[],nowMs:number,options:Td
   const selectedLive=live.find(row=>((row.browserFollow?.updateMode??fallback)==='each'||complete(row))&&!!saved(row,key)),liveContent=selectedLive?saved(selectedLive,key):undefined;
   let snapshot:BrowserDisplaySnapshot|undefined;
   if(liveContent&&newer(selectedLive,testSelected)){
-   const content=instruction(liveContent,options);
-   snapshot=buildBrowserDisplaySnapshot({id:'browser-source-'+key,label:key==='now'?'元映像':key.toUpperCase(),accent:'#397ad1',clock:{serverAnchorMs:0,worldAnchorMs:0,rate:1,scope:content.scope},selection:{mode:'pinned',contentId:content.id}},[content],nowMs);
-  }else if(test?.content)snapshot=test;
+   const instructed=instruction(liveContent,options),content=instructed.provenance==='generated'?{...instructed,imageUrl:displayImageUrl(instructed.imageUrl)}:instructed;
+   snapshot=buildBrowserDisplaySnapshot({id:'browser-source-'+key,label:key==='now'?'Source':key.toUpperCase(),accent:'#397ad1',clock:{serverAnchorMs:0,worldAnchorMs:0,rate:1,scope:content.scope},selection:{mode:'pinned',contentId:content.id}},[content],nowMs);
+  }else if(test?.content)snapshot=test.content.provenance==='generated'?{...test,content:{...test.content,imageUrl:displayImageUrl(test.content.imageUrl)}}:test;
   if(!snapshot)continue;
   if(latestLive&&newer(latestLive,testRequest)){
    const latestEach=(latestLive.browserFollow?.updateMode??fallback)==='each';
    const skippedHere=key!=='now'&&skippedSceneLetters(latestLive).has(key);
    const available=skippedHere?latestLive.result==='completed'||latestEach&&latestLive.result==='running':latestEach?!!saved(latestLive,key):complete(latestLive),failed=!available&&latestLive.result!=='running';
-   const state=available?'completed':failed?'failed':'generating';
-   const displayStatus={requestedCaptureId:latestLive.captureId,displayedCaptureId:null,state,error:failed?(latestLive.errorMessage||'saved image unavailable').slice(0,512):null,userMessage:available?null:failed?'今回の生成は失敗しました。前回の画像を表示中。':'生成中です。前回の画像を表示中。',lastSuccessAtMs:selectedLive?.endedAt&&Number.isFinite(Date.parse(selectedLive.endedAt))?Date.parse(selectedLive.endedAt):null}as const;
+   const userMessage=sceneNotice({key,row:latestLive,failed,available,skippedHere,active:options.activeCapture});
+   const state=failed?'failed':userMessage?'generating':'completed';
+   const displayStatus={requestedCaptureId:latestLive.captureId,displayedCaptureId:null,state,error:state==='failed'?(latestLive.errorMessage||'saved image unavailable').slice(0,512):null,userMessage,lastSuccessAtMs:selectedLive?.endedAt&&Number.isFinite(Date.parse(selectedLive.endedAt))?Date.parse(selectedLive.endedAt):null}as const;
    snapshot={...snapshot,displayStatus};
+  }else if(test?.displayStatus&&testRequest){
+   // Test / replay captures (recorded input sets) use the same per-scene English notice as live ones.
+   const st=test.displayStatus,failed=st.state==='failed',available=st.state==='completed'||st.state==='idle'||!!saved(testRequest,key);
+   const userMessage=sceneNotice({key,row:testRequest,failed,available:available&&!failed,skippedHere:key!=='now'&&skippedSceneLetters(testRequest).has(key),active:options.activeCapture});
+   snapshot={...snapshot,displayStatus:{...st,state:failed?'failed':userMessage?'generating':'completed',userMessage}};
   }else if(test?.displayStatus)snapshot={...snapshot,displayStatus:test.displayStatus};
-  const fadeBatch=completedBrowserFadeBatch(rows.find(row=>row.captureId===snapshot.content?.captureId));
+  const fadeRow=rows.find(row=>row.captureId===snapshot.content?.captureId);
+  const eachStart=Date.parse(fadeRow?.startedAt??'');
+  // "each": the screen fades when its own image arrives, so the trigger exists from the capture's first saved image.
+  const fadeBatch=completedBrowserFadeBatch(fadeRow)??(fadeRow&&(fadeRow.browserFollow?.updateMode??fallback)==='each'&&Number.isSafeInteger(eachStart)&&eachStart>=0?{captureId:fadeRow.captureId,completedAtMs:eachStart}:undefined);
   result[key]={...snapshot,...(fadeBatch?{fadeBatch}:{}),revision:createHash('sha256').update(JSON.stringify({revision:snapshot.revision,status:snapshot.displayStatus,fadeBatch})).digest('hex').slice(0,20)};
  }
  // 2026-10-21: after an input switch (live camera <-> recorded set) a skipped scene kept showing the other input's image.
  // A/B/C must come from the same input as NOW (live, or the same recorded set); otherwise the scene is not shown.
  const family=(scope:unknown)=>{const s=String(scope??'');return s.startsWith('test:')?s.split(':').slice(0,2).join(':'):s.startsWith('live')?'live':s;};
  const nowFamily=result.now?.content?family(result.now.content.scope):null;
- if(nowFamily)for(const key of ['a','b','c']as const){const c=result[key]?.content;if(c&&family(c.scope)!==nowFamily)delete result[key];}
+ // 2026-10-21 (user): right after an input switch, show the new NOW on A/B/C until their own images arrive (not "Waiting for an image").
+ if(nowFamily&&result.now)for(const key of ['a','b','c']as const){const c=result[key]?.content;if(!c||family(c.scope)!==nowFamily){const now=result.now;result[key]={...now,standInFor:key,revision:createHash('sha256').update(JSON.stringify([now.revision,'stand-in',key])).digest('hex').slice(0,20)} as any;}}
  return result;
 }
 export const browserOutputCurrentSnapshots=browserOutputCurrent;

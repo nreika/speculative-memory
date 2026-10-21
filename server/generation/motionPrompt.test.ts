@@ -119,33 +119,28 @@ function withRulebook<T>(version:number,fn:()=>T):T{
  try{return fn();}finally{if(prev===undefined)delete process.env.RULEBOOK_DIR;else process.env.RULEBOOK_DIR=prev;fs.rmSync(dir,{recursive:true,force:true});}
 }
 
-test('compact people instruction (rulebook v19): one object sentence, head/gaze may move, the action closes the prompt once',()=>{
+test('compact people instruction (2026-10-21 rebuild): the action is stated once, no repeated rule blocks',()=>{
  const text=withRulebook(19,()=>composeEditInstruction({predictionPrompt:ACTION_A,people:[seatedCup],personCount:1,compactPeople:true,presence:0.73,tone:0.7}));
- assert.ok(text.endsWith('\n\nMain change that must be clearly visible: The existing person on the left side of the image stays seated on the chair and looks down at the desk.'));
- assert.equal(text.split('Main change that must be clearly visible').length,2);
- assert.doesNotMatch(text,/side profile stays a side profile|Preserve the original head direction|Preserve the original grip during the requested movement/);
- assert.match(text,/head and gaze may move as the requested action needs/);assert.match(text,/never reveal a face that is not visible in the input/);
- assert.match(text,/head cut by the frame edge remains cut by the frame/);
- assert.equal((text.match(/(?:never add|do not (?:add|introduce)) (?:new |unseen )?(?:objects|ones|items)/gi)??[]).length,1);
- // Lighting, white balance, person count, identity and belongings constraints are unchanged.
- assert.match(text,/Keep the exact input exposure, brightness, lighting colour, white balance, shadows and screen contents/);
- assert.match(text,/Exactly 1 original person remains/);assert.match(text,/Keep white cup in right hand with this owner/);
- assert.match(text,/Each held or worn belonging stays with its original owner/);
+ assert.equal(text.split('stays seated on the chair').length-1,1);
+ assert.doesNotMatch(text,/Main change|side profile stays a side profile|Preserve the original grip during the requested movement|same hand/);
+ assert.match(text,/There is one person: the person in the blue long-sleeved top, seated at the right front/);
+ assert.match(text,/Exactly one person is in the image/);
+ assert.ok(text.length<1400,`length ${text.length}`);
 });
 
-test('full people template also closes with the single main change sentence',()=>{
+test('full people template: the action appears once and nothing closes with a repeated main change',()=>{
  const text=composeEditInstruction({predictionPrompt:'The person in the blue top raises one hand lightly.',people:[seatedCup],personCount:1,presence:0.73});
- assert.ok(text.endsWith('\n\nMain change that must be clearly visible: The person in the blue top raises one hand lightly.'));
- assert.doesNotMatch(text,/only a free hand can gesture/);
+ assert.equal(text.split('raises one hand lightly').length-1,1);
+ assert.doesNotMatch(text,/Main change|only a free hand can gesture/);
  const empty=composeEditInstruction({predictionPrompt:'The chair rotates.',presence:0});
  assert.doesNotMatch(empty,/Main change/);
 });
 
-test('reference cast instruction: no "occupied hands remain occupied" freeze, the action closes the prompt',()=>{
+test('reference cast instruction: no "occupied hands remain occupied" freeze, the action stated once',()=>{
  const original={position:'left front',pose:'seated',clothes:'blue shirt',facing:'away',hair:'short black',holding:'cup in left hand'} as PersonInfo;
  const bytes='reference';
  const ref:ScenePersonReference={contentId:'upload-1',imageDataUrl:'data:image/png;base64,'+Buffer.from(bytes).toString('base64'),sha256:createHash('sha256').update(bytes).digest('hex'),people:[{position:'center',pose:'standing',clothes:'red jacket',facing:'front',hair:'long brown'} as PersonInfo]};
  const text=composeSceneReferenceCastInstruction({sourcePeople:[original],references:[ref],predictionPrompt:'The person in the blue shirt raises one hand lightly. Hand use: x.'});
- assert.doesNotMatch(text,/occupied hands remain occupied/);assert.match(text,/never add a hand/);
- assert.ok(text.endsWith('Main change that must be clearly visible: The person in the blue shirt raises one hand lightly.'));
+ assert.doesNotMatch(text,/occupied hands remain occupied|Main change/);assert.match(text,/an added hand/);
+ assert.equal(text.split('raises one hand lightly').length-1,1);
 });

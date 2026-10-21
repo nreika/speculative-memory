@@ -1,0 +1,19 @@
+seconds,action,target,value
+0,scenario,,SCN-DEFAULT
+0,instructions,,"Default: A and B 30 s in the future, C 30 s in the past, continuous generation, black fade, loops forever, no extra prompts"
+0,loop,,true
+0,mode,,chain
+0,distance,A,30
+0,distance,B,30
+0,distance,C,-30
+0,tone,A,1
+0,tone,B,0
+0,clear_prompt,A,
+0,clear_prompt,B,
+0,clear_prompt,C,
+0,output_fade,screen-1,original
+0,output_fade,screen-2,original
+0,output_fade,screen-3,original
+0,output_fade,screen-4,original
+0,output_source,screen-4,c
+600,end,,

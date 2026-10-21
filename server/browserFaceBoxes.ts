@@ -1,4 +1,5 @@
 /** Display-only CPU boxes. This service never writes, removes or substitutes source images. */
+import{readDisplayFaces}from'./displayDerivatives';
 import fs from 'node:fs/promises';import path from 'node:path';import{createHash}from'node:crypto';import{spawn}from'node:child_process';
 export interface FaceBox{x:number;y:number;width:number;height:number}
 export interface FaceDetection{status:'detected'|'no-faces'|'unavailable'|'error';width?:number;height?:number;boxes:FaceBox[];detectorMs?:number;method?:string}
@@ -25,7 +26,7 @@ export function createBrowserFaceBoxes(options:BrowserFaceBoxesOptions){
  }
  return {async inspect(imageUrl:string):Promise<BrowserFaceBoxesResult>{
   const empty=(status:FaceDetection['status']):BrowserFaceBoxesResult=>({schema:1,imageUrl,imageSha256:null,status,boxes:[]});if(!safeUrl(imageUrl))return empty('error');
-  try{const resolved=await options.resolveImage(imageUrl);if(!resolved||!path.isAbsolute(resolved))return empty('error');const file=await allowed(resolved);if(!file)return empty('error');const stat=await fs.stat(file);if(!stat.isFile()||stat.size>max)return empty('error');const bytes=await fs.readFile(file);if(bytes.length>max)return empty('error');const sha=createHash('sha256').update(bytes).digest('hex');const cached=cache.get(sha);let result=cached&&cached.until>Date.now()?cached.value:undefined;if(!result){let flight=inflight.get(sha);if(!flight){if(inflight.size>=32)return empty('error');flight=run(bytes).then(r=>{cache.set(sha,{value:r,until:r.status==='detected'||r.status==='no-faces'?Infinity:Date.now()+5000});while(cache.size>limit)cache.delete(cache.keys().next().value!);return r;}).finally(()=>inflight.delete(sha));inflight.set(sha,flight);}result=await flight;}
+  try{const pre=readDisplayFaces(imageUrl);if(pre&&pre.imageSha256&&(pre.status==='detected'||pre.status==='no-faces'))return{schema:1,imageUrl,...pre};const resolved=await options.resolveImage(imageUrl);if(!resolved||!path.isAbsolute(resolved))return empty('error');const file=await allowed(resolved);if(!file)return empty('error');const stat=await fs.stat(file);if(!stat.isFile()||stat.size>max)return empty('error');const bytes=await fs.readFile(file);if(bytes.length>max)return empty('error');const sha=createHash('sha256').update(bytes).digest('hex');const cached=cache.get(sha);let result=cached&&cached.until>Date.now()?cached.value:undefined;if(!result){let flight=inflight.get(sha);if(!flight){if(inflight.size>=32)return empty('error');flight=run(bytes).then(r=>{cache.set(sha,{value:r,until:r.status==='detected'||r.status==='no-faces'?Infinity:Date.now()+5000});while(cache.size>limit)cache.delete(cache.keys().next().value!);return r;}).finally(()=>inflight.delete(sha));inflight.set(sha,flight);}result=await flight;}
    return {schema:1,imageUrl,imageSha256:sha,...structuredClone(result)};
   }catch{return empty('error');}
  }};

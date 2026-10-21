@@ -151,3 +151,17 @@ test('display rows that arrive before the capture exists do not create a capture
   s.addDisplay('late', { at: iso(9), reason: 'batch', assignments: [] });
   assert.equal(s.get('late'), null);
 });
+
+test('readAll folds appended rows incrementally and matches a fresh full read',()=>{
+  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'ce-'));const file=path.join(dir,'events.jsonl');
+  const NL='\n';
+  const rows=(n:number)=>Array.from({length:n},(_,i)=>JSON.stringify({captureId:'c'+i,startedAt:new Date(1000*i+1e12).toISOString(),result:'completed'})+NL).join('');
+  fs.writeFileSync(file,rows(3));
+  const mk=()=>new (CaptureEventStore as any)(file,path.join(dir,'d.jsonl'),path.join(dir,'u.jsonl'));
+  const store=mk();
+  assert.equal(store.readAll().length,3);
+  fs.appendFileSync(file,JSON.stringify({captureId:'c1',result:'failed'})+NL+JSON.stringify({captureId:'c9',startedAt:new Date(1e12+9000).toISOString()})+NL+'{"captureId":"torn"');
+  const inc=store.readAll();assert.equal(inc.length,4);assert.equal(inc.find((e:any)=>e.captureId==='c1').result,'failed');
+  fs.appendFileSync(file,',"startedAt":"2001-09-09T01:46:40.000Z"}'+NL);
+  assert.deepEqual(store.readAll().map((e:any)=>e.captureId),mk().readAll().map((e:any)=>e.captureId));
+});

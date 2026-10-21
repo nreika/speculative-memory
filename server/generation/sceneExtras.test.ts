@@ -25,7 +25,7 @@ test('planning note fixes the subject to the person already in the photo; image 
   assert.match(note, /Scenario 3 \(gen_c\): the MAIN EVENT of this scenario is "両手を上げて喜んでいる"/);
   const img = composeEditInstruction({ predictionPrompt: 'The man raises both arms.' });
   assert.doesNotMatch(img, /Also:/);
-  assert.match(img, /Do not add disembodied body parts/);
+  assert.match(img, /two arms and two hands/);
 });
 
 test('person extras in an empty room are flagged', () => {

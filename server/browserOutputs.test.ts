@@ -44,7 +44,7 @@ test('current sources preserve their own scope and original/generated/target tim
  const f=await fixture([output('screen-5',{source:'now'}),output('screen-6',{source:'a'})],pool);try{
   const store=new BrowserOutputsStore(f.options),now=await store.snapshot('screen-5'),future=await store.snapshot('screen-6');
   assert.equal(now?.clock.scope,'run-b');assert.equal(now?.content?.recordedAtMs,100);assert.equal(now?.content?.caption,'原観察');
-  assert.equal(future?.clock.scope,'run-a');assert.equal(future?.content?.targetAtMs,2000);assert.equal(future?.content?.generatedAtMs,500);assert.equal(future?.content?.sourceRecordedAtMs,100);assert.equal(future?.content?.provenance,'generated');assert.equal(future?.content?.caption,'生成指示を確認できません。');
+  assert.equal(future?.clock.scope,'run-a');assert.equal(future?.content?.targetAtMs,2000);assert.equal(future?.content?.generatedAtMs,500);assert.equal(future?.content?.sourceRecordedAtMs,100);assert.equal(future?.content?.provenance,'generated');assert.equal(future?.content?.caption,'Generation instruction unavailable.');
  }finally{await f.cleanup();}
 });
 test('actual past uses recorded time and cannot borrow another scope or substitute a saved timestamp',async()=>{
@@ -86,9 +86,9 @@ test('only selected generated content resolves its instruction and mismatched pr
  const f=await fixture([output()],catalog([item('a'),item('unused')]));try{
   let calls=0;const valid=new BrowserOutputsStore({...f.options,resolveContent:async c=>{calls++;return {...c,caption:'保存された生成指示',targetAtMs:9999};}});const v=await valid.snapshot('screen-5');assert.equal(calls,1);assert.equal(v?.content?.caption,'保存された生成指示');assert.equal(v?.content?.targetAtMs,2000);
   for(const change of [{id:'wrong'},{scope:'alien'},{imageUrl:'/captures/other.png'},{captureId:'other'},{sceneKey:'gen_b'}]){
-   const bad=new BrowserOutputsStore({...f.options,resolveContent:async c=>({...c,...change,caption:'wrong instruction'})});const s=await bad.snapshot('screen-5');assert.equal(s?.content?.id,'a');assert.equal(s?.content?.caption,'生成指示を確認できません。');
+   const bad=new BrowserOutputsStore({...f.options,resolveContent:async c=>({...c,...change,caption:'wrong instruction'})});const s=await bad.snapshot('screen-5');assert.equal(s?.content?.id,'a');assert.equal(s?.content?.caption,'Generation instruction unavailable.');
   }
-  assert.equal((await valid.page({})).items[0].caption,'生成指示を確認できません。');assert.equal(calls,1,'catalog never resolves all archived instructions');
+  assert.equal((await valid.page({})).items[0].caption,'Generation instruction unavailable.');assert.equal(calls,1,'catalog never resolves all archived instructions');
  }finally{await f.cleanup();}
 });
 test('10 parallel outputs share one catalog scan/inflight load and refresh only after TTL',async()=>{
@@ -151,7 +151,7 @@ test('catalog front contract exposes id, label and scene with current content fi
  const pool=catalog([uploaded,newer,current,older]);pool.current={a:current.id};
  const f=await fixture([output()],pool);try{
   const page=await new BrowserOutputsStore(f.options).page({});assert.deepEqual(page.items.map(c=>c.id),['z-current','newer','older','u']);
-  assert.equal(page.items[0].id,page.items[0].contentId);assert.equal(page.items[0].scene,'a');assert.match(page.items[0].label,/生成 A/);assert.equal(page.items[1].scene,'c');assert.equal(page.items[2].scene,'now');assert.equal(page.items[2].label,'実写の原観察');assert.equal(page.items[3].label,'imported.jpg');
+  assert.equal(page.items[0].id,page.items[0].contentId);assert.equal(page.items[0].scene,'a');assert.match(page.items[0].label,/Generated A/);assert.equal(page.items[1].scene,'c');assert.equal(page.items[2].scene,'now');assert.equal(page.items[2].label,'実写の原観察');assert.equal(page.items[3].label,'imported.jpg');
  }finally{await f.cleanup();}
 });
 test('snapshot view flags match player contract while unavailable images remain hidden without changing the desired setting',async()=>{

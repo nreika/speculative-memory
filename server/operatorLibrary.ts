@@ -7,7 +7,12 @@ export function createOperatorLibrary(root:string,python:string,readOutputIds?:(
  const load=(file:string)=>loadOperatorPlan(root,file,python,readOutputIds);
  /** Plan plus non-fatal format warnings; throws ScenarioFormatError listing every error. */
  const check=(file:string)=>checkOperatorPlan(root,file,python,readOutputIds);
- async function list(){
+ // 2026-10-21: list() runs on every state snapshot; with ~5000 imported folders it took ~0.7 s and made each settings.apply take 3 s
+ // (scenario cues drifted 3 s late). Cache the scan briefly; upload() invalidates it.
+ let cached:{at:number;rows:{file:string;name:string}[]}|undefined,inflight:Promise<{file:string;name:string}[]>|undefined;
+ const list=()=>{if(cached&&Date.now()-cached.at<5000)return Promise.resolve(cached.rows.map(r=>({...r})));
+  return (inflight??=scan().then(rows=>{cached={at:Date.now(),rows};return rows;}).finally(()=>{inflight=undefined;})).then(rows=>rows.map(r=>({...r})));};
+ async function scan(){
   const rows:{file:string;name:string}[]=[];
   async function walk(folder:string){for(const entry of await fs.readdir(folder,{withFileTypes:true})){
    if(entry.isSymbolicLink()||entry.name.startsWith('.'))continue;
@@ -18,6 +23,7 @@ export function createOperatorLibrary(root:string,python:string,readOutputIds?:(
   await fs.mkdir(root,{recursive:true});await walk(root);return rows.sort((a,b)=>a.file.localeCompare(b.file));
  }
  async function upload(payload:any){
+  cached=undefined;
   const safe=(name:unknown,ext:string)=>typeof name==='string'&&/^[A-Za-z0-9][A-Za-z0-9_. -]{0,120}$/.test(name)&&name.toLowerCase().endsWith(ext)&&!name.includes('..');
   if(!payload||!safe(payload.csv?.name,'.csv')||typeof payload.csv.text!=='string'||Buffer.byteLength(payload.csv.text)>2*1024*1024||!Array.isArray(payload.assets)||payload.assets.length>64)throw Error('Invalid scenario upload');
   const id=randomUUID(),imports=path.join(root,'browser-imports'),folder=path.join(imports,'.'+id),final=path.join(imports,id);
@@ -33,7 +39,7 @@ export function createOperatorLibrary(root:string,python:string,readOutputIds?:(
    // Validate paths and exact image protocol before making the import selectable.
    const {formatWarnings}=await checkOperatorPlan(root,`browser-imports/.${id}/${payload.csv.name}`,python,readOutputIds);
    await fs.rename(folder,final);
-   return {ok:true,file:`browser-imports/${id}/${payload.csv.name}`,formatWarnings};
+   cached=undefined;return {ok:true,file:`browser-imports/${id}/${payload.csv.name}`,formatWarnings};
   }catch(error){
    // Preserve a failed upload outside the selectable library for diagnosis.
    await fs.writeFile(path.join(folder,'.failed'),String((error as Error).message),'utf8').catch(()=>{});

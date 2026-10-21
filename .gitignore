@@ -41,3 +41,6 @@ captures/*
 *.mov
 *.mp4
 captures_sorted/
+
+# Pose-check experiment model (scripts/pose-check.py), not used in production
+models/yolo/

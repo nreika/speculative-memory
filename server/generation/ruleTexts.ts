@@ -110,15 +110,15 @@ export const EMPTY_ROOM = {
 export const VLM_EXTRA_MARKER = "Return ONLY a JSON object of the form ";
 
 /**
- * How big the change from the input may be, by tone band (CALM < 0.15, QUIET < 0.45, LIVELY < 0.75, DRAMATIC).
+ * How big the change from the input may be, by tone band (CALM < 0.15, QUIET < 0.45, LIVELY < 0.75, BIG); never theatrical (2026-10-21).
  * Appended to the image edit instruction so tone steers the picture, not only the planner. People wording: no big arm
  * gestures (G-11); the examples use face, shoulders, torso and light. The empty-room variants contain no person words.
  */
 export const TONE_IMAGE_RULES: string[] = [
-  "Amount of change: micro-movements of the existing people; preserve their identity and belongings.",
-  "Amount of change: a gentle visible change of pose or gaze; preserve identity and belongings.",
-  "Amount of change: a clearly different energetic pose and readable expression; preserve identity, belongings and people count.",
-  "Amount of change: a strong, unmistakable change of posture, shoulders and torso; preserve identity, belongings and people count."
+  "Amount of movement: a small natural movement of the existing people.",
+  "Amount of movement: a modest natural movement of the existing people.",
+  "Amount of movement: a clear, ordinary everyday movement of the existing people.",
+  "Amount of movement: a big but ordinary everyday movement, as a real person would do in this room."
 ];
 export const TONE_IMAGE_RULES_EMPTY: string[] = [
   "Keep the unoccupied scene exactly as in the input.",

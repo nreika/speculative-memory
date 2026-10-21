@@ -74,3 +74,13 @@ test('occupied path unchanged: identity rejection retries with the identity corr
   }),/failed after 2 attempts/);
   assert.equal(corrections[1],'Render each original individual exactly once. Keep the original person-to-clothes and person-to-belongings assignments. Fully erase each moved body from its previous position. The reference portraits identify the existing people only.');
 });
+
+test('incoherent body or missing action gets one rebuild even with a single-attempt engine; a missing action still publishes after it', async () => {
+  const {generateUniquePeople}=await import('./peopleIntegrity');
+  const calls:string[]=[];
+  const r=await generateUniquePeople({maxAttempts:1,onExhausted:'skip',plannedAction:'turns around',generate:async(a,c)=>{calls.push(c);return 'img'+a;},rejected:()=>{},
+    inspect:async()=>({ok:false,sourceCount:1,outputToSource:[0],reason:'action_not_shown: x',defect:'action_not_shown'} as any)});
+  assert.equal(calls.length,2);assert.match(calls[1],/turns around/);assert.equal((r as any).actionMismatch,true);assert.equal((r as any).image,'img1');
+  const s=await generateUniquePeople({maxAttempts:1,onExhausted:'skip',generate:async()=>'i',rejected:()=>{},inspect:async()=>({ok:false,sourceCount:1,outputToSource:[0],reason:'incoherent_body: x',defect:'incoherent_body'} as any)});
+  assert.equal((s as any).skipped,true);assert.equal((s as any).defect,'incoherent_body');
+});

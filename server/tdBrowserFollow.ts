@@ -60,14 +60,14 @@ export function selectTdBrowserRuns(rows:CaptureEvent[]) {
 export interface TdBrowserInstructionIdentity {captureId:string;sceneKey:string;imageUrl:string}
 export interface TdBrowserInstruction extends TdBrowserInstructionIdentity {plannedDescription:string}
 export type TdBrowserInstructionLookup=(identity:TdBrowserInstructionIdentity)=>TdBrowserInstruction|undefined;
-export interface TdBrowserSnapshotOptions {instructionLookup?:TdBrowserInstructionLookup;updateMode?:'each'|'all'}
+export interface TdBrowserSnapshotOptions {instructionLookup?:TdBrowserInstructionLookup;updateMode?:'each'|'all';activeCapture?:{captureId:string;stage:string|null;imageCount:number}|null}
 function projectInstruction(content:BrowserDisplayContent,lookup?:TdBrowserInstructionLookup):BrowserDisplayContent {
  if(content.provenance!=='generated'||content.sceneKey==='now')return content;
  const identity={captureId:content.captureId??'',sceneKey:content.sceneKey??'',imageUrl:content.imageUrl};
  let instruction:TdBrowserInstruction|undefined;
  try{instruction=lookup?.(identity);}catch{/* Missing archive evidence must not restore an image-description caption. */}
  const matches=identity.captureId&&identity.sceneKey&&instruction?.captureId===identity.captureId&&instruction.sceneKey===identity.sceneKey&&instruction.imageUrl===identity.imageUrl;
- const caption=matches&&typeof instruction?.plannedDescription==='string'&&instruction.plannedDescription.trim()?instruction.plannedDescription:'生成指示を確認できません。';
+ const caption=matches&&typeof instruction?.plannedDescription==='string'&&instruction.plannedDescription.trim()?instruction.plannedDescription:'Generation instruction unavailable.';
  return {...content,caption};
 }
 export function tdBrowserSnapshot(screenId:string,rows:CaptureEvent[],nowMs:number,options:TdBrowserSnapshotOptions={}):BrowserDisplaySnapshot|undefined {
@@ -79,14 +79,14 @@ export function tdBrowserSnapshot(screenId:string,rows:CaptureEvent[],nowMs:numb
  const batch=partial?[partial.content]:[];
  const projectedBatch=batch.map(c=>c.sceneKey===scene?projectInstruction(c,options.instructionLookup):c);
  const content=projectedBatch.find(c=>c.sceneKey===scene),scope=content?.scope??latest?.browserFollow?.scope??'test:TSC-001:waiting';
- const snapshot=buildBrowserDisplaySnapshot({id:screenId,label:scene==='now'?'TD 元映像':`TD ${scene.slice(-1).toUpperCase()}`,accent:screenId==='td-a'?'#cf7d28':screenId==='td-b'?'#b94383':screenId==='td-c'?'#397ad1':'#286078',clock:{serverAnchorMs:0,worldAnchorMs:0,rate:1,scope},selection:{mode:'pinned',contentId:content?.id??'waiting'}},projectedBatch,nowMs);
+ const snapshot=buildBrowserDisplaySnapshot({id:screenId,label:scene==='now'?'TD source':`TD ${scene.slice(-1).toUpperCase()}`,accent:screenId==='td-a'?'#cf7d28':screenId==='td-b'?'#b94383':screenId==='td-c'?'#397ad1':'#286078',clock:{serverAnchorMs:0,worldAnchorMs:0,rate:1,scope},selection:{mode:'pinned',contentId:content?.id??'waiting'}},projectedBatch,nowMs);
  const latestScene=each&&latest?savedScene(latest,scene):undefined;
  const skippedHere=!!latest&&scene!=='now'&&skippedSceneLetters(latest).has(scene.slice(-1) as 'a'|'b'|'c');
  const failed=skippedHere?latest!.result==='failed'||latest!.result==='cancelled':each?!!latest&&!latestScene&&latest.result!=='running':latest?.result==='failed'||latest?.result==='cancelled'||latest?.result==='completed'&&!completeBatch(latest);
  const state=each&&latestScene?'completed':failed?'failed':latest?.result==='running'?'generating':selected?'completed':'idle';
  const previousRun=!!content&&requestRun!==selectedCompletedRun;
  const displayStatus={requestedCaptureId:latest?.captureId??null,displayedCaptureId:null,state,error:failed?(latest?.errorMessage||(each?'saved image unavailable for this screen':'complete image batch unavailable')).slice(0,512):null,
-  userMessage:failed?(previousRun?'新しいセッションの生成は失敗しました。前セッションの画像を表示中。':content?'今回の生成は失敗しました。前回の画像を表示中。':'今回の生成は失敗しました。表示できる画像はまだありません。'):state==='generating'?(previousRun?'新しいセッションを生成中です。前セッションの画像を表示中。':content?'生成中です。前回の画像を表示中。':'生成中です。画像の完成を待っています。'):null,
+  userMessage:failed?(previousRun?'Generation failed. Showing the previous session.':content?'Generation failed. Showing the previous image.':'Generation failed. No image yet.'):state==='generating'?(previousRun?'Generating…':content?'Generating…':'Generating…'):null,
   lastSuccessAtMs:selected?.endedAt?Date.parse(selected.endedAt):null} as const;
  return {...snapshot,displayStatus,revision:createHash('sha256').update(JSON.stringify({revision:snapshot.revision,displayStatus})).digest('hex').slice(0,20)};
 }

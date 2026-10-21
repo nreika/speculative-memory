@@ -35,7 +35,7 @@ export interface ScenarioResult {
    */
   scene_now?: string;
   /** G-24: an unoccupied scene with neither the recent person nor an object change is not generated (reason). */
-  skipped?: "no_recent_activity" | "no_movable_object" | "chance";
+  skipped?: "no_recent_activity" | "no_movable_object" | "chance" | "duplicate_plan" | "translation_failed";
 }
 
 /** Content text shown for one scenario in TD: the situation description only, no prompt boilerplate. */
@@ -206,17 +206,32 @@ const groupBy = (values: number[], key: (v: number) => string | number): number[
   return [...groups.values()];
 };
 
-/** "Scenario 1: exactly about 30 seconds AFTER this frame" lines, one per scenario. */
-export const buildScenarioTimeline = (signedDistancesSec: number[]): string =>
-  signedDistancesSec
-    .map((d, i) =>
-      replacePlaceholders(prompts.userEditable.scenarioPrediction.scenarioTimelineLine, {
-        N: String(i + 1),
-        DISTANCE: formatDistanceEn(Math.abs(d)),
-        DIRECTION: d < 0 ? "BEFORE" : "AFTER",
-      })
-    )
-    .join("\n");
+/**
+ * How much may change over a span (2026-10-21, user policy: the instruction must really follow the elapsed time).
+ * <= 90 s: the next moment of the same activity; <= 6 min: the activity step is completed or changed; longer: a clearly different state.
+ */
+export const spanChangeRequirement = (seconds: number): string => {
+  const s = Math.abs(seconds);
+  if (!Number.isFinite(s) || s <= 90) return "the next moment of the same activity (a small continuation of what the person is doing)";
+  if (s <= 360) return "the current activity step has been completed or has changed: the held object is put aside or finished, the posture has moved on";
+  return "a clearly different state: a different activity or posture or position, objects set aside, rearranged or finished (a held object may be gone)";
+};
+
+/** "Scenario 1: exactly about 30 seconds AFTER this frame" lines, one per scenario, each with the change this span needs. */
+export const buildScenarioTimeline = (signedDistancesSec: number[]): string => {
+  const lines = signedDistancesSec.map((d, i) =>
+    replacePlaceholders(prompts.userEditable.scenarioPrediction.scenarioTimelineLine, {
+      N: String(i + 1),
+      DISTANCE: formatDistanceEn(Math.abs(d)),
+      DIRECTION: d < 0 ? "BEFORE" : "AFTER",
+    })
+  );
+  // The change each span needs follows the elapsed time (kept as a separate block so the timeline lines stay adjacent).
+  const needs = signedDistancesSec.map((d, i) =>
+    `Scenario ${i + 1} must show ${spanChangeRequirement(d)}: in one clause say what plausibly happened during that span, then describe the resulting state.`
+  );
+  return lines.join("\n") + "\n" + needs.join("\n") + "\nObjects seen anywhere in the recent footage of this room may appear; never invent an object that was never in this room.";
+};
 
 /**
  * Time-span sentence(s) for all scenarios. All spans equal -> the single sentence

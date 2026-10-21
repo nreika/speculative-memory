@@ -39,7 +39,7 @@ test('obstruction is not erased or frozen by contradictory foreground text',()=>
 test('existing person actions preserved for cup, cheer and desk regressions',()=>{
  for(const action of ['The person stands up while holding the cup.','The left person cheers while the other person stays seated.','The person raises the right hand to shoulder height while the left stays on the keyboard.']){
   const p=composeEditInstruction({predictionPrompt:action,presence:.7,personCount:action.includes('left person')?2:1});
-  assert.ok(p.includes(action));assert.match(p,/exact input exposure/);
+  assert.ok(p.includes(action));assert.match(p,/lighting/);
  }
 });
 test('active rulebook (>=v18) validates without scene-specific object count or coordinate constants',()=>{

@@ -181,3 +181,16 @@ test('screen-side actor is separate from hand laterality without another transla
  const translations=bodies.filter(b=>b.prompt.startsWith('Translate the COMPLETE'));assert.equal(translations.length,1);assert.equal(translations[0].images,undefined);assert.equal(translations[0].options.num_predict,64);
  assert.doesNotMatch(translations[0].prompt,/Instruction: "画面右/);assert.match(translations[0].prompt,/never an anatomical hand/);
 });
+
+test('caption clean-up: glossary leftovers are fixed mechanically', async () => {
+  const {fixJapaneseCaption}=await import('./vlmClient');
+  assert.equal(fixJapaneseCaption('30秒後、人物がカメラの背中を向いて座っている。'),'30秒後、人物が背を向けて座っている。');
+  assert.equal(fixJapaneseCaption('目がゆっくりと blink し'),'目がゆっくりと まばたき し');
+  assert.equal(fixJapaneseCaption('30秒後、両腕を前に伸ばす。'),'30秒後、両腕を前に伸ばす。');
+});
+
+test('caption clean-up: a dangling clause at the end is dropped', async () => {
+  const {fixJapaneseCaption}=await import('./vlmClient');
+  assert.equal(fixJapaneseCaption('30秒前、その人の手はケーブルを握っているが、姿勢はややリラックスしており、頭は。'),'30秒前、その人の手はケーブルを握っているが、姿勢はややリラックスしており。');
+  assert.equal(fixJapaneseCaption('30秒後、両腕を前に伸ばす。'),'30秒後、両腕を前に伸ばす。');
+});

@@ -14,16 +14,28 @@ function timingMs(key,fallback){const n=latest?.view?.[key];return Number.isInte
 const api = id ? `/api/displays/${encodeURIComponent(id)}` : null;
 const same = (a,b) => !!a && !!b && a.id === b.id && a.imageUrl === b.imageUrl;
 function fadeMode(view) { return view?.fade === false ? 'none' : ['original','crossfade','none'].includes(view?.fadeMode) ? view.fadeMode : 'original'; }
-function message(text) {
-  const rendered = [text, displayStatusMessage(latest?.displayStatus, visible),faceBlurNotice(visible,latest?.view)].filter(Boolean).join('\n');
+// One notice at a time (English): error > face blur > image loading (after 1 s) > generating.
+let errorNotice='',loadingSince=0;
+function renderNotice() {
+  const loading=loadingSince&&performance.now()-loadingSince>=1000?'Loading image…':'';
+  const blur = faceBlurNotice(visible,latest?.view), info = /no face/i.test(blur) ? blur : '';
+  const rendered = errorNotice||(info?'':blur)||loading||displayStatusMessage(latest?.displayStatus, visible)||info;
   el.connection.textContent = rendered; el.connection.hidden = !rendered;
+}
+function message(text) { errorNotice=text||''; renderNotice(); }
+function setLoading(on) { loadingSince=on?(loadingSince||performance.now()):0; renderNotice(); }
+function describeFetchError(error) {
+  if(error?.name==='TimeoutError'||error?.name==='AbortError')return 'No response, retrying…';
+  if(error instanceof TypeError)return 'Connection lost, reconnecting…';
+  return 'Server error, retrying…';
 }
 function tick() {
   if (visible && clock) {
-    const label = visible.scope && visible.scope !== clock.scope ? {kind:'unknown',text:'前回scopeの画像を表示中'} : temporalLabel(visible, worldTime(clock, clockAt, performance.now()));
-    document.body.dataset.kind = label.kind; el.badge.textContent = label.text;
+    const label = visible.scope && visible.scope !== clock.scope ? {kind:'unknown',text:'Showing the previous scope image'} : temporalLabel(visible, worldTime(clock, clockAt, performance.now()));
+    document.body.dataset.kind = label.kind; document.body.dataset.scene = visible.provenance==='actual'?'now':(/^gen_([abc])$/.exec(visible.sceneKey||'')||[])[1]||''; el.badge.textContent = label.text;
   }
-  if (lastContact && performance.now()-lastContact > 20000) message('Connection lost · last image retained');
+  if (lastContact && performance.now()-lastContact > 20000) message('Connection lost. Keeping the last image.');
+  renderNotice();
 }
 function caption() {
   const [first,second] = captionLines(visible?.caption || '');
@@ -63,7 +75,7 @@ function takeBatch(pending) {
 function commit(pending) {
   visibleRenderKey=pending.renderKey;
   visible=pending.content; clock=pending.clock; clockAt=pending.clockAt;
-  el.waiting.hidden=true; caption(); message('');
+  el.waiting.hidden=true; setLoading(false); caption(); message('');
 }
 function finishCross(commitNew=true) {
   if(!cross)return;
@@ -79,7 +91,7 @@ function finishCross(commitNew=true) {
   }
 }
 function adoptImage(image) {
-  image.id='frame-next'; image.className='frame-layer'; image.alt=''; image.ondblclick=fullscreen;
+  image.id='frame-next'; image.className='frame-layer'; image.alt=''; 
   image.style.transition='none'; image.style.opacity='0'; image.style.zIndex='2'; image.hidden=false;
   el['frame-next'].replaceWith(image); el['frame-next']=image;
 }
@@ -134,8 +146,8 @@ function accept(data) {
   }
   if(pendingImage && pendingImage.renderKey===renderKey){Object.assign(pendingImage,pending);return;}
   const token=++loadToken; pendingImage=pending;
-  const image=new Image();message(visible?'Loading · previous image retained':'Loading image…');
-  const failed=()=>{if(token===loadToken && pendingImage===pending){pendingImage=null;message('Image unavailable · '+(visible?'previous image retained':'waiting'));}};
+  const image=new Image();setLoading(true);
+  const failed=()=>{if(token===loadToken && pendingImage===pending){pendingImage=null;setLoading(false);message(visible?'Image unavailable. Keeping the previous image.':'Image unavailable.');}};
   image.onload=async()=>{
     let rendered=image;
     try{await image.decode();const url=faceBlurImage(image,pending.content,pending.view);if(url!==image.src){rendered=new Image();rendered.src=url;await rendered.decode();}}catch{failed();return;}
@@ -156,7 +168,7 @@ async function fetchSnapshot() {
     const data = await response.json();
     if (!controller.signal.aborted && pageActive && !document.hidden) accept(data);
   } catch (error) {
-    if (!controller.signal.aborted && pageActive && !document.hidden) message(error.message);
+    if (!controller.signal.aborted && pageActive && !document.hidden) message(describeFetchError(error));
   } finally {
     if (activeRequest === controller) activeRequest = null;
     busy = false;
@@ -197,11 +209,14 @@ async function fullscreen() {
   try {
     if (document.fullscreenElement) await document.exitFullscreen();
     else await document.documentElement.requestFullscreen();
-  } catch (error) { message(error.message); }
+  } catch (error) { message(describeFetchError(error)); }
 }
 el.fullscreen.onclick = fullscreen;
-el.frame.ondblclick = fullscreen;
-el['frame-next'].ondblclick = fullscreen;
+// Double-click / double-tap anywhere toggles every overlay (label, subtitles, notices, buttons) on this device only.
+const INFO_KEY='sm-info-hidden';
+function setInfoHidden(hidden){document.body.classList.toggle('info-hidden',hidden);try{localStorage.setItem(INFO_KEY,hidden?'1':'0');}catch{}}
+try{if(localStorage.getItem(INFO_KEY)==='1')document.body.classList.add('info-hidden');}catch{}
+document.addEventListener('dblclick',event=>{if(event.target?.closest?.('button'))return;setInfoHidden(!document.body.classList.contains('info-hidden'));});
 window.addEventListener('keydown', event => { if (event.key.toLowerCase() === 'f') fullscreen(); });
 window.addEventListener('pointermove', () => {
   document.body.classList.remove('idle');

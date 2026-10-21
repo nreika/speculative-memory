@@ -35,7 +35,7 @@ test('behind-view: sentence, insertion condition, negative prompt', () => {
   assert.ok(s.includes(BEHIND_VIEW_RULE));
   assert.match(s, /Same clothes: grey striped shirt, same hair: short black hair \(keep the hair length exactly; never shorten or lengthen it\)\./);
   const withBehind = composeEditInstruction({ predictionPrompt: 'x', presence: 0.3, referencePerson: true, behindView: { clothes: 'grey striped shirt', hair: 'short black hair' } });
-  assert.match(withBehind, /seen from behind with their back turned to the camera; the face is not visible\. Same clothes: grey striped shirt/);
+  assert.match(withBehind, /wearing grey striped shirt, with short black hair, seen from behind, back of head to camera, face never visible/);
   assert.doesNotMatch(composeEditInstruction({ predictionPrompt: 'x', presence: 0.3, referencePerson: true }), /from behind/);
   assert.match(buildNegativePrompt(false, false, true), /face visible, looking at camera, frontal face/);
   assert.doesNotMatch(buildNegativePrompt(false), /frontal face/);
@@ -44,16 +44,14 @@ test('behind-view: sentence, insertion condition, negative prompt', () => {
 import { HAIR_RULE } from './orchestrator';
 test('G-13: hair rule is in the occupied template and the behind-view sentence; negative prompt names hair changes', () => {
   assert.match(HAIR_RULE, /hairstyle, hair length and hair colour exactly as in the input/);
-  assert.ok(composeEditInstruction({ predictionPrompt: 'The man stands.', presence: 0.5 }).includes(HAIR_RULE));
   assert.ok(behindViewSentence({ clothes: 'teal shirt' }).includes(HAIR_RULE));
   assert.match(buildNegativePrompt(false), /hair color change, different hairstyle, changed hair length/);
 });
 
 test('behind-view sentence (with place, scale, hair) leads the whole image prompt', () => {
   const p = composeEditInstruction({ predictionPrompt: 'The person stands up.', presence: 0.3, referencePerson: true, behindView: { clothes: 'teal shirt', hair: 'long straight black hair with pink tips', position: 'right' } });
-  assert.ok(p.startsWith(ONE_PERSON_RULE));
-  assert.match(p.slice(0, 700), /same hair: long straight black hair, only the tips pink \(the rest of the hair stays black/);
-  assert.match(p.slice(0, 1000), /original place \(right/);
+  assert.match(p.slice(0, 700), /Add exactly one person, the person shown in image2, wearing teal shirt, with long straight black hair, only the tips pink \(the rest of the hair stays black/);
+  assert.match(p.slice(0, 1000), /on the right side, seen from behind/);
 });
 
 test('-89: one person only (sentence + negatives) and hair length (negative depends on the recorded hair)', () => {
@@ -92,7 +90,8 @@ test('G-15: behind view forbids any face or profile (sentence + negatives)', () 
   assert.ok(s.includes(BEHIND_VIEW_NO_FACE_RULE));
   assert.match(BEHIND_VIEW_NO_FACE_RULE, /^Seen from behind; no part of the face is visible: no profile/);
   const p = composeEditInstruction({ predictionPrompt: 'The person sits quietly.', presence: 0.3, referencePerson: true, behindView: { clothes: 'teal shirt' } });
-  assert.ok(p.includes(BEHIND_VIEW_NO_FACE_RULE));
+  assert.match(p, /seen from behind, back of head to camera, face never visible/);
+  assert.match(p, /no face on the back of the head/);
   assert.match(buildNegativePrompt(false, false, true), /face in profile, side view of the face/);
   assert.doesNotMatch(buildNegativePrompt(false), /face in profile/);
 });

@@ -43,6 +43,14 @@ export const DEFECT_TYPES = [
   'framing_drift',
   // Pre-publish inspection (2026-10-19): an object the source scene lists on its furniture is hidden/removed in the output
   'missing_belongings',
+  // Pre-publish inspection (2026-10-21): head/torso/arms do not form one body (face on the back of the head, arm out of the back)
+  'incoherent_body',
+  // Pre-publish inspection (2026-10-21): the planned action (prediction_prompt) is not visible in the image
+  'action_not_shown',
+  // Mechanical check (2026-10-21): a face is drawn on a person who is seen from behind in the original
+  'face_on_back_view',
+  // Pre-publish inspection (2026-10-21): the same object appears twice (moved object also at its old place)
+  'duplicate_object',
   'other',
 ] as const;
 export type DefectType = (typeof DEFECT_TYPES)[number];

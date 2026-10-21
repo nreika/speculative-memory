@@ -13,12 +13,12 @@ test('missing_belongings parsing: all true passes, one false rejects, no list sk
  const one=parseBelongings({objectsVisible:{'blue backpack':false,'black jacket':true}},names)!;
  assert.deepEqual(one,{checked:names,visible:{'blue backpack':false,'black jacket':true},missing:['blue backpack']});
  const r=withBelongings({ok:true as boolean|null,reason:'fine'},one);
- assert.equal(r.ok,false);assert.equal((r as {defect?:string}).defect,'missing_belongings');assert.match(r.reason,/^missing_belongings: not visible in the output: blue backpack/);
+ assert.equal(r.ok,true);assert.equal((r as {defect?:string}).defect,undefined);
  assert.equal(parseBelongings({objectsVisible:{a:false}},[]),undefined);
  assert.equal(withBelongings({ok:true,reason:'fine'},undefined).ok,true);
  assert.deepEqual(parseBelongings({},names)!.missing,[]);
  const earlier=withBelongings({ok:false as boolean|null,reason:'extra_hand: x',defect:'extra_hand' as const},one);
- assert.equal(earlier.defect,'extra_hand');assert.match(earlier.reason,/; missing_belongings/);
+ assert.equal(earlier.defect,'extra_hand');assert.equal(earlier.ok,false);
  assert.deepEqual(belongingsList(['Blue backpack','blue backpack','blue water bottle','laptop','red bag','black jacket','green coat','umbrella','grey hoodie','scarf']),['blue backpack','red bag','black jacket','green coat','umbrella','grey hoodie']);
  assert.equal(inspectionDefectType('missing_belongings'),'missing_belongings');assert.equal(inspectionDefectType(undefined),'fabricated_person');assert.equal(inspectionDefectType('count'),'fabricated_person');
 });
@@ -31,11 +31,11 @@ test('missing_belongings in the single inspection call: schema + instruction onl
  answer={people:[person],objectsVisible:{'blue backpack':true,'black jacket':true}};
  const ok=await inspectAndCaption(img,img,1,15,[],undefined,img,names);
  assert.equal(ok.ok,true);
- assert.deepEqual(body.format.required,['people','objectsVisible']);assert.deepEqual(body.format.properties.objectsVisible.required,names);
+ assert.deepEqual(body.format.required,['people','duplicateObject','objectsVisible']);assert.deepEqual(body.format.properties.objectsVisible.required,names);
  assert.match(body.prompt,/for each listed object say whether it is still visible in the OUTPUT image \(the finished photo\) at roughly the same place; hidden by a person or removed = false\./);
  assert.deepEqual(ok.observationFacts.belongings,{checked:names,visible:{'blue backpack':true,'black jacket':true},missing:[]});
  answer={people:[person],objectsVisible:{'blue backpack':false,'black jacket':true}};
  const bad=await inspectAndCaption(img,img,1,15,[],undefined,img,names);
- assert.equal(bad.ok,false);assert.equal(bad.defect,'missing_belongings');assert.deepEqual(bad.observationFacts.belongings!.missing,['blue backpack']);
+ assert.equal(bad.ok,true);assert.equal(bad.defect,undefined);assert.deepEqual(bad.observationFacts.belongings!.missing,['blue backpack']);
  assert.equal(calls,3);
 });

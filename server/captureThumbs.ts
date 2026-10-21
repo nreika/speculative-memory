@@ -1,4 +1,5 @@
 import fs from 'node:fs';import path from 'node:path';import {spawn} from 'node:child_process';
+import {enqueueDisplayDerivatives,setDisplayCapturesDir} from './displayDerivatives';
 
 /** History thumbnails: captures/thumbs/<name without extension>.jpg, 320 px wide JPEG.
  * Presentation derivatives only (never artwork or provenance). Only top-level capture files qualify. */
@@ -121,7 +122,7 @@ export function createCaptureThumbs(options:CaptureThumbOptions):CaptureThumbs{
   },priority).catch(()=>undefined).finally(()=>{running--;if(queue.length)pump();else settleIdle();});
  }
  return {
-  enqueue(sourceFile){try{if(path.dirname(path.resolve(sourceFile)).toLowerCase()===capturesDir.toLowerCase())add(path.resolve(sourceFile),true);}catch{}},
+  enqueue(sourceFile){try{if(path.dirname(path.resolve(sourceFile)).toLowerCase()===capturesDir.toLowerCase()){add(path.resolve(sourceFile),true);if(!options.runBatch){setDisplayCapturesDir(capturesDir);enqueueDisplayDerivatives(path.resolve(sourceFile));}}}catch{}},
   thumbUrl(imageUrl){const url=thumbUrlForImage(imageUrl);return url&&known.has(url.slice(THUMB_URL_PREFIX.length))?url:null;},
   requestMissing(imageUrl){const url=thumbUrlForImage(imageUrl),name=url?.slice(THUMB_URL_PREFIX.length);if(!url||!name||known.has(name)||queuedNames.has(name)||failedNames.has(name)||queue.length>=maxQueue)return;const file=path.join(capturesDir,(imageUrl as string).slice('/captures/'.length));if(fs.existsSync(file))add(file,false);},
   ready,

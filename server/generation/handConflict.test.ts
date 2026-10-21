@@ -99,8 +99,9 @@ test('arms crossed / hug + raise or wave: the action itself uncrosses the arms, 
  assert.equal(armsChangeAction('The person turns the head.',handConflict(crossed,'The person turns the head.')),'The person turns the head.');
  for(const compactPeople of [true,false]){
   const p=composeEditInstruction({predictionPrompt:raise1,presence:1,people:[crossed],personCount:1,compactPeople});
-  assert.match(p,/Main change that must be clearly visible: The person in the dark button-up shirt uncrosses the arms, keeps the black tablet against the body with one arm, and raises the other hand lightly; exactly two hands\./);
-  assert.equal(p.split(SENT).length-1>=2,true,'action sentence appears in the action and in the Main-change line');
+  // 2026-10-21 rebuild: the rewritten action is stated exactly once (no Main-change repeat).
+  assert.match(p,/uncrosses the arms, keeps the black tablet against the body with one arm, and raises the other hand lightly; exactly two hands\./);
+  assert.equal(p.split('uncrosses the arms').length-1,1);assert.doesNotMatch(p,/Main change/);
   assert.match(p,/[Ee]xactly two hands/);assert.doesNotMatch(p,COMMIT);
  }
  assert.equal(mainActionSentence(armsChangeAction(raise1+' Hand use: x.',handConflict(crossed,raise1))),SENT);
@@ -109,6 +110,7 @@ test('two-hand tablet grip + raise one hand (F010): the action releases one hand
  const out=armsChangeAction(raise,handConflict(tablet,raise));
  assert.equal(out,'The existing person on the left side of the image wearing dark shirt with buttons takes one hand off the black tablet, keeps the black tablet against the body with one arm, and raises the other hand lightly; exactly two hands.');
  const p=composeEditInstruction({predictionPrompt:raise,presence:1,people:[tablet],personCount:1,compactPeople:true});
- assert.match(p,/Main change that must be clearly visible: .*takes one hand off the black tablet, keeps the black tablet against the body with one arm, and raises the other hand lightly; exactly two hands\./);
+ assert.equal(p.split('takes one hand off').length-1,1);
+ assert.match(p,/takes one hand off the black tablet, keeps the black tablet against the body with one arm, and raises the other hand lightly; exactly two hands\./);
  assert.doesNotMatch(p,COMMIT);
 });

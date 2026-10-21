@@ -284,7 +284,7 @@ function renderScenarioFormat(scenario){
   $('scenario-format-file').textContent=`${scenario.formatFile||'CSV'} · ${checked}`+(errors.length?` · Not loaded${scenario.scenarioId?' (current plan: '+scenario.scenarioId+')':''}`+(warnings.length?` · +${warnings.length} warning${warnings.length===1?'':'s'}`:''):' · Loaded');
   const list=$('scenario-format-list');list.replaceChildren();Object.assign(list.style,{margin:'6px 0 0 16px',padding:'0',listStyle:'disc'});
   for(const issue of rows.slice(0,20)){const item=document.createElement('li');item.textContent=`${issue.row?'row '+issue.row:'file'}${issue.column?' ['+issue.column+']':''}: ${issue.message}`;list.append(item);}
-  if(rows.length>20){const more=document.createElement('li');more.textContent=`…他 ${rows.length-20} 件`;list.append(more);}
+  if(rows.length>20){const more=document.createElement('li');more.textContent=`… ${rows.length-20} more`;list.append(more);}
 }
 function render(state){
   latest=state;
@@ -466,7 +466,7 @@ async function refreshImages(){
           $('source-caption').textContent=content.caption;
         }
         else{
-          $('scene-waiting-'+scene).hidden=true;$('scene-caption-'+scene).textContent=content.caption;
+          $('scene-waiting-'+scene).hidden=true;$('scene-caption-'+scene).textContent=content.caption;renderSceneDetails(scene);
           const distance=content.distanceSecSigned,known=typeof distance==='number'&&Number.isFinite(distance);
           document.querySelector(`[data-scene="${scene}"] h3`).textContent=scene.toUpperCase()+(known?' '+(distance<0?'PAST ':'FUTURE +')+distance+' sec':'');
           const stale=sceneStaleState(scene);
@@ -523,20 +523,33 @@ function svgNode(tag,attributes={},content){
   return node;
 }
 function renderSceneNotes(state){
+  lastCaptureScenes=state.captureScenes||{};for(const s of scenes)renderSceneDetails(s);
   const notes=state.sceneNotes||{};const clock=at=>{const d=new Date(at);return Number.isFinite(d.getTime())?d.toLocaleTimeString('ja-JP',{hour12:false}):'';};
   for(const scene of scenes){
     const box=$('scene-notes-'+scene);if(!box)continue;
     const blocks=[];
-    for(const [label,entry] of [['生成中',notes.running],['前回の生成',notes.finished]]){
+    for(const [label,entry] of [['Generating',notes.running],['Last run',notes.finished]]){
       if(!entry)continue;
       const rows=[...(entry.notes?.all||[]),...(entry.notes?.[scene]||[])].sort((x,y)=>Date.parse(x.at)-Date.parse(y.at));
-      if(!rows.length&&label==='生成中')continue;
-      blocks.push({head:`${label} ${clock(entry.startedAt)}${entry.result==='failed'?' · 失敗':''}`,rows:rows.length?rows:[{at:entry.endedAt||entry.startedAt,kind:'info',text:'記録なし'}]});
+      if(!rows.length&&label==='Generating')continue;
+      blocks.push({head:`${label} ${clock(entry.startedAt)}${entry.result==='failed'?' · failed':''}`,rows:rows.length?rows:[{at:entry.endedAt||entry.startedAt,kind:'info',text:'No notes'}]});
     }
     const key=JSON.stringify(blocks);if(box.dataset.key===key)continue;box.dataset.key=key;box.replaceChildren();
     for(const block of blocks){const h=document.createElement('div');h.className='scene-notes-head';h.textContent=block.head;box.append(h);
       for(const row of block.rows){const line=document.createElement('div');line.className='scene-note is-'+row.kind;line.textContent=clock(row.at)+' '+row.text;box.append(line);}}
   }
+}
+// Real action + exact image prompt of the displayed scene image (same saved record that went to the image model).
+let lastCaptureScenes={};
+function renderSceneDetails(scene){
+  const caption=$('scene-caption-'+scene);if(!caption)return;
+  let box=$('scene-details-'+scene);
+  if(!box){box=document.createElement('div');box.id='scene-details-'+scene;box.className='scene-details';caption.after(box);}
+  const d=lastCaptureScenes['gen_'+scene]||{};
+  const key=JSON.stringify([d.captureId,d.action,d.fullPrompt,d.references]);if(box.dataset.key===key)return;box.dataset.key=key;box.replaceChildren();
+  if(!d.action&&!d.fullPrompt)return;
+  if(d.action){const a=document.createElement('div');a.className='scene-action';const l=document.createElement('b');l.textContent='Action: ';a.append(l,document.createTextNode(d.action));box.append(a);}
+  if(d.fullPrompt){const det=document.createElement('details');const sum=document.createElement('summary');sum.textContent='Full image prompt'+(d.references?' · '+d.references:'');const pre=document.createElement('pre');pre.textContent=d.fullPrompt;det.append(sum,pre);box.append(det);}
 }
 function renderErrors(state){
   const rows=Array.isArray(state.warnings)?state.warnings:[];

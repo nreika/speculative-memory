@@ -40,7 +40,7 @@ test('actual workflow connects identity images to image2/image3 of the positive 
   await generateImage({ originalImageDataUrl: 'data:image/png;base64,dGVzdA==', faceImageDataUrl: 'data:image/png;base64,dGVzdA==', referenceImages: ['data:image/png;base64,dGVzdA=='], predictionPrompt: 'The person stands up.', presence: 1, personCount: 1, imageBackend: 'local' });
   assert.deepEqual(workflow['30'].inputs.image2, ['11', 0]);
   assert.deepEqual(workflow['30'].inputs.image3, ['16', 0]);
-  assert.match(workflow['30'].inputs.prompt, /exact facial features/);
+  assert.match(workflow['30'].inputs.prompt, /image2 shows the same people at another moment, only for their face and hair/);
 });
 
 test('display description uses finished pixels and never the requested action', async t => {

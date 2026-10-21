@@ -61,7 +61,7 @@ test('combined caption observes both hand grips in the same request without copy
  assert.equal(verdict.caption,'15秒後、人物が物を持つ手が肩以上の高さにある。');
  assert.equal(calls,1);
  assert.match(body.prompt,/A cup\/tablet\/phone grip is held_object/);
- assert.deepEqual(body.format.properties.people.items.required,['raisedHands','objectHands','otherHands','handPositions','hands','sourceIndex','posture','leftHand','rightHand']);
+ assert.deepEqual(body.format.properties.people.items.required,['raisedHands','objectHands','otherHands','handPositions','hands','sourceIndex','posture','leftHand','rightHand','bodyCoherent']);
 });
 
 test('combined inspection uses the finished hands for each mapped person even when source order reverses',async t=>{
@@ -230,4 +230,25 @@ test('withCpuHandCount leaves the verdict untouched for error, no-hands and with
  assert.equal(withCpuHandCount(base,{status:'error',count:0,hands:[]},1),base);
  assert.equal(withCpuHandCount(base,{status:'no-hands',count:0,hands:[]},1),base);
  assert.equal(cpuHandLimit(0),2);assert.equal(cpuHandLimit(3),6);
+});
+
+test('body coherence and planned-action checks reject only otherwise acceptable images and keep other defects', async () => {
+  const {withBodyCoherence,withPlannedAction}=await import('./combinedInspection');
+  const ok={ok:true as boolean|null,reason:'ok'};
+  assert.equal(withBodyCoherence(ok,[{bodyCoherent:true},{}]).ok,true);
+  const bad=withBodyCoherence(ok,[{bodyCoherent:false}]);assert.equal(bad.ok,false);assert.equal((bad as any).defect,'incoherent_body');
+  assert.equal(withBodyCoherence({ok:null as boolean|null,reason:'x'},[{bodyCoherent:false}]).ok,null);
+  assert.equal(withPlannedAction(ok,false,'turns around').ok,false);
+  assert.equal(withPlannedAction(ok,true,'turns around').ok,true);
+  assert.equal(withPlannedAction(ok,false,undefined).ok,true);
+  const other={ok:false as boolean|null,reason:'extra_hand',defect:'extra_hand' as const};
+  assert.equal((withPlannedAction(other,false,'x') as any).defect,'extra_hand');
+});
+
+test('a duplicated object rejects an otherwise acceptable image and keeps other defects', async () => {
+  const {withDuplicateObject}=await import('./combinedInspection');
+  const ok={ok:true as boolean|null,reason:'ok'};
+  const bad=withDuplicateObject(ok,true);assert.equal(bad.ok,false);assert.equal((bad as any).defect,'duplicate_object');
+  assert.equal(withDuplicateObject(ok,false).ok,true);
+  assert.equal((withDuplicateObject({ok:false as boolean|null,reason:'x',defect:'extra_hand' as const},true) as any).defect,'extra_hand');
 });

@@ -170,14 +170,14 @@ test('scenario FORMAT ERROR lists every problem, keeps the last good plan, persi
  }finally{await f.close();}
 });
 
-async function resyncFixture(stored:string|undefined,bridgeState:()=>any){
+async function resyncFixture(stored:string|undefined,bridgeState:(calls:any[])=>any){
  const directory=await fs.mkdtemp(path.join(os.tmpdir(),'native-operator-resync-'));
  await fs.mkdir(path.join(directory,'scenarios'));
  await fs.writeFile(path.join(directory,'bootstrap-state.json'),JSON.stringify(initial()));
  await fs.writeFile(path.join(directory,'scenarios','SCN-001.csv'),'seconds,action,target,value,source_rect,target_rect,fit,opacity,feather_px\n0,scenario,,SCN-001,,,,,\n0,layout,,B|NOW|A|C,,,,,\n180,end,,,,,,,\n');
  if(stored!==undefined)await fs.writeFile(path.join(directory,'input-selection.json'),JSON.stringify({schema:1,setId:stored}));
  const calls:any[]=[];
- const input:OperatorInputClient={readState:async()=>bridgeState(),readPreview:async()=>{throw Error('unused');},readFrame:async()=>{throw Error('unused');},select:async r=>{calls.push(r);return{...r,state:bridgeState()};}};
+ const input:OperatorInputClient={readState:async()=>bridgeState(calls),readPreview:async()=>{throw Error('unused');},readFrame:async()=>{throw Error('unused');},select:async r=>{calls.push(r);return{...r,state:bridgeState(calls)};}};
  const operator=await createNativeOperator({directory,python,input,isBusy:()=>false,capture:()=>({active:null}),cancel:()=>{},readScenes:async()=>({}),invokeGenerate:async()=>({status:200,body:{}})});
  await operator.inputResync;
  return{operator,calls,close:()=>operator.close()};
@@ -185,8 +185,14 @@ async function resyncFixture(stored:string|undefined,bridgeState:()=>any){
 const cameraState=()=>({...inputState(),inputKind:'live-camera' as const,replay:null,sourceScope:'camera:main'});
 const replayState=(setId:string)=>({...inputState(),replay:{...inputState().replay,setId}});
 
-test('startup resync re-sends exactly the stored setId once',async()=>{
+test('startup resync does not re-select when the bridge already shows the stored selection (the cycle is not restarted)',async()=>{
  const f=await resyncFixture('TSC-003',()=>replayState('TSC-003'));
+ try{assert.equal(f.calls.length,0);}finally{f.close();}
+ const c=await resyncFixture('cycle',()=>({...replayState('TSC-002'),replay:{...replayState('TSC-002').replay,cycle:true}}));
+ try{assert.equal(c.calls.length,0);}finally{c.close();}
+});
+test('startup resync re-sends exactly the stored setId once',async()=>{
+ const f=await resyncFixture('TSC-003',calls=>calls.length?replayState('TSC-003'):replayState('TSC-001'));
  try{assert.equal(f.calls.length,1);assert.equal(f.calls[0].setId,'TSC-003');assert.ok(f.calls[0].requestId);assert.deepEqual(((await f.operator.state.snapshot()) as any).errors,[]);}finally{f.close();}
 });
 test('startup resync sends nothing when no selection is stored',async()=>{
@@ -194,7 +200,7 @@ test('startup resync sends nothing when no selection is stored',async()=>{
  try{assert.equal(f.calls.length,0);}finally{f.close();}
 });
 test('startup resync honours a stored camera choice',async()=>{
- const f=await resyncFixture('camera',()=>cameraState());
+ const f=await resyncFixture('camera',calls=>calls.length?cameraState():replayState('TSC-001'));
  try{assert.equal(f.calls.length,1);assert.equal(f.calls[0].setId,'camera');}finally{f.close();}
 });
 test('startup resync skips remote-device',async()=>{
@@ -402,4 +408,16 @@ test('natural end stays paused when the CSV last hold cue was pause; Stop restor
   assert.equal((await action(f.operator,'scenario.play','play-rstop')).body.ok,true);assert.equal((await f.operator.state.snapshot()).submissionHold,false);
   assert.equal((await action(f.operator,'scenario.stop','stop-rstop')).body.ok,true);assert.equal((await f.operator.state.snapshot()).submissionHold,true,'Stop restores the pre-scenario (paused) hold');
  }finally{await f.close();}
+});
+
+test('watchSettingsChange: MAIN edits fire after 3 s, scenario edits and restores are absorbed',async()=>{
+ const {watchSettingsChange}=await import('./nativeOperator');
+ let w={lastKey:'a' as string|null,changedAt:null as number|null};
+ let r=watchSettingsChange(w,{key:'b',nowMs:1000,absorb:false,autoMode:true});assert.equal(r.fire,false);assert.equal(r.changedAt,1000);
+ r=watchSettingsChange(r,{key:'b',nowMs:4100,absorb:false,autoMode:true});assert.equal(r.fire,true);
+ // scenario owns the layout: change absorbed, never fires
+ r=watchSettingsChange({lastKey:'b',changedAt:null},{key:'c',nowMs:5000,absorb:true,autoMode:true});assert.equal(r.changedAt,null);assert.equal(r.lastKey,'c');
+ r=watchSettingsChange(r,{key:'c',nowMs:9000,absorb:false,autoMode:true});assert.equal(r.fire,false);
+ // a pending MAIN edit is dropped when the scenario takes over
+ r=watchSettingsChange({lastKey:'c',changedAt:100},{key:'d',nowMs:200,absorb:true,autoMode:true});assert.equal(r.changedAt,null);assert.equal(r.fire,false);
 });

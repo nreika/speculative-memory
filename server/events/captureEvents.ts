@@ -193,7 +193,7 @@ export function timelineRunKey(event:CaptureEvent,startMs=Date.parse(event.start
 }
 
 export class CaptureEventStore {
-  private cache: { mtimeMs: number; size: number; events: CaptureEvent[] } | null = null;
+  private cache: { mtimeMs: number; size: number; events: CaptureEvent[]; offset: number; byId: Map<string, CaptureEvent>; orphanDisplays: Map<string, DisplayEntry[]> } | null = null;
 
   constructor(
     readonly filePath: string,
@@ -208,7 +208,6 @@ export class CaptureEventStore {
     try {
       fs.mkdirSync(path.dirname(file), { recursive: true });
       fs.appendFileSync(file, JSON.stringify(row) + '\n', 'utf8');
-      this.cache = null;
       return true;
     } catch (error) {
       console.error('captureEvents: write failed (generation continues):', error);
@@ -247,7 +246,10 @@ export class CaptureEventStore {
     this.append(this.filePath, { captureId, displayAdd: entry });
   }
 
-  /** All captures folded, oldest first. Cached by file mtime+size. */
+  /**
+   * All captures folded, oldest first. Cached by file mtime+size; when the file only grew, just the appended lines are folded
+   * (2026-10-21: a 30 MB log was fully re-parsed after every append during generation, blocking the server ~0.7 s per read).
+   */
   readAll(): CaptureEvent[] {
     let stat: fs.Stats;
     try {
@@ -255,16 +257,35 @@ export class CaptureEventStore {
     } catch {
       return [];
     }
-    if (this.cache && this.cache.mtimeMs === stat.mtimeMs && this.cache.size === stat.size) return this.cache.events;
-    const byId = new Map<string, CaptureEvent>();
-    const orphanDisplays = new Map<string, DisplayEntry[]>();
-    let text = '';
+    const cached = this.cache;
+    if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) return cached.events;
+    let state = cached && stat.size > cached.size && cached.offset > 0 ? cached : null;
+    if (!state) state = { mtimeMs: 0, size: 0, events: [], offset: 0, byId: new Map(), orphanDisplays: new Map() };
+    let chunk = '';
+    let consumed = 0;
     try {
-      text = fs.readFileSync(this.filePath, 'utf8');
+      const fd = fs.openSync(this.filePath, 'r');
+      try {
+        const length = stat.size - state.offset;
+        const buffer = Buffer.alloc(Math.max(0, length));
+        let read = 0;
+        while (read < length) {
+          const n = fs.readSync(fd, buffer, read, length - read, state.offset + read);
+          if (n <= 0) break;
+          read += n;
+        }
+        const end = buffer.subarray(0, read).lastIndexOf(10);
+        // A torn final line (no newline yet) is left for the next read.
+        consumed = end >= 0 ? end + 1 : 0;
+        chunk = buffer.subarray(0, consumed).toString('utf8');
+      } finally {
+        fs.closeSync(fd);
+      }
     } catch {
-      return [];
+      return cached?.events ?? [];
     }
-    for (const line of text.split('\n')) {
+    const { byId, orphanDisplays } = state;
+    for (const line of chunk.split('\n')) {
       if (!line.trim()) continue;
       let row: any;
       try {
@@ -293,12 +314,12 @@ export class CaptureEventStore {
       if (ev.result === 'running' && nowMs - Date.parse(ev.startedAt) > STALE_RUNNING_MS) {
         ev.result = 'failed';
         ev.errorStage = ev.errorStage ?? 'unknown';
-        ev.errorMessage = ev.errorMessage ?? '終了記録なし(サーバー停止などで中断)';
+        ev.errorMessage = ev.errorMessage ?? 'No end record (interrupted, e.g. server stopped)';
       }
       events.push(ev);
     }
     events.sort((a, b) => Date.parse(a.startedAt) - Date.parse(b.startedAt));
-    this.cache = { mtimeMs: stat.mtimeMs, size: stat.size, events };
+    this.cache = { mtimeMs: stat.mtimeMs, size: stat.size, events, offset: state.offset + consumed, byId, orphanDisplays };
     return events;
   }
 

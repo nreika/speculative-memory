@@ -54,19 +54,20 @@ const seatedCup: PersonInfo = { position: 'right front', pose: 'sitting at the d
 
 test('G-26 image prompt: the past scene carries the EARLIER-moment lead and main-difference line; the future scene does not', () => {
   const c = composeEditInstruction({ predictionPrompt: 'The container is still closed on the desk; both hands rest beside it.', people: [seatedCup], personCount: 1, compactPeople: true, presence: 0.5, tone: 0.5, distanceSec: -30 });
-  assert.match(c, /^This image is the moment 30 seconds BEFORE this photo; the photo shows what happened next\. Render that earlier moment: undo the most recent small action rather than adding a new one\./);
-  assert.match(c, /Keep the same people count, identities, clothes, hair, belongings, framing, camera and lighting/);
-  assert.match(c, /Main difference from the photo \(this is the EARLIER moment\): The container is still closed on the desk/);
-  assert.doesNotMatch(c, /Main change that must be clearly visible/);
+  // 2026-10-21 rebuild: one temporal sentence ("N before image1: ..."), no "undo", the action stated once.
+  assert.match(c, /This is 30 seconds before image1: a slightly earlier moment of the same activity\./);
+  assert.doesNotMatch(c, /undo|Main difference|Main change/i);
+  assert.equal(c.split('The container is still closed on the desk').length - 1, 1);
   const ongoing = composeEditInstruction({ predictionPrompt: 'The container is a little lower.', people: [seatedCup], personCount: 1, compactPeople: true, presence: 0.5, distanceSec: -30, pastContinuity: 'ongoing' });
-  assert.match(ongoing, /show the same ongoing activity one small step earlier/);
+  assert.match(ongoing, /the same activity one step earlier/);
   const a = composeEditInstruction({ predictionPrompt: 'The person lifts the container.', people: [seatedCup], personCount: 1, compactPeople: true, presence: 0.5, tone: 0.5, distanceSec: 30 });
-  assert.doesNotMatch(a, /BEFORE this photo|EARLIER moment/);
-  assert.match(a, /Main change that must be clearly visible/);
+  assert.doesNotMatch(a, /before image1|EARLIER moment/);
+  assert.match(a, /This is 30 seconds later/);
   const generic = composeEditInstruction({ predictionPrompt: 'The cup is still on the desk.', people: [seatedCup], personCount: 1, presence: 0.5, distanceSec: -120 });
-  assert.match(generic, /^This image is the moment 2 minutes BEFORE this photo/);
+  assert.match(generic, /This is 2 minutes before image1/);
   const empty = composeEditInstruction({ predictionPrompt: 'The black office chair still sits a few centimetres further to the right than in the photo.', presence: 0, distanceSec: -30 });
-  assert.match(empty, /^This image is the moment 30 seconds BEFORE this photo.*undo the most recent small object change/);
+  assert.match(empty, /This is 30 seconds before image1/);
+  assert.doesNotMatch(empty, /undo/i);
   assert.ok(!mentionsPerson(empty.split('\n\n')[0]), empty.split('\n\n')[0]);
 });
 

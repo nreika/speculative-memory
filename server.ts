@@ -133,7 +133,8 @@ import { getComfyWatchdog } from './server/generation/comfyWatchdog';
 import { obstructedSince, withObstructionNote } from './server/events/obstruction';
 import { operatorWarnings } from './server/operatorWarnings';
 import { sceneNotes } from './server/sceneNotes';
-import { toneMismatch, rewriteForTone, forceToneWording } from './server/generation/toneEnforce';
+import { withBackViewFace, countFacesWithWorker } from './server/generation/backViewFace';
+import { toneMismatch, rewriteForTone, forceToneWording, plansNearIdentical, planSimilarity, rememberToneAction, recentActionList, backViewForbiddenHit, backViewFallback } from './server/generation/toneEnforce';
 import { CaptureEventStore, captureBatchCounts, captureExecutionSource, captureInputIdentity, type CaptureEvent as CaptureEventRow } from './server/events/captureEvents';
 import { registerEventRoutes } from './server/events/routes';
 import { QaService } from './server/qa/qaService';
@@ -145,6 +146,10 @@ import { purgeExpiredMobile } from './server/mobile/archiveList';
 import { GEMINI_IMAGE_MODEL, GEMINI_VLM_MODEL, backendLabel, resolveBackends } from './server/generation/backends';
 import {resolveLocalImageEngine,selectSceneImageEngine,isTurboEngine,productionTurboSourceContext} from './server/generation/imageEngine';
 import {TurboCandidateGeometryError} from './server/generation/turboCandidate';
+import {createDisplayErrorLog} from './server/displayErrors';
+import {finalizeOrphanGenerations} from './server/archive/finalizeOrphans';
+import {setRequireJapaneseCaptions} from './server/generation/vlmClient';
+setRequireJapaneseCaptions(true);
 
 interface CaptureEvent extends Partial<CaptureHistoryEcho> {
   type: 'capture.saved';
@@ -298,6 +303,12 @@ async function startServer() {
   try {testSourceIndex=new SourceObservationIndex(JSON.parse(fs.readFileSync(process.env.TEST_SOURCE_OBSERVATION_INDEX||'C:/Users/nmrei/claude-code/tsc001-fix/original-source-observations.v1.json','utf8')));}
   catch(error){console.error('[test-history] source cache unavailable; no observation is inferred:',String(error));}
   const app = express();
+  // Slow API calls (>= 1 s) are logged to logs/slow-requests.jsonl (time, method, path, ms, status) so timeouts can be traced.
+  app.use((req,res,next)=>{
+    const started=Date.now();
+    res.on('finish',()=>{const ms=Date.now()-started;if(ms<1000)return;try{fs.appendFile(path.join(process.cwd(),'logs','slow-requests.jsonl'),JSON.stringify({time:new Date().toISOString(),method:req.method,path:req.path.slice(0,160),ms,status:res.statusCode})+'\n',()=>{});}catch{}});
+    next();
+  });
   const PORT = Number(process.env.PORT || '3000');
   const HMR_PORT = Number(process.env.HMR_PORT || '24679');
   const defaultImageCount = 3;
@@ -872,6 +883,14 @@ async function startServer() {
   }
   app.use(cors());
   app.use(express.json({ limit: '50mb' }));
+  // Browser-side display problems (screens on the tailnet or through the public gate) -> logs/display-errors.jsonl.
+  const displayErrors=createDisplayErrorLog({file:path.join(process.cwd(),'logs','display-errors.jsonl')});
+  app.post('/api/display-errors',express.json({limit:'16kb'}),(req,res)=>{
+    if(req.headers['x-control-request']!=='1')return res.status(403).json({ok:false});
+    const device=String(req.headers['user-agent']??'').startsWith('speculative-memory-public-gate')?'public':'tailnet';
+    const result=displayErrors.record(req.body?.screen,device,req.body?.errors);
+    res.status(result.ok?200:result.status??400).json(result);
+  });
   app.post('/api/test/history',(req,res)=>{
     try {const result=updateTestHistory(testSourceIndex,testHistory,req.body);res.status(result.sourceStatus==='unavailable'?503:200).json(result);}
     catch(error){res.status(400).json({error:String((error as Error).message),historySummary:'',nowText:''});}
@@ -897,6 +916,7 @@ async function startServer() {
   const browserSettings=process.env.BROWSER_DISPLAY_SETTINGS_FILE;
   const browserContents=process.env.BROWSER_DISPLAY_CONTENTS_FILE;
   const instructionLookup=createInstructionCaptionLookup(archiveRootDir(),()=>captureEvents.readAll());
+  try { const fixedOrphans = finalizeOrphanGenerations(archiveRootDir()); if (fixedOrphans) console.log(`[archive] ${fixedOrphans} run(s) left "running" by a restart marked aborted`); } catch { /* best effort */ }
   const legacyDisplayTiming=createTdDisplayTimingReader();
   const readDisplayTiming=Object.assign(async()=>nativeOperatorMode?(await nativeOperator?.state.readSettings())?.displayTiming??'all':legacyDisplayTiming(),{readRouting:async()=>{
     if(!nativeOperatorMode)return legacyDisplayTiming.readRouting();
@@ -968,15 +988,27 @@ const m=/^data:image\/[a-z]+;base64,(.+)$/i.exec(imageDataUrl);const small=m?'da
     const outputRecordings=createBrowserOutputRecordings({recordingsFile:path.join(process.cwd(),'logs','recordings.jsonl'),publicBaseUrl:process.env.PUBLIC_BASE_URL});
     const outputSources=createBrowserOutputSources({readEvents:()=>captureEvents.readAll(),readCurrent:async()=>{
       const updateMode=await readDisplayTiming();
-      return browserOutputCurrent(captureEvents.readAll(),Date.now(),{updateMode,instructionLookup});
+      const active=captureManager.snapshot().active;
+      const current=browserOutputCurrent(captureEvents.readAll(),Date.now(),{updateMode,instructionLookup,activeCapture:active?{captureId:active.captureId,stage:active.stage,imageCount:active.imageCount}:null});
+      // Images generated before the label carried Tone / Presence fall back to the current settings of that scene.
+      try{
+        const settings:any=await nativeOperator?.state.readSettings();
+        if(settings)for(const key of ['a','b','c'] as const){
+          const snap=current[key];const c=snap?.content;if(!snap||!c||c.provenance!=='generated'||(c.tone!==undefined&&c.presence!==undefined))continue;
+          const scene=settings.scenes?.[key]??{};
+          const tone=c.tone??(Number.isFinite(scene.tone)?scene.tone:settings.tone),presence=c.presence??(Number.isFinite(scene.presence)?scene.presence:settings.presence);
+          current[key]={...snap,content:{...c,...(Number.isFinite(tone)?{tone}:{}),...(Number.isFinite(presence)?{presence}:{})}};
+        }
+      }catch{/* the label simply has no Tone / Presence */}
+      return current;
     },readUploads:()=>outputAssets.list(),readRecords:()=>outputRecordings.readRecords(),thumbnailUrl:outputThumbnails.thumbnailUrl});
-    browserOutputs=registerBrowserOutputsRoutes(app,{configFile:path.join(privateOutputRoot,'browser-output-config.json'),loadCatalog:async()=>{
+    browserOutputs=registerBrowserOutputsRoutes(app,{staleWhileRevalidate:true,configFile:path.join(privateOutputRoot,'browser-output-config.json'),loadCatalog:async()=>{
       const [catalog,tdRouting]=await Promise.all([outputSources.loadCatalog(),readDisplayTiming.readRouting()]);
       return {...catalog,...(tdRouting?{tdRouting}:{})};
     },assets:outputAssets,thumbnails:outputThumbnails,presentSnapshot:presentBrowserFaces,
       allowedHosts:process.env.TD_CONTROL_ALLOWED_HOSTS?.split(',').map(host=>host.trim()).filter(Boolean),resolveContent:async(content)=>{
         const saved=content.captureId&&content.sceneKey?instructionLookup({captureId:content.captureId,sceneKey:content.sceneKey,imageUrl:content.imageUrl}):undefined;
-        return {...content,caption:saved?.plannedDescription??'生成指示を確認できません。'};
+        return {...content,caption:saved?.plannedDescription??'Generation instruction unavailable.'};
       }});
   } catch {
     console.warn('[browser-outputs] Initialization unavailable');
@@ -1754,7 +1786,10 @@ const m=/^data:image\/[a-z]+;base64,(.+)$/i.exec(imageDataUrl);const small=m?'da
         emptyRoomPersonChance: sceneParams.emptyRoomPersonChance ?? DEFAULT_EMPTY_ROOM_PERSON_CHANCE,
         recentPerson: !!recentPerson, extras: sceneExtras as Record<string, string | undefined>,
         activityMinutesAgo, activityWindowMin, forceKeep: emptyRoomForceKeep,
+        // Presence of each scene decides how likely the recently seen person appears in it (0 = never).
+        scenePresence: Object.fromEntries(resolveScenePresence(sceneParams, count).map((p, i) => ['gen_' + String.fromCharCode(97 + i), p])),
       });
+      for (const d of emptyRoomScenes) { if (!d.personDrawn && d.objectBlockedReason === 'no_recent_activity') sceneNotes.add(captureId, d.sceneKey.slice(-1).toUpperCase(), '無人の部屋として生成（最近の人の動きなし・スキップはしない）', 'info'); }
       const formattedHistory = formatHistory(historyItems);
       const historyNote = buildHistoryContextNote({
         observations: formattedHistory.lines,
@@ -1816,12 +1851,14 @@ const m=/^data:image\/[a-z]+;base64,(.+)$/i.exec(imageDataUrl);const small=m?'da
       const pastContinuity = pastSpan !== undefined ? judgePastContinuity({ ledger: stateLedger, people, spanSec: pastSpan }) : undefined;
       const ledgerNote = stateLedgerNote({ ledger: stateLedger, continuity: pastContinuity, pastSpanSec: pastSpan });
       console.log(`[past] ledger ${stateLedger.rows} rows, ${stateLedger.states.length} states; continuity=${pastContinuity ? `${pastContinuity.verdict} (${pastContinuity.reason})` : '-'}`);
-      const planContextNote = [contextNote, ledgerNote].filter(Boolean).join('\n');
+      // Variety: the planner is told which actions were used recently (this process, last ~10 plans) and must not repeat them.
+      const avoidNote = recentActionList().length ? 'Do not repeat any of these recent actions; choose different movements and different objects: ' + recentActionList().map((x) => '"' + x.replace(/"/g, "'") + '"').join(' | ') : '';
+      const planContextNote = [contextNote, ledgerNote, avoidNote].filter(Boolean).join('\n');
 
       const vlmTrace: PlanTrace = {};
       const vlmStartedAt = Date.now();
       setStage('plan');
-      const scenarios = await predictScenarios({
+      const planArgs = {
         imageDataUrl: image,
         target: normalizedTarget,
         scenarioCount: count,
@@ -1837,24 +1874,92 @@ const m=/^data:image\/[a-z]+;base64,(.+)$/i.exec(imageDataUrl);const small=m?'da
         people,
         sceneDistances,
         vlmBackend: backends.vlm,
-      });
+      };
+      let scenarios = await predictScenarios(planArgs);
       // Tone enforcement (2026-10-20): the planner ignores the Tone sentence, so a scene whose wording contradicts its
       // tone band ("slightly" at TONE 1) is rewritten once; a failed rewrite keeps the original plan.
-      if (people.length > 0 && backends.vlm !== 'gemini') {
+      const recentPersonScene = people.length === 0 && !!recentPerson;
+      // Who the in-place action belongs to when several people are in the frame (named by clothes, never a bare "the person").
+      const backActor = (): string | undefined => {
+        if (people.length < 2) return undefined;
+        const p = people.find((x) => x.facing === 'away') ?? people[0];
+        const clothes = String(p?.clothes ?? '').trim(), position = String(p?.position ?? '').trim();
+        return clothes ? `The person in the ${clothes}` : position ? `The person on the ${position}` : undefined;
+      };
+      const enforceTone = async () => {
+      // The recent-person path (empty NOW frame, the recently seen person drawn from behind) is enforced too: its fixed phrase
+      // ("stands quietly ...") used to ignore Tone and the time span.
+      if ((people.length > 0 || recentPersonScene) && backends.vlm !== 'gemini') {
         await Promise.all(scenarios.map(async (scenario, index) => {
+          if (recentPersonScene && !/^the person\b/i.test(String(scenario?.prediction_prompt ?? ''))) return;
+          // A person seen from behind is rewritten like everybody else; the rewrite is told to use an in-place arm / upper-body action.
           const tone = toneAt(sceneParams, index);
           const english = String(scenario?.prediction_prompt ?? ''), japanese = String(scenario?.scenario_description ?? '');
-          const mismatch = english ? toneMismatch(tone, english, japanese) : null;
+          const awayPerson = people.some((p) => p.facing === 'away') || recentPersonScene;
+          // Back view: any plan that names eyes / gaze / face / expression is replaced (the image model would draw a face on the back of the head).
+          if (awayPerson && english && backViewForbiddenHit(english)) {
+            const objects0 = (described.belongings ?? []).map((b) => b.name).filter(Boolean);
+            let fixedBack = await rewriteForTone({ tone: Math.max(tone, 0.5), english, japanese, seconds: sceneDistances[index] ?? null, objects: objects0, cautious: true, backView: true, signal });
+            if (!fixedBack) fixedBack = backViewFallback(index, sceneDistances[index] ?? null, backActor(), people.length > 1);
+            sceneNotes.add(captureId, String.fromCharCode(65 + index), `後ろ向きの人物なのに目・視線・顔に関わる計画だったため、腕・上半身の動作に差し替えた。元: ${japanese}`, 'warn');
+            scenario.prediction_prompt = fixedBack.prediction_prompt;
+            scenario.scenario_description = fixedBack.scenario_description;
+            return;
+          }
+          const mismatch = english ? toneMismatch(tone, english, japanese, sceneDistances[index] ?? null) : null;
           if (!mismatch) return;
           const scene = String.fromCharCode(65 + index);
-          let fixed = await rewriteForTone({ tone, english, japanese, seconds: sceneDistances[index] ?? null, signal });
-          if (!fixed) fixed = await rewriteForTone({ tone, english, japanese, seconds: sceneDistances[index] ?? null, signal });
-          if (!fixed) { fixed = forceToneWording(mismatch, english, japanese); console.warn(`[tone] ${captureId} ${scene}: rewrite failed twice; weak words replaced`); sceneNotes.add(captureId, scene, `Tone ${tone.toFixed(2)} に合わない計画（${mismatch==='too_weak'?'弱すぎ':'強すぎ'}）。書き直しに2回失敗し、言葉を置き換えた`, 'warn'); }
-          else sceneNotes.add(captureId, scene, `Tone ${tone.toFixed(2)} に合わない計画（${mismatch==='too_weak'?'弱すぎ':'強すぎ'}）を書き直した。元: ${japanese}`, 'info');
+          // Only objects the describe step saw may be used; edge / back-facing people get an in-place action (2026-10-21).
+          const objects = (described.belongings ?? []).map((b) => b.name).filter(Boolean);
+          const cautious = awayPerson || people.some((p) => p.facing === 'away' || /edge|partial|cut off|cropped/i.test(String(p.position ?? '')));
+          let fixed = await rewriteForTone({ tone, english, japanese, seconds: sceneDistances[index] ?? null, objects, cautious, backView: awayPerson, signal });
+          if (!fixed) fixed = await rewriteForTone({ tone, english, japanese, seconds: sceneDistances[index] ?? null, objects, cautious, backView: awayPerson, signal });
+          if (!fixed && awayPerson) { fixed = backViewFallback(index, sceneDistances[index] ?? null, backActor(), people.length > 1); sceneNotes.add(captureId, scene, `Tone ${tone.toFixed(2)} の書き直しに失敗したため、後ろ向き用の腕・上半身の動作に差し替えた`, 'warn'); }
+          else if (!fixed) { fixed = forceToneWording(mismatch, english, japanese); console.warn(`[tone] ${captureId} ${scene}: rewrite failed twice; weak words replaced`); sceneNotes.add(captureId, scene, `Tone ${tone.toFixed(2)} に合わない計画（${mismatch==='too_weak'?'弱すぎ':mismatch==='implausible'?'不自然（芝居がかった動き）':'強すぎ'}）。書き直しに2回失敗し、言葉を置き換えた`, 'warn'); }
+          else sceneNotes.add(captureId, scene, `Tone ${tone.toFixed(2)} に合わない計画（${mismatch==='too_weak'?'弱すぎ':mismatch==='implausible'?'不自然（芝居がかった動き）':'強すぎ'}）を書き直した。元: ${japanese}`, 'info');
           console.log(`[tone] ${captureId} ${scene}: ${mismatch} at tone ${tone.toFixed(2)} -> rewritten: ${fixed.prediction_prompt}`);
           scenario.prediction_prompt = fixed.prediction_prompt;
           scenario.scenario_description = fixed.scenario_description;
+          if (tone >= 0.6 && toneMismatch(tone, scenario.prediction_prompt, scenario.scenario_description)) sceneNotes.add(captureId, scene, `Tone ${tone.toFixed(2)} なのに計画に十分な動作が残っていない（書き直し後も弱い）`, 'warn');
         }));
+      }
+      };
+      await enforceTone();
+      // 2026-10-21: three plans that say practically the same thing ("posture unchanged" x3) are never published: plan again once;
+      // if they are still the same, only the first scene is made and the others are skipped (the screens keep their previous images).
+      // Two scenes of one capture with practically the same action (bottle-to-chest in A and B) are never published as they are:
+      // the later one is rewritten once, told not to repeat the earlier action.
+      for (let j = 1; j < scenarios.length; j += 1) {
+        if (scenarios[j].skipped || people.length === 0 || backends.vlm === 'gemini') continue;
+        const earlier = scenarios.slice(0, j).find((s) => !s.skipped && planSimilarity(s.prediction_prompt, scenarios[j].prediction_prompt) >= 0.7);
+        if (!earlier) continue;
+        rememberToneAction(earlier.prediction_prompt);
+        const awayPerson = people.some((p) => p.facing === 'away') || recentPersonScene;
+        const objects = (described.belongings ?? []).map((b) => b.name).filter(Boolean);
+        const again = await rewriteForTone({ tone: toneAt(sceneParams, j), english: scenarios[j].prediction_prompt, japanese: String(scenarios[j].scenario_description ?? ''), seconds: sceneDistances[j] ?? null, objects, cautious: awayPerson || people.some((p) => /edge|partial|cut off|cropped/i.test(String(p.position ?? ''))), backView: awayPerson, signal });
+        if (again) { sceneNotes.add(captureId, String.fromCharCode(65 + j), '同じ撮影内で別の場面とほぼ同じ動作だったため書き直した', 'info'); scenarios[j].prediction_prompt = again.prediction_prompt; scenarios[j].scenario_description = again.scenario_description; }
+        else sceneNotes.add(captureId, String.fromCharCode(65 + j), '別の場面とほぼ同じ動作のまま（書き直しに失敗）', 'warn');
+      }
+      for (const s of scenarios) if (!s.skipped && s.prediction_prompt) rememberToneAction(s.prediction_prompt);
+      const livePlans = () => scenarios.filter((s) => !s.skipped).map((s) => s.prediction_prompt);
+      if (livePlans().length >= 2 && plansNearIdentical(livePlans())) {
+        sceneNotes.add(captureId, 'A', '3場面の計画がほぼ同じだったため、計画を1回やり直した', 'warn');
+        scenarios = await predictScenarios(planArgs);
+        await enforceTone();
+        if (livePlans().length >= 2 && plansNearIdentical(livePlans())) {
+          // Never skipped (the screen would go stale): person scenes get distinct everyday actions from the rotating pool;
+          // identical empty-room scenes ("the room stays empty") are simply identical and fine.
+          let first = true;
+          scenarios.forEach((s, i) => {
+            if (s.skipped) return;
+            if (first) { first = false; return; }
+            if (/^the person\b/i.test(String(s.prediction_prompt ?? ''))) {
+              const safe = backViewFallback(i, sceneDistances[i] ?? null, backActor(), people.length > 1);
+              s.prediction_prompt = safe.prediction_prompt; s.scenario_description = safe.scenario_description;
+            }
+          });
+          sceneNotes.add(captureId, 'B', '3場面の計画がほぼ同じだったため、後ろの場面を別の日常動作に差し替えた（スキップはしない）', 'warn');
+        }
       }
       {
         const g = vlmTrace.guard;
@@ -2010,7 +2115,7 @@ const m=/^data:image\/[a-z]+;base64,(.+)$/i.exec(imageDataUrl);const small=m?'da
         referencePersonImage=undefined;referenceCrop=null;
         refImages=visibleHeads.map(()=>image);referenceCrops=visibleHeads;
       }
-      if (!referencePersonImage && !refImages.length && refFramesEnabled() && useHistory && backends.image !== 'gemini' && vlmTrace.guard?.unoccupied !== true && !unoccupied && resolveScenePresence(sceneParams, count).some((p) => p > 0)) {
+      if (!referencePersonImage && !refImages.length && !people.some((p) => p.facing === 'away') && refFramesEnabled() && useHistory && backends.image !== 'gemini' && vlmTrace.guard?.unoccupied !== true && !unoccupied && resolveScenePresence(sceneParams, count).some((p) => p > 0)) {
         try {
           const cur = classifyOrientation({ people, sceneDescription: observation, observation });
           const picked = selectRefFrames(historyAll, { captureId, orientation: cur }, { max: refFramesMax(), windowMin: refFramesWindowMin() });
@@ -2102,6 +2207,8 @@ const m=/^data:image\/[a-z]+;base64,(.+)$/i.exec(imageDataUrl);const small=m?'da
         const assetOnly=sceneMode==='asset_only';
         const scenario=assetOnly?{...scenarios[index],prediction_prompt:'Preserve original people and place the supplied image element only in its configured target area.',scenario_description:'指定位置に画像要素を合成する。'}:scenarios[index];
         if(assetOnly)scenarios[index]=scenario;
+        // Last guard before the edit instruction is composed: a back view never gets a plan about eyes / gaze / face.
+        if(!assetOnly&&people.some((p)=>p.facing==='away')&&backViewForbiddenHit(scenario.prediction_prompt)){const safe=backViewFallback(index,sceneDistances[index]??null,backActor(),people.length>1);scenario.prediction_prompt=safe.prediction_prompt;scenario.scenario_description=safe.scenario_description;sceneNotes.add(captureId,String.fromCharCode(65+index),'後ろ向きの人物に目・視線・顔の指示が残っていたため、生成直前に腕・上半身の動作へ差し替えた','warn');}
         const label = `Gen_${String.fromCharCode(97 + index)}`;
 
         const imageTrace: ImageTrace = {};
@@ -2134,7 +2241,9 @@ const m=/^data:image\/[a-z]+;base64,(.+)$/i.exec(imageDataUrl);const small=m?'da
         }
         const sceneImageModel=backends.image==='gemini'?GEMINI_IMAGE_MODEL:isTurboEngine(selection.engine)?imageModelUsed:`qwen-image-edit (${process.env.COMFYUI_GGUF==='true'?comfyConfig.models.ggufUnet:comfyConfig.models.unet})`;
 
-        const generated = await generateUniquePeople({
+        const nowFaces: Promise<number | null> = people.some((p) => p.facing === 'away') ? countFacesWithWorker(image) : Promise.resolve(null);
+        const runUnique = async () => generateUniquePeople({
+          plannedAction: scenario.prediction_prompt,
           generate: async (attempt, correction) => generateImage({
           originalImageDataUrl: sceneInput?.imageDataUrl??image,
           scenarioElementInstruction:scenarioElementInstruction(scenarioControl,sceneKey as ScenarioSceneKey),
@@ -2173,9 +2282,20 @@ const m=/^data:image\/[a-z]+;base64,(.+)$/i.exec(imageDataUrl);const small=m?'da
             // missing_belongings: objects the source scene lists on its furniture must stay visible (same inspection call).
             const belongings = inspectionBelongings(vlmTrace.guard?.scene ?? scenarios[0]?.scene_now, { action: scenario.prediction_prompt, people, belongings: vlmTrace.guard?.belongings });
             const detection = await detectPeople(candidate, signal);
-            return inspectCountedImage({detection,expectedPeople,sourceActors:countSourceActors,
+            const backViewVerdict = await inspectCountedImage({detection,expectedPeople,sourceActors:countSourceActors,
               allowPartOverlap:!sceneCast&&selection.engine==='qwen21-turbo'&&!assetOnly&&!sceneDrawFromBehind&&expectedPeople===1&&people.length===1,
-              inspect:()=>sceneCast?inspectAndCaptionWithReferences(image,candidate,people,sceneCast.references,sceneDistances[index],signal,sceneCast.sourceIdentityImages,belongings):inspectAndCaption(sceneDrawFromBehind && sceneReference ? sceneReference : image, candidate, expectedPeople, sceneDistances[index], people, signal, image, belongings)});
+              inspect:()=>sceneCast?inspectAndCaptionWithReferences(image,candidate,people,sceneCast.references,sceneDistances[index],signal,sceneCast.sourceIdentityImages,belongings,scenario.prediction_prompt):inspectAndCaption(sceneDrawFromBehind && sceneReference ? sceneReference : image, candidate, expectedPeople, sceneDistances[index], people, signal, image, belongings, scenario.prediction_prompt)});
+            // Mechanical back-view check: a faceless (back view) original must not get a face in the output.
+            // Identity (who is who) cannot be judged from behind: a back view is not rejected for it when the count is right.
+            let judged: any = backViewVerdict;
+            // Identity (who is who) is judged by a small VLM from tiny faces; it is a warn, never a rejection, as long as the count is right
+            // and nobody is drawn twice (duplicates stay rejected).
+            const mapped: number[] = Array.isArray(judged?.outputToSource) ? judged.outputToSource.filter((v: number) => v >= 0) : [];
+            if (judged?.ok === false && !judged.defect && /identity or uniqueness mismatch/.test(String(judged.reason ?? '')) && Array.isArray(judged.outputToSource) && judged.outputToSource.length === expectedPeople && new Set(mapped).size === mapped.length) {
+              sceneNotes.add(captureId, sceneKey.slice(-1).toUpperCase(), `同一性の判定が合わなかった（outputToSource=${JSON.stringify(judged.outputToSource)}）が、人数は合い重複も無いため却下しない`, 'warn');
+              judged = { ...judged, ok: true, reason: 'identity not judged for a back view' };
+            }
+            return people.some((p) => p.facing === 'away') && !sceneCast ? withBackViewFace(judged, nowFaces, candidate) : judged;
           },
           rejected: (candidate, verdict, attempt) => {
             sceneNotes.add(captureId, sceneKey, `${attempt}回目の画像を検査で不合格: ${verdict.ok===null?'判定不能 ':''}${String(verdict.reason??'').slice(0,240)}`, verdict.ok===null?'warn':'warn');
@@ -2201,6 +2321,23 @@ const m=/^data:image\/[a-z]+;base64,(.+)$/i.exec(imageDataUrl);const small=m?'da
           expectedPeople,
           onExhausted:'skip',
         });
+        let generated = await runUnique();
+        // A CALM scene (Tone < 0.15, "nothing changes") that only failed the framing check is published as the NOW frame itself:
+        // nothing changes, so the photo is the picture, and the screen is not left on a minutes-old image.
+        if ('defect' in generated && generated.defect === 'framing_drift' && toneAt(sceneParams, index) < 0.15 && !assetOnly && image) {
+          sceneNotes.add(captureId, String.fromCharCode(65 + index), '構図ずれ(framing_drift)で却下が続いたため、Tone 0(変化なし)なので元の画像(NOW)をそのまま出した', 'info');
+          generated = { image, verdict: { ...(generated.verdict as any), ok: true }, attempts: generated.attempts } as any;
+        }
+        // 2026-10-21: two rejections of the same scene must not leave the screen stale: one more try with a safe in-place arm /
+        // upper-body action (never for the plans the operator wrote: scenario rows keep their own action).
+        if ('defect' in generated && generated.defect !== 'inspection_unavailable' && !assetOnly && people.length > 0) {
+          const safe = backViewFallback(index + 1, sceneDistances[index] ?? null, backActor(), people.length > 1);
+          const before = generated.defect;
+          scenario.prediction_prompt = safe.prediction_prompt.replace(/, with their back to the camera\./, people.some((p) => p.facing === 'away') ? ', with their back to the camera.' : '.');
+          scenario.scenario_description = safe.scenario_description;
+          sceneNotes.add(captureId, String.fromCharCode(65 + index), `検査で不合格（${before}）が続いたため、安全な腕・上半身の動作に差し替えてもう一度作る`, 'warn');
+          generated = await runUnique();
+        }
         if ('defect' in generated) {
           // Never publish a rejected image, but do not fail the capture: this scene keeps its previous image on the displays.
           const reason = `rejected:${generated.defect}`;
@@ -2214,11 +2351,20 @@ const m=/^data:image\/[a-z]+;base64,(.+)$/i.exec(imageDataUrl);const small=m?'da
           continue;
         }
         const dataUrl = generated.image;
+        {const fr=(generated.verdict as any)?.observationFacts?.framing;if(fr&&(fr.status!=='aligned'&&fr.status!=='no-alignment'?true:(Math.abs((fr.scale??1)-1)>0.03||Math.abs(fr.dx??0)>0.02||Math.abs(fr.dy??0)>0.02)))sceneNotes.add(captureId,String.fromCharCode(65+index),`構図の検査: ${fr.status==='aligned'?`枠がややずれた（拡大率${(fr.scale??1).toFixed(3)} / dx ${(fr.dx??0).toFixed(3)} / dy ${(fr.dy??0).toFixed(3)}）`:`枠のずれ検査ができなかった（${fr.status}）`}`,'warn');}
+        {const bc=((generated.verdict as any)?.observationFacts?.people??[]).map((p:any)=>p.bodyCoherent);if(bc.length)sceneNotes.add(captureId,String.fromCharCode(65+index),`検査(VLM)の体の整合 bodyCoherent: ${bc.map((v:any)=>v===true?'OK':v===false?'NG':'未回答').join(' / ')}`,'info');}
+        {const missing=(generated.verdict as any)?.observationFacts?.belongings?.missing;if(Array.isArray(missing)&&missing.length)sceneNotes.add(captureId,String.fromCharCode(65+index),`持ち物が見えなくなった（却下せず公開）: ${missing.join('、')}`,'warn');}
         const executedImageModel=imageTrace.assetOnlyExecution?.modelExecuted===false?'cpu asset composition (no image model executed)':sceneImageModel;
         ensureActive();
 
-        const plannedDescription = scenario.scenario_description;
         // User specification: subtitles show the generation instruction, not a post-generation observation.
+        // Exception (2026-10-21): the planned action was not drawn even after the rebuild; the subtitle then states what is visible.
+        let plannedDescription = scenario.scenario_description;
+        if (generated.actionMismatch) {
+          // The observation sentence is not a caption (it reads "2人の人物が写っている…"): the plan caption stays, MAIN gets a warn.
+          sceneNotes.add(captureId, sceneKey, '計画の動作が画像に描かれなかった（字幕は計画のまま・要確認）', 'warn');
+          console.warn(`[integrity] ${sceneKey} planned action not visible after rebuild; published with the plan caption (${captureId})`);
+        }
         scenario.scenario_description = plannedDescription;
         ensureActive();
         const { buffer, extension } = decodeImageDataUrl(dataUrl);
@@ -2336,7 +2482,7 @@ const m=/^data:image\/[a-z]+;base64,(.+)$/i.exec(imageDataUrl);const small=m?'da
           const scope=evt.browserFollow.scope,sourceRecordedAtMs=evt.browserFollow.sourceRecordedAtMs;
           if(!evt.browserBatch.length&&sourceImageAsset?.url)evt.browserBatch.push({id:captureId+':now',captureId,sceneKey:'now',scope,provenance:'actual',distanceSecSigned:null,imageUrl:evtImageUrl(sourceImageAsset.url)!,recordedAtMs:sourceRecordedAtMs,sourceRecordedAtMs,generatedAtMs:null,targetAtMs:null,caption:nowText});
           const sceneAt=Date.parse(resolvedSceneTime);
-          evt.browserBatch.push({id:captureId+':'+sceneKey,captureId,sceneKey,scope,provenance:'generated',distanceSecSigned:Number.isFinite(sceneDistances[index])?sceneDistances[index]:null,imageUrl:evtImageUrl(savedImageAsset.url)!,recordedAtMs:null,sourceRecordedAtMs,generatedAtMs:Date.now(),targetAtMs:Number.isFinite(sceneAt)?sceneAt+sceneDistances[index]*1000:null,caption:scenarioContentText(scenario)});
+          evt.browserBatch.push({id:captureId+':'+sceneKey,captureId,sceneKey,scope,provenance:'generated',distanceSecSigned:Number.isFinite(sceneDistances[index])?sceneDistances[index]:null,imageUrl:evtImageUrl(savedImageAsset.url)!,recordedAtMs:null,sourceRecordedAtMs,generatedAtMs:Date.now(),targetAtMs:Number.isFinite(sceneAt)?sceneAt+sceneDistances[index]*1000:null,caption:scenarioContentText(scenario),tone:sceneToneList[index],presence:scenePresenceList[index]});
           captureEvents.patch(captureId,{...captureBatchCounts(evt),inputIdentity:evt.inputIdentity,images:evt.images,browserFollow:evt.browserFollow,browserBatch:evt.browserBatch});
         }
         qaJobs.push({ sceneKey, imagePath: savedImageAsset.absolutePath, predictionPrompt: scenario.prediction_prompt,nowPath:sceneInputPath,expectedPeople:sceneCast?people.length:expectedPeople,referenceCast:sceneCast?{sourcePeople:people,references:sceneCast.references,distanceSec:sceneDistances[index],sourceIdentityImages:sceneCast.sourceIdentityImages}:undefined });
@@ -2433,7 +2579,7 @@ const m=/^data:image\/[a-z]+;base64,(.+)$/i.exec(imageDataUrl);const small=m?'da
       directory:process.env.OPERATOR_CONTROL_DIRECTORY||path.join(path.dirname(path.resolve(archiveRootDir())),'operator-control'),
       python:process.env.PEOPLE_DETECTOR_PYTHON||path.join(process.env.USERPROFILE||'','Documents/ComfyUI/.venv/Scripts/python.exe'),
       preflightPersonReferences:async body=>{await preflightScenePersonReferences(body);},
-      isBusy:()=>captureManager.current!==null,capture:()=>captureManager.snapshot(),cancel:()=>captureManager.cancel(null,'requested'),
+      readDisplayErrors:()=>displayErrors.summary(),readSceneDetails:(identity)=>instructionLookup(identity),isBusy:()=>captureManager.current!==null,capture:()=>captureManager.snapshot(),cancel:()=>captureManager.cancel(null,'requested'),
       readScenes:mode=>browserOutputCurrent(captureEvents.readAll(),Date.now(),{instructionLookup,updateMode:mode}),
       readFadeMode:id=>browserOutputs?.channelFadeMode(id)??Promise.resolve('original'),
       readFadeTiming:id=>browserOutputs?.channelFadeTiming(id)??Promise.resolve(undefined),

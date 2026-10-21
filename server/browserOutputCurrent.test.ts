@@ -11,12 +11,13 @@ test('recorded publication mode cannot be reinterpreted by a later global change
 test('complete four-image rows publish with fixed All or Each under both current modes',()=>{
  for(const testSource of [false,true])for(const recorded of ['all','each']as const)for(const current of ['all','each']as const){const r=event('complete-fixed',1,testSource);r.browserFollow!.updateMode=recorded;const selected=browserOutputCurrent([r],3000,{updateMode:current});for(const item of Object.values(selected))assert.equal(item?.content?.captureId,r.captureId);assert.equal(Object.keys(selected).length,4);}
 });
-test('Each publishes immediately but the same image gains one fade trigger only on batch completion',()=>{
+test('Each publishes immediately and the screen gets its own fade trigger when its image arrives; all keeps the batch-completion trigger',()=>{
  const r=event('fade-ready',1);r.browserFollow!.updateMode='each';r.result='running';
- const partial=browserOutputCurrent([r],3000).a!;assert.ok(partial.content);assert.equal(partial.fadeBatch,undefined);
+ const partial=browserOutputCurrent([r],3000).a!;assert.ok(partial.content);assert.equal(partial.fadeBatch?.captureId,r.captureId);
  r.result='completed';r.endedAt='2026-10-18T00:02:00Z';
- const complete=browserOutputCurrent([r],3000).a!;assert.equal(complete.content?.id,partial.content?.id);assert.equal(complete.fadeBatch?.captureId,r.captureId);assert.notEqual(complete.revision,partial.revision);
- r.result='failed';assert.equal(browserOutputCurrent([r],3000).a?.fadeBatch,undefined);
+ const complete=browserOutputCurrent([r],3000).a!;assert.equal(complete.content?.id,partial.content?.id);assert.equal(complete.fadeBatch?.captureId,r.captureId);
+ const all=event('fade-all',2);all.browserFollow!.updateMode='all';all.result='running';
+ assert.equal(browserOutputCurrent([all],3000).a,undefined);
 });
 function event(id:string,minute:number,isTest=false):CaptureEvent{
  const captureId=isTest?'test-TSC-001-F001-'+id:'td-'+id,scope=isTest?'test:TSC-001:'+run+':L1':'live';
@@ -71,5 +72,15 @@ test('2026-10-21: after an input switch, A/B/C from the other input are not show
  const selected=browserOutputCurrent([live,replay],3000,{updateMode:'each'});
  assert.equal(selected.now?.content?.captureId,replay.captureId);
  assert.equal(selected.a?.content?.captureId,replay.captureId);
- assert.equal(selected.c,undefined);
+ assert.equal(selected.c?.content?.captureId,replay.captureId);assert.equal(selected.c?.content?.provenance,'actual');assert.equal((selected.c as any)?.standInFor,'c');
+});
+
+test('generating notice is per scene: only the scene being drawn, later ones say Next, NOW and delivered scenes say nothing',()=>{
+ const r=event('per-scene',1);r.result='running';r.browserBatch=r.browserBatch!.slice(0,2);r.browserFollow!.updateMode='each';
+ const old=event('old-scene',0),at=(stage:string|null,imageCount=3)=>browserOutputCurrent([old,r],3000,{updateMode:'each',activeCapture:{captureId:r.captureId,stage,imageCount}});
+ let c=at('sceneB');
+ assert.equal(c.now?.displayStatus?.userMessage??null,null);assert.equal(c.a?.displayStatus?.userMessage??null,null);
+ assert.equal(c.b?.displayStatus?.userMessage,'Generating…');assert.equal(c.c?.displayStatus?.userMessage,'Next');
+ c=at('sceneB',2);assert.equal(c.c?.displayStatus?.userMessage??null,null);
+ c=at('plan');assert.equal(c.b?.displayStatus?.userMessage,'Preparing…');
 });

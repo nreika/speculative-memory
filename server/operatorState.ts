@@ -2,6 +2,7 @@ import {personReferenceIds,mergedPersonReferenceIds} from './operatorPersonRefer
 /** Main-owned operator state. No TD calls, generation loop, camera access or network. */
 import{DEFAULT_EMPTY_ROOM_PERSON_CHANCE}from'./generation/emptyRoomDecision';
 import fs from'node:fs/promises';import path from'node:path';import{createHash,randomUUID}from'node:crypto';
+import {renameRetry} from './renameRetry';
 export type OperatorScene='a'|'b'|'c';
 export interface OperatorSettings {mode:'manual'|'timer'|'chain';intervalSec:number;imageCount:number;presence:number;tone:number;emptyRoomPersonChance:number;vlmBackend:'local'|'gemini';imageBackend:'local'|'gemini';displayTiming:'each'|'all';scenarioPreview:boolean;labels:boolean;subtitles:boolean;fade:boolean;scenes:Record<OperatorScene,{distanceSec:number;continuous:string;oneShot:string;continuousPersonReferenceIds?:string[];oneShotPersonReferenceIds?:string[];/** Per-scene override 0..1; absent = the global presence / tone. */presence?:number;tone?:number}>}
 export interface OperatorDisplay{layout:('A'|'B'|'C'|'NOW')[];visible:boolean}
@@ -35,7 +36,7 @@ export function createOperatorState(options:OperatorStateOptions){
  const limit=options.receiptLimit??128;if(!Number.isInteger(limit)||limit<1||limit>1024)throw Error('Invalid receipt limit');
  let state:Stored,loaded:Promise<void>|undefined,tail:Promise<unknown>=Promise.resolve();
  const queue=<T>(work:()=>Promise<T>)=>{const result=tail.then(work);tail=result.catch(()=>{});return result;};
- const save=async()=>{await fs.mkdir(path.dirname(file),{recursive:true});const temp=file+'.'+randomUUID()+'.tmp';await fs.writeFile(temp,JSON.stringify(state),{flag:'wx'});await fs.rename(temp,file);};
+ const save=async()=>{await fs.mkdir(path.dirname(file),{recursive:true});const temp=file+'.'+randomUUID()+'.tmp';await fs.writeFile(temp,JSON.stringify(state),{flag:'wx'});await renameRetry(temp,file);};
  const load=()=>loaded??=(async()=>{try{const data=JSON.parse(await fs.readFile(file,'utf8'));if(data.schema!==1||typeof data.settingsRevision!=='string'||typeof data.submissionHold!=='boolean'||!plain(data.oneShotTokens)||!scenes.every(s=>typeof data.oneShotTokens[s]==='string')||!Array.isArray(data.receipts))throw Error('Invalid stored operator state');state={...data,settings:settings(data.settings),display:display(data.display)};}catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error;state={schema:1,settings:settings({...options.initial.settings,mode:'manual',scenarioPreview:false}),settingsRevision:randomUUID(),display:display(options.initial.display),submissionHold:true,oneShotTokens:tokens(),receipts:[]};await save();}})();
  const runtime=async()=>options.runtime?await options.runtime():{};
  const snapshot=async()=>{await load();const dynamic=await runtime();const base:Record<string,any>={};for(const key of ['schema','project','capture','scenario','scenarioLibrary','replay','history','sceneText','captureScenes','cost','errors','remoteCamera'])base[key]=clone(dynamic[key]??options.initial[key]);base.pendingInput=clone(dynamic.pendingInput??null);base.warnings=clone(Array.isArray(dynamic.warnings)?dynamic.warnings:[]);base.sceneNotes=clone(dynamic.sceneNotes??null);if(base.scenario&&plain(base.scenario)){delete base.scenario.logPath;delete base.scenario.absolutePath;}return{...base,schema:1,connected:true,observedAtMs:Date.now(),settings:clone(state.settings),settingsRevision:state.settingsRevision,display:clone(state.display),submissionHold:state.submissionHold,runtime:'native'};};
@@ -44,7 +45,7 @@ export function createOperatorState(options:OperatorStateOptions){
  const reserve=async(input:OperatorAction,origin?:'scenario')=>{
   await load();if(!input||!plain(input.data)||typeof input.requestId!=='string'||!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(input.requestId)||!local.has(input.action)&&!delegated.has(input.action))fail('Invalid operator action');
   const signature=createHash('sha256').update(JSON.stringify([input.action,input.data,input.baseRevision??null])).digest('hex'),old=state.receipts.find(r=>r.id===input.requestId);
-  if(old){if(old.signature!==signature)throw new OperatorStateError(409,'requestId was already used for another command');if(old.status==='pending')throw new OperatorStateError(409,'Command outcome is unconfirmed; refresh state before continuing',true);if(old.status==='failed')throw new OperatorStateError(old.errorStatus??409,old.message??'Command rejected');return{done:true as const,message:old.message??'Already applied'};}
+  if(old){if(old.signature!==signature)throw new OperatorStateError(409,'requestId was already used for another command');if(old.status==='pending')throw new OperatorStateError(409,'Command outcome is unconfirmed; refresh state before continuing',true);if(old.status==='failed')throw new OperatorStateError(old.errorStatus??409,old.message??'Command rejected',old.errorStatus===504);return{done:true as const,message:old.message??'Already applied'};}
   const actual=await runtime();if(input.action==='settings.apply'){
    if(input.baseRevision!==state.settingsRevision)throw new OperatorStateError(409,'Settings changed; refresh before applying');
    if(origin!=='scenario'&&actual.scenario?.ownsLayout&&(Object.keys(input.data).some(k=>['mode','scenarioPreview','scenes'].includes(k))))throw new OperatorStateError(409,'Scenario currently owns these settings');
@@ -52,7 +53,9 @@ export function createOperatorState(options:OperatorStateOptions){
   }
   if(actual.scenario?.ownsLayout&&['display.layout','display.shuffle','display.reset'].includes(input.action))throw new OperatorStateError(409,'Scenario currently owns the layout');
   if(input.action==='display.layout')display({layout:input.data.sources,visible:state.display.visible});
-  while(state.receipts.length>=limit){const index=state.receipts.findIndex(r=>r.status!=='pending');if(index<0)throw new OperatorStateError(409,'Unconfirmed commands must be resolved first',true);state.receipts.splice(index,1);}
+  // 2026-10-21: a full journal of pending receipts used to refuse every later command forever (persisted across restarts;
+  // MAIN was dead from 03:09 under rapid play/stop). Drop the oldest settled receipt, else the oldest pending one.
+  while(state.receipts.length>=limit){let index=state.receipts.findIndex(r=>r.status!=='pending');if(index<0)index=0;state.receipts.splice(index,1);}
   if(delegated.has(input.action)&&!options.delegate)throw new OperatorStateError(503,'Operator runtime unavailable');
   const receipt:Receipt={id:input.requestId,signature,status:'pending'};state.receipts.push(receipt);await save();
   if(local.has(input.action)){await applyLocal(input,receipt);return{done:true as const,message:receipt.message!};}
@@ -78,7 +81,9 @@ export function createOperatorState(options:OperatorStateOptions){
  async function run(input:OperatorAction,origin?:'scenario'){const prepared=await queue(()=>reserve(input,origin));if(prepared.done)return result(prepared.message);
    if(delegated.has(input.action)){
     try{if(!options.delegate)throw new OperatorStateError(503,'Operator runtime unavailable');const response=await options.delegate(input.action,clone(input.data),prepared.context);await queue(async()=>{if(input.action==='generation.resume')state.submissionHold=false;if(input.action==='generation.pause')state.submissionHold=true;if(response&&typeof response.submissionHold==='boolean')state.submissionHold=response.submissionHold;await finish(prepared.receipt,(response?response.message:undefined)??'Command accepted');});return result(prepared.receipt.message!);}
-    catch(error){const e=error as any,status=e.statusCode??e.status,known=Number.isInteger(status)&&status>=400&&status<500&&!e.indeterminate;await queue(async()=>{if(known){prepared.receipt.status='failed';prepared.receipt.errorStatus=status;prepared.receipt.message=e.message;}await save();});if(known)throw error;throw new OperatorStateError(504,'Command outcome is unconfirmed; refresh state before continuing',true);}
+    catch(error){const e=error as any,status=e.statusCode??e.status,known=Number.isInteger(status)&&status>=400&&status<500&&!e.indeterminate;await queue(async()=>{if(known){prepared.receipt.status='failed';prepared.receipt.errorStatus=status;prepared.receipt.message=e.message;}
+      // An unexpected failure is settled as 'failed' (504) instead of staying pending forever; a retry with the same requestId gets the same 504.
+      else{prepared.receipt.status='failed';prepared.receipt.errorStatus=504;prepared.receipt.message='Command outcome is unconfirmed; refresh state before continuing';}await save();});if(known)throw error;throw new OperatorStateError(504,'Command outcome is unconfirmed; refresh state before continuing',true);}
    }
    return result(prepared.receipt.message!);
  }

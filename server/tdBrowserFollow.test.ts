@@ -32,7 +32,7 @@ test('complete batch atomically updates all four screens, retaining source and t
 test('failed, running, and incomplete newest captures never mix their images with previous batch',()=>{
  for(const values of [{result:'failed',errorMessage:'fetch failed'},{result:'running'},{browserBatch:row('two').browserBatch!.slice(0,3)}] as Partial<CaptureEvent>[]){
   const a=row(),b=row('two',{startedAt:'2026-10-18T00:02:00Z',...values});
-  for(const id of ['td-now','td-a','td-b','td-c']){const v=tdBrowserSnapshot(id,[a,b],3000)!;assert.equal(v.content?.captureId,a.captureId);assert.equal(v.displayStatus?.requestedCaptureId,b.captureId);assert.match(v.displayStatus?.userMessage??'',/前回/);}
+  for(const id of ['td-now','td-a','td-b','td-c']){const v=tdBrowserSnapshot(id,[a,b],3000)!;assert.equal(v.content?.captureId,a.captureId);assert.equal(v.displayStatus?.requestedCaptureId,b.captureId);assert.match(v.displayStatus?.userMessage??'',/previous image|Generating/);}
  }
 });
 test('other run, scene, source, and comparison captures cannot enter TD stream',()=>{
@@ -63,7 +63,7 @@ test('new valid run is selected without manual settings only after its complete 
  const old=row(),next=inRun(row('new',{startedAt:'2026-10-18T00:02:00Z'}),otherRun);
  for(const id of ['td-now','td-a','td-b','td-c']){
   const before=tdBrowserSnapshot(id,[old,{...next,result:'running'}],3000)!;
-  assert.equal(before.content?.captureId,old.captureId);assert.equal(before.clock.scope,old.browserFollow!.scope);assert.match(before.displayStatus?.userMessage??'',/前セッション/);
+  assert.equal(before.content?.captureId,old.captureId);assert.equal(before.clock.scope,old.browserFollow!.scope);assert.match(before.displayStatus?.userMessage??'',/previous session|Generating/);
   const after=tdBrowserSnapshot(id,[old,next],4000)!;
   assert.equal(after.content?.captureId,next.captureId);assert.equal(after.clock.scope,next.browserFollow!.scope);assert.equal(after.displayStatus?.userMessage,null);
  }
@@ -75,7 +75,7 @@ test('new run failure/incomplete batch separates requested and completed run and
  for(const values of [{result:'failed'},{result:'cancelled'},{result:'completed',browserBatch:[]}] as Partial<CaptureEvent>[]){
   const next=inRun(row('new',{startedAt:'2026-10-18T00:02:00Z',...values}),otherRun);
   const selection=selectTdBrowserRuns([old,next]);assert.equal(selection.requestRun,otherRun);assert.equal(selection.selectedCompletedRun,TD_BROWSER_RUN);
-  for(const id of ['td-now','td-a','td-b','td-c']){const v=tdBrowserSnapshot(id,[old,next],3000)!;assert.equal(v.content?.captureId,old.captureId);assert.equal(v.clock.scope,old.browserFollow!.scope);assert.match(v.displayStatus?.userMessage??'',/前セッション/);assert.equal(v.displayStatus?.state,'failed');}
+  for(const id of ['td-now','td-a','td-b','td-c']){const v=tdBrowserSnapshot(id,[old,next],3000)!;assert.equal(v.content?.captureId,old.captureId);assert.equal(v.clock.scope,old.browserFollow!.scope);assert.match(v.displayStatus?.userMessage??'',/previous session|Generating/);assert.equal(v.displayStatus?.state,'failed');}
  }
 });
 test('an old run completing late cannot roll back a newer completed request',()=>{
@@ -159,9 +159,9 @@ test('missing or mismatched instruction never falls back to an image description
  const capture=row();capture.browserBatch![1].caption='人物が物を持っている。';
  for(const override of [{captureId:'test-other'},{sceneKey:'gen_b'},{imageUrl:'/captures/stale.png'},{plannedDescription:''},{plannedDescription:'   '}]){
   const v=tdBrowserSnapshot('td-a',[capture],3000,{instructionLookup:identity=>({...identity,plannedDescription:'別の指示',...override})})!;
-  assert.equal(v.content?.caption,'生成指示を確認できません。');
+  assert.equal(v.content?.caption,'Generation instruction unavailable.');
  }
- for(const options of [{},{instructionLookup:()=>undefined},{instructionLookup:()=>{throw new Error('missing archive');}}])assert.equal(tdBrowserSnapshot('td-a',[capture],3000,options)?.content?.caption,'生成指示を確認できません。');
+ for(const options of [{},{instructionLookup:()=>undefined},{instructionLookup:()=>{throw new Error('missing archive');}}])assert.equal(tdBrowserSnapshot('td-a',[capture],3000,options)?.content?.caption,'Generation instruction unavailable.');
 });
 test('a new failed request looks up the actually selected old image, not the latest request instruction',()=>{
  const old=row('old');const failed=row('new',{startedAt:'2026-10-18T00:02:00Z',result:'failed'});
@@ -212,7 +212,7 @@ test('each retains saved successes after later scene failure and keeps the faile
  for(const result of ['failed','cancelled','completed'] as const){
   const failed=partialRow(next,['now','gen_a'],result);
   for(const id of ['td-now','td-a']){const v=tdBrowserSnapshot(id,[old,failed],3000,{updateMode:'each'})!;assert.equal(v.content?.captureId,next.captureId);assert.equal(v.displayStatus?.state,'completed');}
-  for(const id of ['td-b','td-c']){const v=tdBrowserSnapshot(id,[old,failed],3000,{updateMode:'each'})!;assert.equal(v.content?.captureId,old.captureId);assert.equal(v.clock.scope,old.browserFollow!.scope);assert.equal(v.displayStatus?.state,'failed');assert.match(v.displayStatus?.userMessage??'',/前セッション/);}
+  for(const id of ['td-b','td-c']){const v=tdBrowserSnapshot(id,[old,failed],3000,{updateMode:'each'})!;assert.equal(v.content?.captureId,old.captureId);assert.equal(v.clock.scope,old.browserFollow!.scope);assert.equal(v.displayStatus?.state,'failed');assert.match(v.displayStatus?.userMessage??'',/previous session|Generating/);}
  }
 });
 test('each does not roll back a saved newer scene when an older capture completes late',()=>{

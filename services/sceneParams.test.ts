@@ -92,7 +92,7 @@ test('tone sentence: four distinct bands (0 / 0.3 / 0.6 / 1.0), high one overrid
   assert.match(calm, /Almost nothing happens/);
   assert.match(quiet, /TONE LOW = QUIET/);
   assert.match(lively, /TONE MEDIUM = LIVELY/);
-  assert.match(dramatic, /TONE HIGH = DRAMATIC/);
+  assert.match(dramatic, /TONE HIGH = BIG EVERYDAY MOVEMENT/);
   // band edges
   assert.equal(buildToneSentence(0.14), calm);
   assert.equal(buildToneSentence(0.15), quiet);
@@ -147,7 +147,7 @@ test('scenario prompt carries the distance everywhere and no leftover 30 seconds
   assert.match(p, /exactly about 2 minutes BEFORE/);
   assert.match(p, /2分後/);
   assert.match(p, /leave the frame through an edge or doorway/);
-  assert.match(p, /TONE HIGH = DRAMATIC/);
+  assert.match(p, /TONE HIGH = BIG EVERYDAY MOVEMENT/);
   // the always-on rules stay, whatever the controls say
   assert.match(p, /exactly two arms and two hands/);
   assert.match(p, /Never duplicate any person or object/);
@@ -333,7 +333,7 @@ test('scenario prompt, default [+30,+30,-30]: same scenario instructions as the 
 });
 
 test('scenario prompt keeps the Tone rework intact (4 bands, high overrides, visible-only rule, tone-aware movement rule)', () => {
-  const names = ['TONE 0 = CALM', 'TONE LOW = QUIET', 'TONE MEDIUM = LIVELY', 'TONE HIGH = DRAMATIC'];
+  const names = ['TONE 0 = CALM', 'TONE LOW = QUIET', 'TONE MEDIUM = LIVELY', 'TONE HIGH = BIG EVERYDAY MOVEMENT'];
   [0, 0.3, 0.6, 1].forEach((tone, i) => {
     const p = scenarioPrompt([-30, -120, -600], { tone });
     assert.match(p, /Use only what is visible inside this frame/);
@@ -491,7 +491,7 @@ test('planner prompt: per-scene presence/tone become one sentence per band, nami
   assert.match(p, /For Scenario 2: People: nobody new appears\. People who are visible may move a lot/);
   assert.match(p, /For Scenario 1: Tone \(applies ONLY to Scenario 1; the other scenarios follow their own Tone sentence/);
   assert.match(p, /For Scenario 2: Tone \(applies ONLY to Scenario 2;[^\n]*TONE LOW = QUIET/);
-  assert.match(p, /For Scenario 3: Tone \(applies ONLY to Scenario 3;[^\n]*DRAMATIC/);
+  assert.match(p, /For Scenario 3: Tone \(applies ONLY to Scenario 3;[^\n]*BIG EVERYDAY/);
   assert.doesNotMatch(p, /applies to ALL scenarios/);
 });
 

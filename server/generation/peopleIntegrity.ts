@@ -68,7 +68,7 @@ export function rejectionDefect(verdict: PeopleIntegrity): string {
  * the person drawn from behind covered the blue backpack on the chair; one output was shifted/tilted). Built from
  * verdict.defect and the notes in verdict.reason (withBelongings/withFraming/withHandCount append theirs to it).
  */
-export function targetedCorrection(verdict: PeopleIntegrity, opts: { expectedPeople?: number } = {}): string {
+export function targetedCorrection(verdict: PeopleIntegrity, opts: { expectedPeople?: number; plannedAction?: string } = {}): string {
   const reason = verdict.reason || '';
   const has = (d: string) => verdict.defect === d || reason.includes(d + ':');
   const parts: string[] = [];
@@ -78,6 +78,10 @@ export function targetedCorrection(verdict: PeopleIntegrity, opts: { expectedPeo
     parts.push(`${named} must remain fully visible exactly where ${items.length === 1 ? 'it is' : 'they are'} in the input` + (opts.expectedPeople === 0 ? '; do not move, cover or remove ' + (items.length === 1 ? 'it.' : 'them.') : `; the person stands beside ${items.length === 1 ? 'it' : 'them'}, not in front of ${items.length === 1 ? 'it' : 'them'}.`));
   }
   if (has('framing_drift')) parts.push('Keep the exact framing, scale and rotation of the input; do not zoom, shift or tilt the camera.');
+  if (has('incoherent_body')) parts.push('Draw each person as ONE coherent body: the face on the front of the head, the arms attached at the shoulders and bending naturally for the torso; never a face on the back of the head and never an arm coming out of the back.');
+  if (has('duplicate_object')) parts.push('Every object appears exactly once: the object that is moved is no longer at its old place (that spot is empty); never draw the same bottle, mug or notebook twice.');
+  if (has('face_on_back_view')) parts.push('The person is seen from behind: keep the back of the head toward the camera. No face, eyes, nose or mouth may appear anywhere on this person.');
+  if (has('action_not_shown') && opts.plannedAction) parts.push('The requested action must be clearly visible in the pose: ' + opts.plannedAction.trim().slice(0, 300));
   if (has('extra_hand')) parts.push('Each person has exactly two hands and two arms; no extra hand, arm or finger anywhere.');
   const identity = !verdict.defect || /Expected \d+ people|Person count, identity or uniqueness mismatch|Single-person inventory/.test(reason);
   if (identity) parts.push(opts.expectedPeople === 0 ? 'No person may appear anywhere in the image.' : IDENTITY_CORRECTION);
@@ -85,7 +89,7 @@ export function targetedCorrection(verdict: PeopleIntegrity, opts: { expectedPeo
 }
 
 export type UniquePeopleResult =
-  | { image: string; verdict: PeopleIntegrity; attempts: number; skipped?: undefined }
+  | { image: string; verdict: PeopleIntegrity; attempts: number; skipped?: undefined; actionMismatch?: true }
   | { skipped: true; defect: string; verdict: PeopleIntegrity; attempts: number; image?: undefined };
 
 /**
@@ -98,16 +102,19 @@ export async function generateUniquePeople(args: {
   inspect: (image: string) => Promise<PeopleIntegrity>;
   rejected: (image: string, verdict: PeopleIntegrity, attempt: number) => void;
   maxAttempts?:1|2;
+  /** The planned action (prediction_prompt): asked of the inspection; passed to the correction of the retry. */
+  plannedAction?: string;
   expectedPeople?: number;
   onExhausted?: 'throw' | 'skip';
   signal?: AbortSignal;
 }): Promise<UniquePeopleResult> {
-  const limit=args.maxAttempts??2;
-  let last: PeopleIntegrity | undefined;
+  let limit=args.maxAttempts??2;
+  let last: PeopleIntegrity | undefined, lastImage = '';
   for (let attempt = 0; attempt < limit; attempt++) {
     args.signal?.throwIfAborted();
-    const correction = attempt && last ? targetedCorrection(last, { expectedPeople: args.expectedPeople }) : '';
+    const correction = attempt && last ? targetedCorrection(last, { expectedPeople: args.expectedPeople, plannedAction: args.plannedAction }) : '';
     const image = await args.generate(attempt, correction);
+    lastImage = image;
     let verdict: PeopleIntegrity;
     try { verdict = await args.inspect(image); }
     catch (error) {
@@ -118,6 +125,13 @@ export async function generateUniquePeople(args: {
     if (verdict.ok === true) return { image, verdict, attempts: attempt + 1 };
     args.rejected(image, verdict, attempt + 1);
     last = verdict;
+    // 2026-10-21: a body that does not hang together, or a planned action that is not visible, gets ONE rebuild even where the
+    // engine normally runs a single attempt (turbo).
+    if (attempt + 1 >= limit && limit < 2 && (verdict.defect === 'incoherent_body' || verdict.defect === 'action_not_shown' || verdict.defect === 'face_on_back_view' || verdict.defect === 'duplicate_object')) limit = 2;
+  }
+  // The only rejection that still publishes: the action was not drawn after the rebuild. The caller replaces the subtitle by what is visible.
+  if (args.onExhausted === 'skip' && last?.ok === false && last.defect === 'action_not_shown' && lastImage) {
+    return { image: lastImage, verdict: { ...last, ok: true }, attempts: limit, actionMismatch: true };
   }
   if (args.onExhausted === 'skip' && last?.ok === false) return { skipped: true, defect: rejectionDefect(last), verdict: last, attempts: limit };
   // 2026-10-20: an inspection that cannot decide (ok:null) skips the scene too; the capture keeps the previous image instead of failing.

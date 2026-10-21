@@ -107,6 +107,7 @@ test('save + reset: frame is stored under the date and reset moves it into _arch
 test('prompt: the same-person sentence appears only with reference frames', () => {
   const a = composeEditInstruction({ predictionPrompt: 'A person types.', presence: 0.7, referenceFrames: true });
   const b = composeEditInstruction({ predictionPrompt: 'A person types.', presence: 0.7 });
-  assert.ok(a.includes(REFERENCE_FRAMES_SENTENCE));
-  assert.ok(!b.includes('image2/image3'));
+  void REFERENCE_FRAMES_SENTENCE;
+  assert.match(a, /image2 shows the same people at another moment, only for their face and hair/);
+  assert.ok(!/image2|image3/.test(b));
 });

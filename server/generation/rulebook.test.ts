@@ -63,16 +63,12 @@ test('v1 negative prompt and quality suffix are the old constants', () => {
   assert.match(buildQualitySuffix(false, true, true), /Do not zoom, shift or re-compose the view\.$/);
 });
 
-test('occupied template carries the rulebook sentences (physics, hair, disembodied parts) in the old order', () => {
+test('occupied template (2026-10-21 rebuild) no longer stacks the rulebook rule paragraphs', () => {
   withDir((dir) => {
     ensureRulebookFiles(dir);
     const text = composeEditInstruction({ predictionPrompt: 'A person turns their head.', presence: 0.8, distanceSec: 30 });
-    const i = (s: string) => text.indexOf(s);
-    assert.ok(i('Near-camera foreground objects') > 0);
-    assert.ok(i('Objects rest on surfaces') > i('Near-camera foreground objects'));
-    assert.ok(i("Keep each person's hairstyle") > i('Objects rest on surfaces'));
-    assert.ok(i('Do not add disembodied body parts') > i("Keep each person's hairstyle"));
-    assert.ok(i('Sharp, crisp, high-detail photo') > i('Do not add disembodied body parts'));
+    for (const s of ['Near-camera foreground objects', 'Objects rest on surfaces', "Keep each person's hairstyle", 'Do not add disembodied body parts', 'Sharp, crisp, high-detail photo']) assert.ok(!text.includes(s), s);
+    assert.ok(text.length < 1200, String(text.length));
   });
 });
 
@@ -93,7 +89,7 @@ test('a new version is used on the next call without a restart; rollback switche
     const empty = composeEditInstruction({ predictionPrompt: 'The light dims.', presence: 0 });
     assert.ok(empty.includes('nothing hangs on a chair back or floats in the air; gravity and support stay realistic. Every object has visible support.'));
     const occupied = composeEditInstruction({ predictionPrompt: 'A person sits.', presence: 0.8, distanceSec: 30 });
-    assert.ok(occupied.includes('Every object has visible support.'));
+    assert.ok(!occupied.includes('Every object has visible support.'), 'occupied scenes use the coherent editPrompt composer');
     assert.match(withVlmExtras('x\nReturn ONLY a JSON object of the form {}'), /x\nName only visible objects\.\nReturn ONLY a JSON object/);
     setActive(1, { by: 'test' }, dir);
     assert.equal(getRulebook().version, 1);
@@ -161,7 +157,7 @@ test('G-14 / G-15 sentences appear in the occupied template only when the active
     writeRulebook(v2, dir);
     setActive(2, {}, dir);
     const t = composeEditInstruction({ predictionPrompt: 'A person sits.', presence: 0.8, distanceSec: 30 });
-    assert.ok(t.includes("hair colour exactly as in the input (and the reference image).\n\nItems a person holds stay.\n\nNo new face.\n\nDo not add disembodied"));
+    assert.ok(!t.includes('Items a person holds stay.') && !t.includes('No new face.'), 'occupied scenes use the coherent editPrompt composer');
     assert.ok(!composeEditInstruction({ predictionPrompt: 'The light dims.', presence: 0 }).includes('No new face.'));
   });
 });
@@ -177,7 +173,7 @@ test('G-16 / obstructed supplement: sentences in both templates, obstruction onl
     v2.negative.noNewText = 'clock, digits, text on screen';
     writeRulebook(v2, dir);
     setActive(2, {}, dir);
-    for (const presence of [0, 0.8]) {
+    for (const presence of [0]) {
       const t = composeEditInstruction({ predictionPrompt: 'The light dims.', presence, distanceSec: 30 });
       assert.ok(t.includes('No new text.'), `presence ${presence}`);
       assert.ok(!t.includes('Keep the obstruction.'));
@@ -240,7 +236,7 @@ test('G-17: no-light-artifact sentence in both templates, empty-room light sente
     const empty = composeEditInstruction({ predictionPrompt: 'The light dims.', presence: 0, distanceSec: 30 });
     assert.ok(empty.includes('No lens flare.\n\nOnly brightness and colour temperature change.'));
     const occupied = composeEditInstruction({ predictionPrompt: 'A person sits.', presence: 0.8, distanceSec: 30 });
-    assert.ok(occupied.includes('No lens flare.') && !occupied.includes('Only brightness and colour temperature change.'));
+    assert.ok(!occupied.includes('Only brightness and colour temperature change.'));
   });
   for (const s of synthesizeEmptyRoom({ distances: [30, 30, 300], count: 3 })) assert.doesNotMatch(s.prediction_prompt, /glow|brighter on one side|deeper shadow/);
 });

@@ -14,7 +14,7 @@ test('delegate executes once across retries/restart; resume/pause only change pe
  const f=await fixture();try{let calls=0;const delegate=async()=>{calls++;return{message:'Accepted'};};const state=createOperatorState({file:f.file,initial:initial(),delegate});const request={action:'generation.resume',data:{},requestId:'resume-once'};assert.equal((await state.action(request)).state.submissionHold,false);await state.action(request);assert.equal(calls,1);const reopened=createOperatorState({file:f.file,initial:initial(),delegate});await reopened.action(request);assert.equal(calls,1);await reopened.action({action:'generation.pause',data:{},requestId:'pause'});assert.equal((await reopened.snapshot()).submissionHold,true);assert.equal(calls,2);await assert.rejects(reopened.action({...request,action:'generation.generate'}),(e:any)=>e.status===409);}finally{await fs.rm(f.dir,{recursive:true,force:true});}
 });
 test('timeout receipt prevents re-execution, and no error exposes delegate private details',async()=>{
- const f=await fixture();try{let calls=0;const state=createOperatorState({file:f.file,initial:initial(),delegate:async()=>{calls++;throw Error('private-token-path');}});const request={action:'generation.generate',data:{},requestId:'unknown'};await assert.rejects(state.action(request),(e:any)=>e.status===504&&e.indeterminate&&!e.message.includes('private-token'));await assert.rejects(state.action(request),(e:any)=>e.status===409&&e.indeterminate);assert.equal(calls,1);}finally{await fs.rm(f.dir,{recursive:true,force:true});}
+ const f=await fixture();try{let calls=0;const state=createOperatorState({file:f.file,initial:initial(),delegate:async()=>{calls++;throw Error('private-token-path');}});const request={action:'generation.generate',data:{},requestId:'unknown'};await assert.rejects(state.action(request),(e:any)=>e.status===504&&e.indeterminate&&!e.message.includes('private-token'));await assert.rejects(state.action(request),(e:any)=>e.status===504&&e.indeterminate);assert.equal(calls,1);}finally{await fs.rm(f.dir,{recursive:true,force:true});}
 });
 test('oneShot compare-and-clear never clears later edits, and may run inside delegated acceptance without deadlock',async()=>{
  const f=await fixture();try{let state:ReturnType<typeof createOperatorState>;state=createOperatorState({file:f.file,initial:initial(),delegate:async(_action,_data,context)=>{await state.consumeOneShot({scenes:{a:context.settings.scenes.a.oneShot},oneShotTokens:context.oneShotTokens});}});const captured=await state.readSettingsSnapshot();let s=await state.snapshot();await state.action({action:'settings.apply',data:{scenes:{a:{oneShot:'New explicit one-shot'}}},requestId:'edit',baseRevision:s.settingsRevision});assert.equal(await state.consumeOneShot({scenes:{a:captured.settings.scenes.a.oneShot},oneShotTokens:captured.oneShotTokens}),false);assert.equal((await state.readSettings()).scenes.a.oneShot,'New explicit one-shot');await state.action({action:'generation.generate',data:{},requestId:'accept'});assert.equal((await state.readSettings()).scenes.a.oneShot,'');}finally{await fs.rm(f.dir,{recursive:true,force:true});}
@@ -70,5 +70,12 @@ test('per-scene presence/tone: optional 0..1 overrides via settings.apply, null 
  const cleared=await state.action({action:'settings.apply',data:{scenes:{b:{presence:null}}},requestId:'scene-clear',baseRevision:ok.state.settingsRevision});
  assert.equal('presence' in cleared.state.settings.scenes.b,false);assert.equal(cleared.state.settings.scenes.c.tone,.1);
  const reopened=createOperatorState({file:f.file,initial:initial()});assert.equal((await reopened.readSettings()).scenes.c.tone,.1);
+ }finally{await fs.rm(f.dir,{recursive:true,force:true});}
+});
+
+test('2026-10-21: unexpected delegate failures never leave the journal blocked; later commands still run',async()=>{
+ const f=await fixture();try{let fail=true;const state=createOperatorState({file:f.file,initial:initial(),delegate:async()=>{if(fail)throw Error('boom');}});
+  for(let i=0;i<300;i++)await assert.rejects(state.action({action:'generation.pause',data:{},requestId:'x'+i}),(e:any)=>e.status===504);
+  fail=false;await state.action({action:'generation.resume',data:{},requestId:'after'});
  }finally{await fs.rm(f.dir,{recursive:true,force:true});}
 });

@@ -10,6 +10,8 @@ export interface BrowserDisplayContent {
  distanceSecSigned?:number|null;
  targetAtMs:number|null;recordedAtMs:number|null;generatedAtMs:number|null;sourceRecordedAtMs:number|null;caption:string;
  captureId?:string|null;sceneKey?:string|null;
+ /** Tone / Presence the scene was generated with (0..1), shown in the output label. */
+ tone?:number;presence?:number;
  faceRegions?:Array<{x:number;y:number;width:number;height:number}>;
  faceRegionStatus?:'detected'|'no-faces'|'unavailable'|'error';
 }
@@ -78,9 +80,10 @@ export function validateBrowserDisplayContents(raw:unknown):BrowserDisplayConten
   for(const k of ['captureId','sceneKey'])if(c[k]!==undefined&&c[k]!==null&&!text(c[k]))throw Error('Invalid content lineage');
   const distanceSecSigned=c.distanceSecSigned??null;
   if(distanceSecSigned!==null&&(typeof distanceSecSigned!=='number'||!Number.isFinite(distanceSecSigned)||c.provenance!=='generated'))throw Error('Invalid explicit scene distance');
+  const unit=(v:unknown)=>typeof v==='number'&&Number.isFinite(v)&&v>=0&&v<=1?v:undefined;
   ids.add(c.id);
   // Whitelist fields: private paths/extra archive metadata never reach clients.
-  return {id:c.id,scope:c.scope,provenance:c.provenance,imageUrl:c.imageUrl,...(c.thumbnailUrl!==undefined?{thumbnailUrl:c.thumbnailUrl}:{}),distanceSecSigned,targetAtMs:c.targetAtMs,recordedAtMs:c.recordedAtMs,generatedAtMs:c.generatedAtMs,sourceRecordedAtMs:c.sourceRecordedAtMs,caption:c.caption,...(c.captureId!==undefined?{captureId:c.captureId}:{}),...(c.sceneKey!==undefined?{sceneKey:c.sceneKey}:{})};
+  return {id:c.id,scope:c.scope,provenance:c.provenance,imageUrl:c.imageUrl,...(c.thumbnailUrl!==undefined?{thumbnailUrl:c.thumbnailUrl}:{}),distanceSecSigned,targetAtMs:c.targetAtMs,recordedAtMs:c.recordedAtMs,generatedAtMs:c.generatedAtMs,sourceRecordedAtMs:c.sourceRecordedAtMs,caption:c.caption,...(c.provenance==='generated'&&unit(c.tone)!==undefined?{tone:unit(c.tone)}:{}),...(c.provenance==='generated'&&unit(c.presence)!==undefined?{presence:unit(c.presence)}:{}),...(c.captureId!==undefined?{captureId:c.captureId}:{}),...(c.sceneKey!==undefined?{sceneKey:c.sceneKey}:{})};
  });
 }
 export function validateBrowserDisplayStatus(raw:unknown):BrowserDisplayStatus {
